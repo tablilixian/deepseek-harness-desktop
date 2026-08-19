@@ -1,5 +1,10 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
-/** Services required before the studio frame can mount. */
+/**
+ * Services required before the studio frame can mount.
+ *
+ * 注意：`tools` 是 Host 专属服务，客户端没有该服务。媒体生成工具已在 Host
+ * 侧（`src/host-tools.ts`）注册，客户端只负责 UI 与项目/工作区绑定。
+ */
 export declare const inject: string[];
 /**
  * Client plugin body: provide the standard ctx.layout contract (owned by the

@@ -8,5 +8,5 @@ import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "canvas-studio";
 /** Services required by the host plugin. */
 export declare const inject: string[];
-/** Host plugin body: the project registry and its routes. */
+/** Host plugin body: the project registry, its routes, and the media tools. */
 export declare function apply(ctx: Context): void;

@@ -295,3 +295,14 @@ P3「工具 + 产物托管」代码落地,构建与类型检查通过（`canvas-
 - `video_composite` 当前仅首尾帧插值,九宫格 / 多关键帧(MKR grid)、音频合成等后续增强。
 - 工具未显式声明 `timeoutMs`(`exec.signal` 已转发到 fetch,同步 API 下取消为本地中断)。
 - 产物尺寸固定按宽高比映射,未接 WL 的 `sizeConfig` 全量。
+
+### 架构修正（2026-08-19 桌面闪退修复）
+**根因**:P3 初版把三个 `defineTool` 工具的注册放在了 **client 半边**(`src/client/index.ts` 声明 `inject: ['slots','workspaces','tools']` 并在 `apply` 内 `ctx.tools.register`)。但 `ctx.tools` 是 **Host 专属服务**,浏览器客户端上下文根本没有 `tools` 服务 —— 客户端 `apply` 一旦执行到 `ctx.tools.register` 即抛错。而渲染进程引导模型规定:**任一插件 bundle 的 `apply` 抛错会导致整个渲染进程 abort**,于是 dsh-base / dsh-web-app / canvas-studio 三个 bundle 全部被判为「启动失败」,主进程抛出 `RendererStartupFailure`(`Renderer boot failed for 3 plugin(s)`),应用**启动即退出、无窗口**。
+
+**修复(已重建 `lib/` 并通过 `build`/`typecheck`)**:
+- 工具定义从 client 移到 **Host**:新增 `src/host-tools.ts`(`createStudioTools(registry, port)` 返回三个 `defineTool`),`src/index.ts`(Host)`inject` 改为 `['webServer','tools']`,在 `ctx.effect` 内通过 `ctx.tools.register` 注册 —— 这是上游 `tool-bash` 等宿主工具的标准写法。
+- 删除 `src/client/tools.ts`;`src/client/index.ts` `inject` 改回 `['slots','workspaces']`,移除 `activeProjectId` 跟踪与 `ctx.tools.register` 调用。客户端只负责 UI 与「项目↔workspace」绑定。
+- `src/client/api.ts` 删除已死代码 `generateAsset` / `GenerateResult`(Host 现在直接调 `generate.ts` 的 `generateAsset`,不再走 HTTP 往返)。`/canvas-studio/generate` 路由暂保留(Host 内部仍可用)。
+- **项目解析改为 Host 侧**:不再依赖客户端 `activeProjectId` 闭包,改由 `resolveProjectId(registry, exec.agent?.session.header.cwd)` 按会话工作区目录匹配 `project.dir`(精确匹配优先,否则最长前缀匹配)。因为客户端打开项目时 `ctx.workspaces.create({ path: project.dir })`,会话 `header.cwd` 即落在项目目录下,Host 据此反查项目 id。
+
+**验证**:重建后 `lib/client.js` 不再含 `require("@deepseek-ai/dsh-tools")` / `ctx.tools.register`(仅剩 `ctx.slots.register`);`lib/host-tools.js` 正确 `import { defineTool } from '@deepseek-ai/dsh-tools'` 并定义三工具;桌面 profile 的 `node_modules/canvas-studio` 是指向本工作区的 **symlink**,故重建 `lib/` 后下次启动即生效,无需重新打包 app。

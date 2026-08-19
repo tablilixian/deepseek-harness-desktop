@@ -13,15 +13,3 @@ export declare class StudioApiError extends Error {
 export declare function listStudioProjects(signal?: AbortSignal): Promise<readonly StudioProject[]>;
 /** Create a project and return its record. */
 export declare function createStudioProject(name: string, signal?: AbortSignal): Promise<StudioProject>;
-/** A generated media asset returned by the Host. */
-export interface GenerateResult {
-    url: string;
-    width: number;
-    height: number;
-    duration?: number;
-}
-/**
- * Ask the Host to generate a media asset for a project and return its
- * webServer-hosted URL. The Host owns the external API call and disk write.
- */
-export declare function generateAsset(projectId: string, tool: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<GenerateResult>;

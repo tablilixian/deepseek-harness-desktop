@@ -7,7 +7,6 @@ window.__ModuleLoader__.load({
 		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
 		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
-		let _deepseek_ai_dsh_tools = require("@deepseek-ai/dsh-tools");
 		//#region src/client/api.ts
 		/** HTTP facts used to localize safe Client-facing Studio failures. */
 		var StudioApiError = class extends Error {
@@ -40,22 +39,6 @@ window.__ModuleLoader__.load({
 				body: JSON.stringify({ name }),
 				...signal === void 0 ? {} : { signal }
 			}))).project;
-		}
-		/**
-		* Ask the Host to generate a media asset for a project and return its
-		* webServer-hosted URL. The Host owns the external API call and disk write.
-		*/
-		async function generateAsset(projectId, tool, params, signal) {
-			return await readJson(await fetch("/canvas-studio/generate", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					tool,
-					projectId,
-					params
-				}),
-				...signal === void 0 ? {} : { signal }
-			}));
 		}
 		//#endregion
 		//#region src/client/layout-controller.ts
@@ -523,185 +506,14 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region src/client/tools.ts
-		/** 产物结果 schema（工具返回给模型的结构）。 */
-		const resultSchema = {
-			type: "object",
-			additionalProperties: false,
-			properties: {
-				url: {
-					type: "string",
-					description: "产物托管 URL，可在画布中直接引用"
-				},
-				width: {
-					type: "integer",
-					description: "宽度（像素）"
-				},
-				height: {
-					type: "integer",
-					description: "高度（像素）"
-				},
-				duration: {
-					type: "number",
-					description: "视频时长（秒）；图片无此项"
-				}
-			}
-		};
-		/** 把产物结果渲染成模型可读的文本块。 */
-		function renderResult(value) {
-			const result = value;
-			const duration = result.duration !== void 0 ? `, ${result.duration}s` : "";
-			return [{
-				type: "text",
-				text: `已生成产物: ${result.url} (${result.width}x${result.height}${duration})`
-			}];
-		}
-		/**
-		* 创建 P3 媒体生成工具集。
-		* @param context - 提供当前激活项目 id 的读取器。
-		* @returns 三个 `defineTool` 定义，供 `ctx.tools.register` 逐条注册。
-		*/
-		function createStudioTools(context) {
-			const requireProject = () => {
-				const id = context.getActiveProjectId();
-				if (!id) throw new Error("请先在左侧打开或创建一个项目，再调用生成工具");
-				return id;
-			};
-			return [
-				(0, _deepseek_ai_dsh_tools.defineTool)({
-					name: "image_generate",
-					description: "根据提示词生成一张图片。可传入 imageUrl 作为参考图进行图生图。返回图片的托管 URL 与尺寸。",
-					parameters: {
-						prompt: {
-							type: "string",
-							required: true,
-							description: "生成提示词"
-						},
-						aspectRatio: {
-							type: "string",
-							enum: [
-								"16:9",
-								"9:16",
-								"1:1"
-							],
-							description: "宽高比，默认 16:9"
-						},
-						imageUrl: {
-							type: "string",
-							description: "可选参考图 URL（图生图）"
-						},
-						negativePrompt: {
-							type: "string",
-							description: "反向提示词"
-						}
-					},
-					output: {
-						schema: resultSchema,
-						render: renderResult
-					},
-					execute(args) {
-						const a = args;
-						return generateAsset(requireProject(), "image_generate", {
-							prompt: a.prompt,
-							aspectRatio: a.aspectRatio,
-							imageUrl: a.imageUrl,
-							negativePrompt: a.negativePrompt
-						});
-					}
-				}),
-				(0, _deepseek_ai_dsh_tools.defineTool)({
-					name: "video_generate",
-					description: "根据提示词与一张参考图生成视频（图生视频）。imageUrl 通常来自 image_generate 的产物 URL。返回视频的托管 URL、尺寸与时长。",
-					parameters: {
-						prompt: {
-							type: "string",
-							required: true,
-							description: "生成提示词"
-						},
-						imageUrl: {
-							type: "string",
-							required: true,
-							description: "参考图 URL（图生视频的输入帧）"
-						},
-						aspectRatio: {
-							type: "string",
-							enum: [
-								"16:9",
-								"9:16",
-								"1:1"
-							],
-							description: "宽高比，默认 16:9"
-						},
-						duration: {
-							type: "number",
-							description: "视频时长（秒），默认 5"
-						}
-					},
-					output: {
-						schema: resultSchema,
-						render: renderResult
-					},
-					execute(args) {
-						const a = args;
-						return generateAsset(requireProject(), "video_generate", {
-							prompt: a.prompt,
-							imageUrl: a.imageUrl,
-							aspectRatio: a.aspectRatio,
-							duration: a.duration
-						});
-					}
-				}),
-				(0, _deepseek_ai_dsh_tools.defineTool)({
-					name: "video_composite",
-					description: "将多张参考图（imageUrls）合成一段视频，首尾帧插值。返回合成视频的托管 URL、尺寸与时长。",
-					parameters: {
-						prompt: {
-							type: "string",
-							required: true,
-							description: "生成提示词"
-						},
-						imageUrls: {
-							type: "array",
-							description: "参考图 URL 数组（至少 1 张，最多 4 张）"
-						},
-						aspectRatio: {
-							type: "string",
-							enum: [
-								"16:9",
-								"9:16",
-								"1:1"
-							],
-							description: "宽高比，默认 16:9"
-						},
-						duration: {
-							type: "number",
-							description: "视频时长（秒），默认 12"
-						}
-					},
-					output: {
-						schema: resultSchema,
-						render: renderResult
-					},
-					execute(args) {
-						const a = args;
-						return generateAsset(requireProject(), "video_composite", {
-							prompt: a.prompt,
-							imageUrls: a.imageUrls,
-							aspectRatio: a.aspectRatio,
-							duration: a.duration
-						});
-					}
-				})
-			];
-		}
-		//#endregion
 		//#region src/client/index.ts
-		/** Services required before the studio frame can mount. */
-		const inject = [
-			"slots",
-			"workspaces",
-			"tools"
-		];
+		/**
+		* Services required before the studio frame can mount.
+		*
+		* 注意：`tools` 是 Host 专属服务，客户端没有该服务。媒体生成工具已在 Host
+		* 侧（`src/host-tools.ts`）注册，客户端只负责 UI 与项目/工作区绑定。
+		*/
+		const inject = ["slots", "workspaces"];
 		/**
 		* Client plugin body: provide the standard ctx.layout contract (owned by the
 		* disabled ui-layout row) and register the studio frame into the runtime's
@@ -714,19 +526,12 @@ window.__ModuleLoader__.load({
 		* @param ctx - active browser Cordis context.
 		*/
 		function apply(ctx) {
-			let activeProjectId = null;
 			if (new URLSearchParams(window.location.search).get("dsh-desktop-mode") === "advanced") {
 				ctx.logger.warn("canvas-studio: advanced desktop mode keeps the desktop frame; switch the desktop profile to compatibility mode to use the studio layout");
 				return;
 			}
 			const layout = new StudioLayoutController();
 			ctx.effect(() => installStudioStyles(), "canvas-studio: studio styles");
-			ctx.effect(() => {
-				const disposers = createStudioTools({ getActiveProjectId: () => activeProjectId }).map((definition) => ctx.tools.register(definition));
-				return () => {
-					for (const dispose of disposers) dispose();
-				};
-			}, "canvas-studio: media generation tools");
 			ctx.effect(() => {
 				const disposeService = ctx.reflect.provide("layout", layout);
 				const disposeRegistration = ctx.slots.register({
@@ -761,7 +566,6 @@ window.__ModuleLoader__.load({
 						};
 						const openProject = async (project) => {
 							select(project.id);
-							activeProjectId = project.id;
 							try {
 								const workspace = await ctx.workspaces.create({ path: project.dir });
 								await ctx.workspaces.rename(workspace.workspaceId, project.name);

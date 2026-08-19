@@ -11,7 +11,8 @@
 - P2:P1 后新增项目注册表(Host)+ 项目列表 UI(Client)+ 会话绑定(workspace = 项目目录)
 - 开发环境已就绪:root `corepack yarn install` 完成、子模块已初始化 + `upstream:build` 完成
 - P2 headless 验证全过(build/typecheck/check、studio profile web 冒烟);**桌面 GUI 已确认**:左侧项目列表可见、`+ 新建项目` 新建/切换正常、右栏会话标题与项目名已统一(通过 `ctx.workspaces.rename` 同步,详见计划 §13)
-- **P3(工具 + 产物托管)代码完成**:`build` / `typecheck` 通过,**待桌面/CLI 人工验收**(需用户配 Drama Backend 环境变量 + key)。三个工具已注册(`image_generate` / `video_generate` / `video_composite`),调用走 Host 侧生成 + 落盘 + 静态托管闭环,避免浏览器 CORS。详见计划文档 §15。
+- **P3(工具 + 产物托管)代码完成**:`build` / `typecheck` 通过,**待桌面/CLI 人工验收**(需用户配 Drama Backend 环境变量 + key)。三个工具**在 Host 侧注册**(`image_generate` / `video_generate` / `video_composite`),调用走 Host 侧生成 + 落盘 + 静态托管闭环,避免浏览器 CORS。详见计划文档 §15。
+- **[已修复]桌面启动闪退(`RendererStartupFailure`)**:初版把工具 `ctx.tools.register` 错放在 client 半边(`tools` 是 Host 专属服务),导致渲染进程整体 abort、启动即退出。已改为 Host 注册(见上方 ⚠️ 标注与 §5 第 3 条),重建 `lib/` 并通过 `build`/`typecheck`;桌面 profile 经 symlink 指向本工作区,**下次 `corepack yarn dev` 启动即生效**。
 
 ### 已建文件
 
@@ -34,19 +35,19 @@ canvas-studio/
     ├── projects.ts       # Host:ProjectRegistry($DSH_HOME/canvas-studio/projects.json + projects/<id>/assets)
     ├── generate.ts       # [P3] Host 生成核心:uploadImage / callDrama / generateAsset(Host 落盘)
     ├── routes.ts         # Host:GET/POST /canvas-studio/projects + [P3] POST /generate + GET /assets(prefix,loopback+同源)
-    ├── index.ts          # Host:name/inject(['webServer'])/apply(注册表 + 路由)
+    ├── host-tools.ts     # [P3 修正] Host 侧工具:createStudioTools(registry,port) 三个 defineTool + resolveProjectId(cwd 反查项目)
+    ├── index.ts          # Host:name/inject(['webServer','tools'])/apply(注册表 + 路由 + ctx.tools.register 三工具)
     └── client/
-        ├── index.ts      # apply:advanced 跳过 + provide layout + register root(store + inject)
-        │               # [P3] 注册三个 studio 工具(activeProjectId 跟踪)
+        ├── index.ts      # apply:advanced 跳过 + provide layout + register root(store + inject);[P3 修正] 不再注册工具
         ├── layout-controller.ts  # ILayout 实现(P1 全 no-op)
-        ├── api.ts        # listStudioProjects / createStudioProject + [P3] generateAsset()
+        ├── api.ts        # listStudioProjects / createStudioProject(原 client generateAsset 已删,Host 走 generate.ts)
         ├── project-store.ts      # createProjectStore() 工厂(defineStore)
         ├── contracts.ts  # StudioProjectListInjected(注入面类型)
-        ├── tools.ts      # [P3] createStudioTools():3 个 defineTool(image_generate/video_generate/video_composite)
         ├── ProjectList.tsx       # 项目列表 + 新建表单(纯展示组件)
         ├── StudioFrame.tsx       # 三栏框架(左侧接 ProjectList,useStore 读取)
         └── styles.ts     # 注入 <style data-plugin="canvas-studio">
 ```
+> ⚠️ **[P3 修正 · 桌面闪退根因]** 初版把三个工具的 `ctx.tools.register` 放在 **client** 半边,但 `tools` 是 **Host 专属服务**,客户端 `apply` 抛错 → 渲染进程整体 abort → 启动时 `RendererStartupFailure(3 plugins)` 闪退。已改为 **Host 注册**(`src/host-tools.ts` + `src/index.ts` 的 `inject:['webServer','tools']`),删除 `src/client/tools.ts`,client `inject` 还原为 `['slots','workspaces']`。桌面 profile 的 `node_modules/canvas-studio` 是指向本工作区的 symlink,**重建 `lib/` 后下次启动即生效,无需重新打包 app**。详见计划文档 §15「架构修正」。
 
 根级改动:`package.json` workspaces 加 `canvas-studio`(lockfile 已更新)。
 
@@ -55,7 +56,7 @@ canvas-studio/
 - P1 骨架:`4155603dd`(skeleton)+ `30c935c3`(handoff 文档/fork 工作流)
 - P2 项目注册表核心:`8786414361`
 - **P2 收尾 + 深色主题:`a0e74865ed`** —— 包含:可见性修复(`currentColor`/`--dsw-fg` → 官方 `--dsw-alias-*` 语义 token,自动跟随 light/dark)、会话标题同步 `workspaces.rename`、防御性 ErrorBoundary、`docs/plans` 更新。**已推送到 fork**(`origin/canvas-studio` = `a0e74865ed`,fast-forward `30c935c3..a0e74865ed`)。
-- **P3(工具 + 产物托管):代码完成,`build`/`typecheck` 通过,尚未提交**(见 §5)。工作树改动:`canvas-studio/src/{config,generate,routes,client/api,client/index,client/tools}.ts` + `package.json` + 重建 `lib/` + `docs/plans/{canvas-studio.md,canvas-studio-handoff.md}`。注意 `deepseek-harness/` 子模块当前为 dirty(`git status` 显示 `m`),提交 P3 时务必 `--` 排除子模块、只 stage canvas-studio 与 docs。
+- **P3(工具 + 产物托管):代码完成,`build`/`typecheck` 通过,尚未提交**(见 §5)。**叠加 [闪退修复]**:工作树改动 = `canvas-studio/src/{config,generate,routes,host-tools}.ts`(新增 `host-tools.ts`)+ `src/index.ts`(`inject` 加 `tools` + Host 注册工具)+ `src/client/index.ts`(`inject` 还原 `['slots','workspaces']` + 删除工具注册/`activeProjectId`)+ **删除** `src/client/tools.ts` + `src/client/api.ts`(移除死代码 `generateAsset`/`GenerateResult`)+ 重建 `lib/` + `docs/plans/{canvas-studio.md,canvas-studio-handoff.md}`。注意 `deepseek-harness/` 子模块当前为 dirty(`git status` 显示 `m`),提交时务必 `--` 排除子模块、只 stage canvas-studio 与 docs。
 
 ## 7. Git 工作流(fork 双 remote)
 
@@ -145,12 +146,12 @@ cd ~/.dsh/profiles/desktop && corepack pnpm@11.7.0 add /Users/wl/.../canvas-stud
 
 **P3 已实现(代码完成,待验收)** —— 偏离原计划 §5 的地方(均已按用户"先用明文、验收后再整理"的指示处理):
 
-1. **架构决策(关键)**:生成 + 落盘放在 **Host(Node)**,不走浏览器直连 Drama Backend(避免 CORS)。client 工具 `POST /canvas-studio/generate` → Host 调 Drama → 下载媒体 → 写 `assetsDir(projectId)/<uuid>.<png|mp4>` → 返回 loopback URL `http://127.0.0.1:${port}/canvas-studio/assets/<projectId>/<file>`。
+1. **架构决策(关键)**:生成 + 落盘放在 **Host(Node)**,不走浏览器直连 Drama Backend(避免 CORS)。**[P3 修正]** 三个工具在 **Host** 注册(`src/host-tools.ts` 的 `createStudioTools(registry,port)` + `src/index.ts` 的 `inject:['webServer','tools']` + `ctx.tools.register`),`execute` 直接调 Host 的 `generateAsset`(不再经 HTTP 往返);项目解析由 `resolveProjectId(exec.agent?.session.header.cwd)` 按会话工作区匹配 `project.dir`。`POST /canvas-studio/generate` / `GET /canvas-studio/assets` 路由仍保留(Host 内部可用)。→ Host 调 Drama → 下载媒体 → 写 `assetsDir(projectId)/<uuid>.<png|mp4>` → 返回 loopback URL `http://127.0.0.1:${port}/canvas-studio/assets/<projectId>/<file>`。
 2. **凭证配置**:按用户要求**明文**写在 `src/config.ts`(`DRAMA_API_BASE`/`DRAMA_API_KEY` + 环境变量覆盖),未做 Config 面/加密 —— 验收通过后整理。
-3. **工具注册**:`src/client/tools.ts` 用 `defineTool` 注册 `image_generate`(txt2image/image2image)、`video_generate`(image2videomsr 图生视频)、`video_composite`(image2videomkr 首尾帧合成,`frame_index=-1` 取尾帧)。产物经 `output.render` → `TextBlock` 回模型。
-4. **产物静态路由**:Host `routes.ts` 新增 `GET /canvas-studio/assets`(prefix,loopback + 同源检查,`nosniff`/`no-store`,防 `..` 穿越)。`POST /canvas-studio/generate`(exact,同源)串起 `generateAsset`。
-5. **画布渲染前置**:`client/index.ts` 跟踪 `activeProjectId`;工具 `requireProject()` 在无效项目时抛错。P4 画布组件监听 `tool/call → tool/result` 的 store 映射**尚未做**(留给 P4)。
-6. **验证**:`build`/`typecheck` 通过(client bundle ≈234 kB 含 dsh-tools)。**桌面/CLI 人工验收待用户配 `CANVAS_STUDIO_DRAMA_API_BASE` + `CANVAS_STUDIO_DRAMA_API_KEY` 并跑一次工具调用**(见计划 §15 验收步骤)。
+3. **工具注册(已改 Host 侧)**:`src/host-tools.ts` 用 `defineTool` 注册 `image_generate`(txt2image/image2image)、`video_generate`(image2videomsr 图生视频)、`video_composite`(image2videomkr 首尾帧合成,`frame_index=-1` 取尾帧);Host `apply` 内 `ctx.tools.register` 逐条注册。原 `src/client/tools.ts` 已删除,client 不再注册工具(避免 `RendererStartupFailure` 闪退)。产物经 `output.render` → `TextBlock` 回模型。
+4. **产物静态路由**:Host `routes.ts` 新增 `GET /canvas-studio/assets`(prefix,loopback + 同源检查,`nosniff`/`no-store`,防 `..` 穿越)。`POST /canvas-studio/generate`(exact,同源)串起 `generateAsset`(当前工具路径不走这条 HTTP,但路由保留)。
+5. **画布渲染前置**:**[P3 修正]** 项目解析已迁到 Host(`resolveProjectId` 按 cwd 反查 `project.dir`,精确匹配优先、否则最长前缀),client 不再跟踪 `activeProjectId`。P4 画布组件监听 `tool/call → tool/result` 的 store 映射**尚未做**(留给 P4)。
+6. **验证**:`build`/`typecheck` 通过;**[P3 修正]** client bundle ≈19 kB **不含 dsh-tools**(初版 234 kB 含 dsh-tools 正是闪退诱因)。**桌面/CLI 人工验收待用户配 `CANVAS_STUDIO_DRAMA_API_BASE` + `CANVAS_STUDIO_DRAMA_API_KEY` 并跑一次工具调用**(见计划 §15 验收步骤)。
 
 P3 已知简化(验收后整理):明文配置;组合仅首尾帧(非多关键帧/网格);无显式 `timeoutMs`;尺寸固定(9:16/1:1/16:9)。
 
