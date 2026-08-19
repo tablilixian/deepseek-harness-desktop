@@ -1,0 +1,236 @@
+# Canvas Studio 插件开发计划
+
+> DSH Desktop 项目内,基于官方插件体系开发的"画布式 AI 视频创作工作流"插件。本文档是开发契约:机制均有仓库内证据支撑,阶段划分与验证标准如下。
+
+## 1. 目标与产品形态
+
+用户在 DSH Desktop(及普通 `dsh web`)中创建"项目",每个项目对应一张画布;右侧为官方原版聊天区,用户在对话中描述创意(文字/参考图),agent 编排一系列步骤——设计分镜 → 角色定妆照 → 场景概念图 → 生成视频片段 → ffmpeg 合成——通过用户自部署的同步 POST API(生图/生视频)执行,全程节点实时呈现在画布上;用户可随时打断、修改提示词、单节点重试,也可让 agent 一路跑到出片。
+
+- 三栏布局:左=项目列表(新建/切换),中=画布,右=官方聊天区
+- 项目:插件在磁盘上自建目录 + Host 侧 JSON 注册表(存 `$DSH_HOME`),一个项目绑定一个 DSH session
+- 生图/生视频:自定义同步 POST API,凭证先用明文配置
+- 分发:本地安装自用;稳定后可提升为桌面内置功能
+
+## 2. 方案选型(已确认)
+
+**结论:插件是唯一能满足全部需求的方式。**
+
+| 能力 | 插件 | Skill |
+| --- | --- | --- |
+| 自定义 UI 页面/布局 | ✅ root 槽替换 | ❌ 纯指令文档,无 UI 机制 |
+| 调用外部 API | ✅ `ctx.tools.register()` | ❌ 无代码执行能力 |
+| 画布状态机 | ✅ `session/event` 监听 | ❌ |
+| 打断/重试 | ✅ `AgentHandle.cancel/steer/followup` | ❌ |
+
+Skill 定位为补充组件:把创作流程规范(分镜格式、镜头参数)做成 skill 注入模型上下文。fork 上游被仓库规则禁止;Conversation Node 只能在对话内渲染,做不了独立页面。
+
+**侵入性:对当前项目 0 修改,纯新增。** `deepseek-harness/`(pinned 子模块)与 `dsh-plugin-desktop/` 均不需要任何改动;安装发生在运行时的 `$DSH_HOME/profiles/`,开发工作全部在插件自身目录。
+
+## 3. 机制地图(证据链)
+
+| 计划依赖 | 官方机制 | 仓库内证据 |
+| --- | --- | --- |
+| 非上游包带 client 半 | `exports["./client"]` + `dsh.client` 声明 + tsdown 双构建 | `dsh-community-market/package.json` |
+| 禁用官方 ui-layout 行 | patch 按 id 覆盖(`- id: xxx` + `disabled: true`) | `deepseek-harness/packages/bundle/web-app/cordis.patch.yml`(hmr 行) |
+| root occupant + 座位契约 | 注册 `root` 单槽,children 声明 `conversation`(single/session-maybe)等座位 | `dsh-plugin-desktop/src/client/contracts.ts` + advanced shell 笔记 |
+| 官方聊天区复用 | 官方 `ui-conversation` 保持启用,渲染进右栏座位 | 同上 |
+| 工具注册 | `ctx.tools.register()` / `defineTool` | 上游 basic/tool 教程 / extension-cookbook |
+| 画布数据流 | client `ctx.on('session/event')`(tool/call, tool/result) | extension-cookbook UI 插件模式 |
+| 打断/重试 | `AgentHandle.cancel()` / `steer()` / `followup()` | core API |
+| 产物托管 | Host 侧文件 + webServer 静态路由出 URL | 待 P3 验证 `dsh-host-webserver` 路由 API |
+| 桌面安装 bundle | `desktopPnpm.runPlugin(['add', ...])`(打包 dsh CLI) | `dsh-plugin-desktop/docs/plugin-services.md` |
+
+**唯一无直接先例处**:第三方 bundle patch 禁用 ui-layout(桌面 advanced shell 是 launcher overlay 做的)。patch 层语义明确(后层按 id 覆盖),且有三级降级:插件自带 patch → profile 自己的 `cordis.patch.yml` → `$DSH_HOME/cordis.patch.yml`。P1 首里程碑验证。
+
+## 4. 插件结构
+
+```
+canvas-studio/
+├── package.json          # dsh.bundle.patch + dsh.client + exports["./client"]
+├── cordis.patch.yml      # 禁用 ui-layout + 插入 host/client 行
+├── tsdown.config.ts      # host bundle + clientBundle 双产物
+├── tsconfig.json / tsconfig.client.json
+├── src/
+│   ├── index.ts          # Host apply:项目注册表、产物静态路由
+│   ├── tools.ts          # image_generate / video_generate / video_composite
+│   ├── projects.ts       # 项目注册表(磁盘目录 + JSON)
+│   ├── skills/           # 创作规范 skill(分镜格式、镜头参数)
+│   └── client/
+│       ├── contracts.ts  # SlotMap 座位声明(canvas / conversation)
+│       ├── index.ts      # client apply:root occupant + session/event 监听
+│       ├── root-frame.tsx # 三栏布局
+│       ├── project-list.tsx / canvas.tsx / canvas-store.ts
+│       └── canvas/
+│           ├── CanvasSurface.tsx   # 无限画布(平移/缩放/选中/拖拽)
+│           ├── CanvasNode.tsx      # 节点渲染(image/video/sticky/text/prompt)
+│           ├── CanvasEdges.tsx     # 贝塞尔连线(血缘投影 + 操作颜色映射)
+│           └── canvas-store.ts     # store 工厂(见 §7.4)
+└── scripts/dev-install.sh # 构建 → 装进目标 profile
+```
+
+## 5. 开发循环与安装
+
+- 改 client 代码:重建 bundle + 重启应用(web-app patch 已禁用 HMR,rev 只在启动时重算)
+- 双面兼容:Host 半(工具)可在 CLI 的 `web` profile 快速迭代;UI 半在桌面 `desktop` profile 验证;bundle 各自安装互不影响
+- 安装:`dsh plugin --profile <name> add ./canvas-studio`(走打包 dsh CLI / 桌面托盘终端)
+
+## 6. 阶段计划与验证标准
+
+| 阶段 | 内容 | 验证 |
+| --- | --- | --- |
+| **P1 骨架** | 独立包 + 双半构建 + patch 禁用 ui-layout + root occupant 三栏布局 + 官方对话区渲染 | `corepack yarn dev`;成功标准:加载无错、官方聊天区原样出现在右栏 |
+| **P2 项目** | Host 项目注册表 + 磁盘建目录 + 新建/切换 + session 绑定 | 新建项目 → 会话切换正确、目录落盘 |
+| **P3 工具** | 三个工具接同步 POST API + 凭证配置 + 产物托管(先读 API 参考文档) | 对话中直接产出图片/视频 |
+| **P4 画布** | canvas 组件 + 节点状态机(session/event)+ 产物渲染 + 血缘连线 | 跑通"文字 → 完整视频"全链路 |
+| **P5 交互** | 节点级打断/改提示/重试(cancel/steer/followup) | 中途打断、修改、单节点重试 |
+| **P6 收尾** | 本地安装脚本 + 创作规范 skill + 双面兼容验证 | 桌面 + 普通 `dsh web` 各跑一遍 |
+| **P7(可选)** | 提升为桌面内置:workspace 化 → 桌面壳 patch 插行 → 打包 + closure 验证 → 模式开关设计 | 安装包分发、默认 profile 自带 |
+
+## 7. P3/P4 细化(已确认输入)
+
+### 7.1 同步 API 的工具设计(用户确认:API 同步返回)
+
+- **状态机简化**:`GenerationTask` 裁剪为 `generating → completed | failed`(无 queued/polling);节点进度为不确定进度条(generating 态持续到响应返回)
+- **超时**:fetch + AbortController,视频类调用设长超时(建议 5–10 分钟可配置);超时/网络错误以工具错误返回,agent 可自动重试
+- **取消语义**:同步 API 下"打断"仅为本地中断 fetch;服务端任务无法回收 —— 工具文档向模型说明该边界,重试策略由 agent 层兜底
+- **产物处理**:响应为二进制/URL → 写入项目目录 `assets/` → 返回 `{ url, width, height, duration? }` 给模型,画布直接渲染
+- **凭证**:插件 Config 明文 `apiBaseUrl` + `apiKey`;结构参考 WL-AI-Director 适配器层(统一 `callImageApi` / `callVideoApi` 接口),只实现生图/生视频两个入口
+
+### 7.2 画布模型:WL-AI-Director LayerData 字段映射
+
+| WL 字段 | 决策 | 说明 |
+| --- | --- | --- |
+| `id` | ✅ 保留 | `crypto.randomUUID()` |
+| `parentId` | ✅ 保留 | 分组(编组/合并节点) |
+| `type` | 🔧 裁剪 | 首版只支持 `image` / `video` / `sticky` / `text` / `group` / `prompt`;`drawing` / `audio` / `panorama` 后续再说 |
+| `x / y / width / height` | ✅ 保留 | 画布坐标系 |
+| `src` | 🔧 替换语义 | WL 存 base64/blob;我们存 **webServer 托管 URL**(Host 侧文件) |
+| `thumbnail` | ✅ 保留 | 256px LOD 缩略图(减少大图渲染卡顿) |
+| `imageId / thumbnailId` | ❌ 裁剪 | IndexedDB 资产库引用;以磁盘路径 + URL 替代 |
+| `color / text / fontSize` | ✅ 保留 | sticky/text 节点 |
+| `title` | ✅ 保留 | |
+| `createdAt` | ✅ 保留 | |
+| `flipX / flipY` | ✅ 保留 | |
+| `duration` | ✅ 保留 | 视频节点时长 |
+| `isLoading / progress / error` | ✅ 保留(简化) | 同步 API 下 `progress` 固定 0/100,`isLoading` 即 generating 态 |
+| `annotations` | ⏸ 暂缓 | 手绘标注(P4.5 可选) |
+| `locked / visible / opacity / zIndex` | ✅ 保留 | |
+| `sourceLayerId / sourceLayerIds` | ✅ 保留 | **核心血缘字段,驱动连线渲染** |
+| `operationType` | 🔧 扩展 | 保留 WL 通用值(`text-to-image` / `image-to-image` / `image-to-video`),新增 DSH 语义值:`storyboard`、`character-sheet`、`scene-concept`、`video-clip`、`video-composite` |
+| `gridData` | ⏸ 暂缓 | 九宫格数据(P4.5) |
+| `generationPrompt` | ✅ 保留 | 与 `session/event` 中工具参数对应,节点重试时复用 |
+| `linkedResourceId / linkedResourceType` | 🔧 重映射 | `character` → 定妆照节点;`scene` → 概念图节点;`keyframe` → 分镜节点 |
+| `promptConfig`(PromptLayer 专属) | ✅ 保留 | `mode / enhancedPrompt / linkedLayerIds / outputLayerIds / nodeColor` |
+
+**新增 DSH 特有字段**:
+
+| 新字段 | 类型 | 用途 |
+| --- | --- | --- |
+| `runId` | string | 产生该节点的 `tool/call` 事件 id(回溯、重试锚点) |
+| `origin` | `'agent' \| 'manual'` | 两条创作路径共用同一模型,画布标注来源 |
+| `toolName` | string? | 产生节点的工具名(`image_generate` 等) |
+
+### 7.3 关键设计决策:边不是一等数据
+
+WL 的连线**没有独立 edge 数据** —— 边由 `sourceLayerIds` 在渲染时推导(贝塞尔曲线 + `operationType` 颜色映射 + 源角色标签)。Canvas Studio 沿用:**血缘即边**。好处:agent 工具写入血缘字段后连线自动出现,手动面板操作与 agent 操作零差异。P4.5 可加独立 edge 层(自定义箭头样式/备注)。
+
+### 7.4 Store 动作清单
+
+**保留**:`setProjectId` / `addLayer` / `addLayers` / `updateLayer` / `deleteLayer` / `duplicateLayer` / `reorderLayer` / `setOffset` / `setScale` / `selectLayer`(含多选)/ `clearSelection` / `clearCanvas` / `importLayers` / `exportLayers` / `copySelectedLayers` / `pasteLayers` + **新增** `linkLayers(sourceIds, targetId)` / `retryLayer(id)`
+
+**暂缓**:`undo/redo/pushHistory`(P4.5,后续可接 `session/event` 回放)/ `selectAllLayers` / `selectMultipleLayers` / `suggestedPrompt` / `templatePanelOpen` / `activeTool/strokeColor/strokeWidth` / `integrityIssues` / `lastSaveError`
+
+### 7.5 组件映射
+
+| WL 组件 | 目标组件 | 备注 |
+| --- | --- | --- |
+| `InfiniteCanvas` | `CanvasSurface` | 平移/缩放/选中/拖拽/缩放把手,按 DSH client 纪律重写(zustand → store 工厂,props 四份额,组件不见 ctx) |
+| `CanvasLayer` | `CanvasNode` | 节点渲染,`ResolvedImage` 的 LOD 加载逻辑可借鉴 |
+| `ConnectionLines` | `CanvasEdges` | 贝塞尔曲线 + 颜色映射,纯渲染无状态,可高复用 |
+| `Minimap` | 可选 | P4.5 |
+| `CanvasToolbar` | 精简版 | 仅保留:选择/添加素材/手型/新建连线 |
+| `LayerPanel / LayerDetailPanel` | 精简版 | 节点属性(改名/锁定/透明度/删除) |
+| 各种 AI 生成面板 | ❌ 不移植 | 由 agent 工具承担(DSH 方案的增值) |
+
+### 7.6 事件流映射(`session/event` → store)
+
+| session/event | store 动作 |
+| --- | --- |
+| `tool/call`(image/video 工具) | `addLayer({ origin: 'agent', runId, operationType, isLoading: true })` + 血缘 `linkLayers`(若引用图) |
+| `tool/result` | `updateLayer({ src: url, thumbnail, isLoading: false, error: undefined })` |
+| `tool/error` | `updateLayer({ isLoading: false, error })` + 节点红色标记,边保留 |
+| 用户打断(cancel) | `updateLayer({ isLoading: false, error: '已中断' })` |
+| 手动面板(后续) | 同一组 actions,`origin: 'manual'` |
+
+### 7.7 持久化
+
+- `canvas.json` 存项目目录,Host 端 atomic write(`dsh-atomic-write` 语义,参考桌面壳 replace 模式)
+- 资产文件落 `assets/` 子目录,webServer 静态路由出 URL
+- 打开项目 → client 拉取 `canvas.json` → `importLayers` 恢复画布;节点定位按 `title` 匹配,后续接 `linkedResourceId`
+
+### 7.8 P4 验证标准
+
+1. 对话中跑通:创意文字 → 分镜节点 → 定妆/概念图节点 → 片段节点 → 合成视频节点,全链路边自动生成
+2. 打断后节点标记中断态,重试后同节点更新不产生新边
+3. 刷新/重开项目后画布完整恢复
+
+## 8. WL-AI-Director 参考
+
+参考项目 `/Users/wl/Desktop/job/learn/WL_AI_Studio/reference/WL-AI-Director`:AI 漫剧工场,Script → Asset → Keyframe → Video 工业化工作流(React 19 + Vite + IndexedDB,多厂商 AI 适配)。
+
+### 可借鉴资产
+
+- **LayerData 模型**:血缘 `sourceLayerIds[]`、`operationType`(24 种)、`generationPrompt` 回溯、`thumbnail` LOD、`progress/error` 节点状态、`parentId` 分组
+- **PromptLayer**:节点=一次 AI 操作(`linkedLayerIds` 输入 → `outputLayerIds` 输出,`mode` / `enhancedPrompt` / `nodeColor`)
+- **ConnectionLines**:SVG 贝塞尔曲线、操作类型→颜色映射、源角色标签
+- **AI 适配器层**:chat/image/video 统一接口 + 三级 API key 兜底(仅借鉴结构)
+- **MKR 多关键帧**:首帧+尾帧插值生成视频,解决一致性(建议纳入工具设计,作为后续增强)
+- **九宫格分镜预览**:一键拆分 9 视角选格作首帧(后续增强)
+- **FlowState**:select → analyze → deduce → storyboard → video → done(结构化编排替代方案)
+- **一致性检查**:服装/发型/道具冲突检测 + 评分(进阶增强)
+- **时间轴/导出**:EDL/FCPXML 导出、renderLogs 追踪(收尾增强)
+
+### 架构关键洞察
+
+WL 的所有操作都是**用户手动点面板触发**;DSH 方案的增值是 **agent 自主编排**。两者共用同一数据模型:agent 工具调用 → 生成与手动面板同语义的 LayerData(带 `operationType` + 血缘)→ 画布渲染层 100% 复用。"打断/重试"天然落地:**重试=在同一血缘节点上重新执行一次操作**,画布自动更新边。
+
+### 许可证边界
+
+WL-AI-Director 是 **CC BY-NC-SA 4.0(非商业)**,DSH Desktop 是 MIT。**代码直接移植有许可冲突风险**:模型/数据结构/交互设计层面借鉴(概念不受版权约束);代码移植需获得作者授权(联系 antskpro@qq.com)。
+
+## 9. 与本地 dsh 共存规则
+
+桌面与 CLI 共享 `~/.dsh`(或 `$DSH_HOME`):`profiles/`、机器级 `cordis.patch.yml`、`settings.yaml`、`storages/`。这是官方语义的正常行为,遵守三条边界即安全:
+
+1. **同一 profile 禁止桌面与 CLI 同时运行**(无跨进程 profile 锁,会话/存储有并发写风险)
+2. 不从 CLI 启动桌面的 `desktop` profile(桌面专属行在无 Electron 环境会失败)
+3. 桌面启动 CLI 建的 profile 兼容模式一般可用(桌面服务按可选注入降级)
+
+## 10. 内置化路径(P7 前瞻)
+
+仿照 `dsh-community-market`:加根 workspaces → 声明为 `dsh-plugin-desktop` dependency → 桌面壳 `cordis.patch.yml` 插行 → 进打包清单(asarUnpack + `verify:closure` 门禁)。注意:无条件 root 替换与兼容模式哲学冲突,内置时建议做成"随包分发 + profile 组合启用"或挂模式开关。
+
+## 11. 待确认项
+
+- API 参考文档:P3 开始时阅读,细化三个工具的参数设计
+- 插件目录位置、开发环境就绪度:P1 开工时确认
+
+## 12. P1 验证结论(已落地)
+
+P1 骨架已完成并通过 headless 验证(2026-08-19):
+
+- **包与构建**:`canvas-studio/` 加入根 workspaces(仓库规则:所有自有包用根 Yarn),双半构建通过:Host `lib/index.js`(tsc)+ client `lib/client.js`(tsdown + ModuleLoader banner),`verify:loader` 验证单模块注册
+- **组合验证**:装进独立 `studio` profile(base + web-app + canvas-studio),`--dump-config` 确认 `ui-layout` 被禁用、官方 `ui-sidebar`/`ui-conversation` 等行保留、`canvas-studio` 行插入
+- **Loader 冒烟**:`dsh --profile studio` 整树挂载,`dsh web: http://127.0.0.1:3080` 就绪,0 错误
+- **HTTP 验证**:boot manifest 含 canvas-studio 客户端行;`/plugins/canvas-studio/client.js` 返回 200 + ModuleLoader 注册
+- **桌面 GUI 验证**:集成进 desktop profile 后,`corepack yarn dev` 启动,三栏工作台(左项目占位 / 中画布占位 / 右官方对话区)显示正常
+
+### 组合约束(源码级核实)
+
+- **root children 声明全局唯一**:第二个 root occupant 声明已存在的座位会在加载时抛错。canvas-studio 声明全部四个官方座位(sidebar/conversation/details/shell.overlay),ui-sidebar 与 ui-conversation 对 sidebar/details 是**裸 register**(非 inject),未声明即抛错 —— 所以必须完整声明
+- **`ctx.layout` 服务所有权**:禁用 ui-layout 后其提供的 `layout` 服务消失,canvas-studio client 半用 `ctx.reflect.provide('layout', ...)` 补位(ui-sidebar 注入它)
+- **桌面 advanced 模式不共存**:desktop advanced shell 也注册 root 并声明 children,与 canvas-studio 冲突;canvas-studio client 检测 URL 参数 `dsh-desktop-mode=advanced` 时跳过注册,保持桌面帧不变
+- **同 priority 重复注册抛错**:与 middle-panel 这类"自建 root 的插件"不能同 profile 共存(需移除其一)
+- **in-box bundle 不进 profile pnpm**:`@deepseek-ai/dsh-web-app` 的 frontend 未发布,profile manifest 直接列名即可(经 `$DSH_HOME/profiles/node_modules` 愈合回退解析)
+- **上游构建前提**:从源码跑 web 冒烟需先 `corepack yarn upstream:build`(frontend dist + 各 client bundle)
+- **桌面 profile 的 pnpm 是 v11**:profile node_modules 由桌面壳的 pnpm 11 维护(store v11);CLI 转发的 pnpm 是 v10 会报 store 不匹配 → 在 profile 目录直接用 `corepack pnpm@11.7.0 <verb> <spec>`,再手工维护 `dsh.profile.bundles` 列表

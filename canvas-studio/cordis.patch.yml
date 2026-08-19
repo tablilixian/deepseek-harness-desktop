@@ -1,0 +1,11 @@
+# Canvas Studio bundle patch: the studio frame replaces the upstream layout
+# while the official sidebar/conversation/details surfaces keep their rows.
+# The client half declares the root slot (and provides the ctx.layout service
+# the disabled ui-layout previously owned), so every upstream client plugin
+# that registers into the standard seats keeps working unchanged.
+- insert:
+    - id: canvas-studio
+      name: canvas-studio
+
+- id: ui-layout
+  disabled: true
