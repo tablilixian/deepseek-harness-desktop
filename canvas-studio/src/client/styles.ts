@@ -4,12 +4,18 @@
  * components; this file only carries presentation.
  */
 const STUDIO_STYLES = `
+/* Presentation follows the official design system: all colors come from the
+ * --dsw-alias-* semantic tokens owned by @deepseek-ai/dsh-client-ui-theme
+ * (imported into the web shell base.css). Those tokens resolve to light or
+ * dark values via body[data-ds-dark-theme], so this panel adapts to the app
+ * theme automatically. Never hardcode colors or use currentColor here. */
+
 .csFrame {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 440px;
   height: 100%;
-  background: var(--dsw-bg, #ffffff);
-  color: var(--dsw-fg, #1f2328);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
 }
 
 .csProjects {
@@ -17,8 +23,12 @@ const STUDIO_STYLES = `
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border-right: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-right: 1px solid var(--dsw-alias-border-l2);
   overflow-y: auto;
+  color: var(--dsw-alias-label-primary);
+  /* Rebind scrollbar to the elevated-surface tokens so it matches the theme. */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .csProjectsHeader {
@@ -33,8 +43,9 @@ const STUDIO_STYLES = `
   font: inherit;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
@@ -44,7 +55,7 @@ const STUDIO_STYLES = `
 }
 
 .csProjectsEmpty {
-  color: color-mix(in srgb, currentColor 55%, transparent);
+  color: var(--dsw-alias-label-tertiary);
   font-size: 13px;
   padding: 24px 8px;
   text-align: center;
@@ -60,8 +71,9 @@ const STUDIO_STYLES = `
   font: inherit;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px dashed color-mix(in srgb, currentColor 25%, transparent);
+  border: 1px dashed var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   text-align: left;
 }
@@ -82,8 +94,9 @@ const STUDIO_STYLES = `
   font: inherit;
   padding: 6px 8px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
 }
 
 .csProjectFormActions {
@@ -96,8 +109,9 @@ const STUDIO_STYLES = `
   flex: 1;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
@@ -116,17 +130,18 @@ const STUDIO_STYLES = `
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   text-align: left;
 }
 
 .csProjectItem:hover {
-  background: color-mix(in srgb, currentColor 6%, transparent);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .csProjectItemActive {
-  border-color: color-mix(in srgb, currentColor 18%, transparent);
-  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-active);
 }
 
 .csProjectName {
@@ -135,7 +150,7 @@ const STUDIO_STYLES = `
 
 .csProjectDate {
   font-size: 12px;
-  color: color-mix(in srgb, currentColor 50%, transparent);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .csProjectError {
@@ -144,7 +159,7 @@ const STUDIO_STYLES = `
   gap: 6px;
   padding: 8px;
   font-size: 13px;
-  color: color-mix(in srgb, #d1242f 85%, currentColor);
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .csProjectError button {
@@ -152,15 +167,16 @@ const STUDIO_STYLES = `
   align-self: flex-start;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
 .csCanvas {
   position: relative;
   overflow: hidden;
-  background: color-mix(in srgb, currentColor 3%, transparent);
+  background: var(--dsw-alias-bg-base);
 }
 
 .csCanvasEmpty {
@@ -168,13 +184,13 @@ const STUDIO_STYLES = `
   inset: 0;
   display: grid;
   place-items: center;
-  color: color-mix(in srgb, currentColor 45%, transparent);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .csConversation {
   position: relative;
   min-width: 0;
-  border-left: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-left: 1px solid var(--dsw-alias-border-l2);
 }
 
 .csOverlay {

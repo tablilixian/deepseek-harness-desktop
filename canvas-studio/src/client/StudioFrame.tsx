@@ -25,7 +25,10 @@ export function StudioFrame(props: StudioFrameProps) {
   const error = useStore(store => store.error)
   const creating = useStore(store => store.creating)
   useEffect(() => {
-    void refreshProjects()
+    void refreshProjects().catch((error: unknown) => {
+      // eslint-disable-next-line no-console
+      console.error('[canvas-studio] refreshProjects failed on mount:', error)
+    })
   }, [refreshProjects])
   return (
     <div className="csFrame">

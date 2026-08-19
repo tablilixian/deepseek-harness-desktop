@@ -243,9 +243,26 @@ P2 项目注册表已完成并通过 headless 验证(2026-08-19):
 - **路由**:`GET/POST /canvas-studio/projects` 注册进 `ctx.webServer`(kind exact);GET 要求 loopback 权威(remoteAddress 回环 + host 端口/主机名匹配 + sec-fetch-site 非 cross-site),POST 额外要求同源 Origin —— 与 community-market 同一信任模型
 - **Client**:`ProjectList` 替换左侧占位(新建表单/项目列表/加载/错误态),`createProjectStore()` 工厂(defineStore,`@deepseek-ai/dsh-client-runtime/client` 是官方 RUNTIME_STORE_EXEMPTION external,可运行时 require);async fetch 全在 inject 回调,经 store actions 提交
 - **会话绑定**(已定案):每项目一个 workspace,路径 = 项目磁盘目录;打开项目 = `ctx.workspaces.create({ path: project.dir })`(Host `ensureWorkspace` 按路径幂等,返回值即注册表内记录)+ `ctx.workspaces.startSession(workspaceId)`(复用/新建 blank session 并导航)。项目记录暂不持久化 sessionId(P3+ 再挂)
+- **会话标题同步**(2026-08-19 补):`openProject` 在 `create` 之后立即 `await ctx.workspaces.rename(workspace.workspaceId, project.name)`,使右侧会话标题与左侧项目名统一(否则默认显示 workspace UUID)。`rename` 失败时当前实现会进入错误态并中止会话启动;若希望 rename 失败也继续启动(标题回退 UUID),可在 P3 改为"尽力改名、失败只记日志"的降级
 - **冒烟**:studio profile 启动 0 错误;GET 200 空表、POST 201 建项目(目录+assets 落盘、注册表更新)、无 Origin POST 405、非法名(空/斜杠/缺字段)400;`/plugins/canvas-studio/client.js` 200(rev 更新)
 
 ### 新增源码级事实
 
 - **client bundle 运行时依赖**:`defineStore` 从 `@deepseek-ai/dsh-client-runtime/client` require —— 该 specifier 是上游 `CLIENT_EXTERNALS` 的文档化豁免(RUNTIME_STORE_EXEMPTION),loader 模块表直接应答,canvas-studio 的 external 列表含它即可
 - **workspace.create 幂等**:Host 侧 `ensureWorkspace` 先 `registry.resolveByPath` 再建,client 侧 `manager.create` 成功后 upsert 进本地列表 —— 所以 create 返回后 `startSession(workspaceId)` 一定能找到该 workspace
+
+### 桌面 GUI 收尾修复(2026-08-19,P2 最终确认)
+
+桌面 GUI 经人工确认:左侧项目列表可见、`+ 新建项目` 新建/切换、右栏会话标题与项目名统一。期间修了三处,均已在 `canvas-studio` 源码头提交式落地:
+
+1. **可见性(对比度)**:原 `styles.ts` 中项目栏按钮/输入框/项目项/日期/空状态大量使用 `color-mix(in srgb, currentColor ...)`,而桌面壳未向该区域注入主题 `currentColor`,导致浅色文字与白色背景融合、功能存在但"看不见"。已改为明确的 `var(--dsw-fg, #1f2328)` 并提高边框透明度,浅色背景下可见。**深色主题仍未适配**(`.csFrame` 仍 fallback `#ffffff`/`#1f2328`),见 §14 待办。
+2. **会话标题同步**:见上"会话标题同步"条,`openProject` 内 `rename`。
+3. **防御性**:`ProjectList.tsx` 增加 `projects` 数组 / 无效 `createdAt` 防御,新增 `ProjectListErrorBoundary`(崩溃信息显现在 UI 而非被上游 `SlotErrorBoundary` 吞成空 div);`StudioFrame.tsx` 的 `refreshProjects()` mount 调用加 `.catch` 日志便于排查加载失败。
+
+> 排查起点误区提示:最初怀疑是桌面 `advanced` 模式导致 `index.ts` 的 `dsh-desktop-mode=advanced` 守卫整段跳过注册 —— 实则 GUI 已挂载,排除此因。该守卫仍保留(桌面 advanced shell 与 canvas-studio 抢 root 单槽,冲突未解,属 P7 内置化议题)。
+
+## 14. 待办与已知问题
+
+- **深色主题适配(已完成,2026-08-19)**:调研结论 —— 官方设计系统由 `@deepseek-ai/dsh-client-ui-theme` 拥有 `--dsw-alias-*` 语义 token(编进 web shell `base.css`,全局加载,与 `ui-layout` 无关),按 `body[data-ds-dark-theme]` 区分明暗两套值;`data-ds-dark-theme` 由 `ui-theme` 的 host 引导脚本按偏好写入 body(桌面已启用深色,对话区即证)。canvas-studio 的 `styles.ts` 已全部改用 `--dsw-alias-*` token(背景 `--dsw-alias-bg-base`、文字 `--dsw-alias-label-primary`、边框 `--dsw-alias-border-l2`、hover/active `--dsw-alias-interactive-bg-*`、错误 `--dsw-alias-state-error-primary`、滚动条按官方契约重绑 `--dsw-alias-scrollbar-*`),自动跟随应用主题,不再硬编码颜色。后续 P3/P4 新增 UI 一律沿用 `--dsw-alias-*`,不得写字面色或 `currentColor`。
+- **rename 失败降级**:当前 `openProject` 的 `rename` 抛错会中止会话启动;若实际遇到标题冲突等,建议改为"尽力改名、失败只日志"(见 §13 会话标题同步条)。
+- **项目记录持久化 sessionId**:P2 设计上暂不持久化,打开项目每次重建 workspace;如要避免重复 workspace 堆积,可在 P3+ 把 sessionId 写回项目注册表。

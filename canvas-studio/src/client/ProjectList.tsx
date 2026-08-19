@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Component, useState } from 'react'
 import type { StudioProject } from '../contracts/project.js'
 
 /** Plain props: the store projection plus plain callbacks. */
@@ -15,15 +15,18 @@ export interface ProjectListProps {
 
 /** Relative-day label for the project creation date. */
 function createdLabel(project: StudioProject): string {
-  return new Date(project.createdAt).toLocaleDateString()
+  const date = new Date(project.createdAt)
+  if (Number.isNaN(date.getTime())) return '-'
+  return date.toLocaleDateString()
 }
 
 /**
  * The studio project list: an inline create form plus one row per project.
  * Clicking a row opens the project (session binding happens in the callback).
  */
-export function ProjectList(props: ProjectListProps) {
-  const { projects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props
+function ProjectListInner(props: ProjectListProps) {
+  const { projects: rawProjects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props
+  const projects = Array.isArray(rawProjects) ? rawProjects : []
   const [formOpen, setFormOpen] = useState(false)
   const [draftName, setDraftName] = useState('')
   const submit = async () => {
@@ -91,5 +94,54 @@ export function ProjectList(props: ProjectListProps) {
         </button>
       ))}
     </div>
+  )
+}
+
+interface ProjectListErrorBoundaryState {
+  crashed: boolean
+  crashError: Error | null
+}
+
+/** Render boundary: if the list crashes, show the error instead of vanishing. */
+class ProjectListErrorBoundary extends Component<
+  { children: React.ReactNode },
+  ProjectListErrorBoundaryState
+> {
+  override state: ProjectListErrorBoundaryState = { crashed: false, crashError: null }
+
+  static getDerivedStateFromError(error: unknown): ProjectListErrorBoundaryState {
+    return {
+      crashed: true,
+      crashError: error instanceof Error ? error : new Error(String(error)),
+    }
+  }
+
+  override componentDidCatch(error: unknown, errorInfo: React.ErrorInfo): void {
+    // eslint-disable-next-line no-console
+    console.error('[canvas-studio] ProjectList render error:', error, errorInfo)
+  }
+
+  override render(): React.ReactNode {
+    if (this.state.crashed) {
+      return (
+        <div className="csProjectError">
+          <span>项目列表渲染失败: {this.state.crashError?.message ?? '未知错误'}</span>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/**
+ * The studio project list: an inline create form plus one row per project.
+ * Wrapped in an error boundary so crashes surface in the UI instead of being
+ * swallowed by the upstream slot boundary.
+ */
+export function ProjectList(props: ProjectListProps) {
+  return (
+    <ProjectListErrorBoundary>
+      <ProjectListInner {...props} />
+    </ProjectListErrorBoundary>
   )
 }

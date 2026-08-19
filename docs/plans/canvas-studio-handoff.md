@@ -10,7 +10,7 @@
 - 桌面 desktop profile 已集成:`corepack yarn dev` 启动后可见三栏工作台(左=项目列表、中=画布占位、右=官方对话区)
 - P2:P1 后新增项目注册表(Host)+ 项目列表 UI(Client)+ 会话绑定(workspace = 项目目录)
 - 开发环境已就绪:root `corepack yarn install` 完成、子模块已初始化 + `upstream:build` 完成
-- P2 headless 验证全过(build/typecheck/check、studio profile web 冒烟);桌面 GUI 由人工确认(步骤见 §4)
+- P2 headless 验证全过(build/typecheck/check、studio profile web 冒烟);**桌面 GUI 已确认**:左侧项目列表可见、`+ 新建项目` 新建/切换正常、右栏会话标题与项目名已统一(通过 `ctx.workspaces.rename` 同步,详见计划 §13)
 
 ### 已建文件
 
@@ -44,9 +44,11 @@ canvas-studio/
 
 根级改动:`package.json` workspaces 加 `canvas-studio`(lockfile 已更新)。
 
-### 未提交
+### 已提交
 
-上次已提交并推送:`canvas-studio` 分支(P1 commit `4155603d` + handoff `30c935c3`)。本次 P2 改动尚未提交(等人工确认桌面 GUI 后一并提交)。
+- P1 骨架:`4155603d`(skeleton)+ `30c935c3`(handoff 文档/fork 工作流)
+- P2 项目注册表核心:`8786414361`
+- **P2 收尾 + 深色主题:`9c8f5f3255`** —— 包含:可见性修复(`currentColor`/`--dsw-fg` → 官方 `--dsw-alias-*` 语义 token,自动跟随 light/dark)、会话标题同步 `workspaces.rename`、防御性 ErrorBoundary、`docs/plans` 更新。本地已提交,**尚未 push 到 fork**(`origin/canvas-studio` 仍停在 `30c935c3`)。
 
 ## 7. Git 工作流(fork 双 remote)
 

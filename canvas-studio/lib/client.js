@@ -107,12 +107,18 @@ window.__ModuleLoader__.load({
 		* components; this file only carries presentation.
 		*/
 		const STUDIO_STYLES = `
+/* Presentation follows the official design system: all colors come from the
+ * --dsw-alias-* semantic tokens owned by @deepseek-ai/dsh-client-ui-theme
+ * (imported into the web shell base.css). Those tokens resolve to light or
+ * dark values via body[data-ds-dark-theme], so this panel adapts to the app
+ * theme automatically. Never hardcode colors or use currentColor here. */
+
 .csFrame {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr) 440px;
   height: 100%;
-  background: var(--dsw-bg, #ffffff);
-  color: var(--dsw-fg, #1f2328);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
 }
 
 .csProjects {
@@ -120,8 +126,12 @@ window.__ModuleLoader__.load({
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border-right: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-right: 1px solid var(--dsw-alias-border-l2);
   overflow-y: auto;
+  color: var(--dsw-alias-label-primary);
+  /* Rebind scrollbar to the elevated-surface tokens so it matches the theme. */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .csProjectsHeader {
@@ -136,8 +146,9 @@ window.__ModuleLoader__.load({
   font: inherit;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
@@ -147,7 +158,7 @@ window.__ModuleLoader__.load({
 }
 
 .csProjectsEmpty {
-  color: color-mix(in srgb, currentColor 55%, transparent);
+  color: var(--dsw-alias-label-tertiary);
   font-size: 13px;
   padding: 24px 8px;
   text-align: center;
@@ -163,8 +174,9 @@ window.__ModuleLoader__.load({
   font: inherit;
   padding: 6px 10px;
   border-radius: 6px;
-  border: 1px dashed color-mix(in srgb, currentColor 25%, transparent);
+  border: 1px dashed var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   text-align: left;
 }
@@ -185,8 +197,9 @@ window.__ModuleLoader__.load({
   font: inherit;
   padding: 6px 8px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
 }
 
 .csProjectFormActions {
@@ -199,8 +212,9 @@ window.__ModuleLoader__.load({
   flex: 1;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
@@ -219,17 +233,18 @@ window.__ModuleLoader__.load({
   border-radius: 6px;
   border: 1px solid transparent;
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
   text-align: left;
 }
 
 .csProjectItem:hover {
-  background: color-mix(in srgb, currentColor 6%, transparent);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .csProjectItemActive {
-  border-color: color-mix(in srgb, currentColor 18%, transparent);
-  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-active);
 }
 
 .csProjectName {
@@ -238,7 +253,7 @@ window.__ModuleLoader__.load({
 
 .csProjectDate {
   font-size: 12px;
-  color: color-mix(in srgb, currentColor 50%, transparent);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .csProjectError {
@@ -247,7 +262,7 @@ window.__ModuleLoader__.load({
   gap: 6px;
   padding: 8px;
   font-size: 13px;
-  color: color-mix(in srgb, #d1242f 85%, currentColor);
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .csProjectError button {
@@ -255,15 +270,16 @@ window.__ModuleLoader__.load({
   align-self: flex-start;
   padding: 4px 10px;
   border-radius: 6px;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border: 1px solid var(--dsw-alias-border-l2);
   background: transparent;
+  color: var(--dsw-alias-label-primary);
   cursor: pointer;
 }
 
 .csCanvas {
   position: relative;
   overflow: hidden;
-  background: color-mix(in srgb, currentColor 3%, transparent);
+  background: var(--dsw-alias-bg-base);
 }
 
 .csCanvasEmpty {
@@ -271,13 +287,13 @@ window.__ModuleLoader__.load({
   inset: 0;
   display: grid;
   place-items: center;
-  color: color-mix(in srgb, currentColor 45%, transparent);
+  color: var(--dsw-alias-label-tertiary);
 }
 
 .csConversation {
   position: relative;
   min-width: 0;
-  border-left: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-left: 1px solid var(--dsw-alias-border-l2);
 }
 
 .csOverlay {
@@ -305,14 +321,17 @@ window.__ModuleLoader__.load({
 		//#region src/client/ProjectList.tsx
 		/** Relative-day label for the project creation date. */
 		function createdLabel(project) {
-			return new Date(project.createdAt).toLocaleDateString();
+			const date = new Date(project.createdAt);
+			if (Number.isNaN(date.getTime())) return "-";
+			return date.toLocaleDateString();
 		}
 		/**
 		* The studio project list: an inline create form plus one row per project.
 		* Clicking a row opens the project (session binding happens in the callback).
 		*/
-		function ProjectList(props) {
-			const { projects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props;
+		function ProjectListInner(props) {
+			const { projects: rawProjects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props;
+			const projects = Array.isArray(rawProjects) ? rawProjects : [];
 			const [formOpen, setFormOpen] = (0, react.useState)(false);
 			const [draftName, setDraftName] = (0, react.useState)("");
 			const submit = async () => {
@@ -393,6 +412,37 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
+		/** Render boundary: if the list crashes, show the error instead of vanishing. */
+		var ProjectListErrorBoundary = class extends react.Component {
+			state = {
+				crashed: false,
+				crashError: null
+			};
+			static getDerivedStateFromError(error) {
+				return {
+					crashed: true,
+					crashError: error instanceof Error ? error : new Error(String(error))
+				};
+			}
+			componentDidCatch(error, errorInfo) {
+				console.error("[canvas-studio] ProjectList render error:", error, errorInfo);
+			}
+			render() {
+				if (this.state.crashed) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: "csProjectError",
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["项目列表渲染失败: ", this.state.crashError?.message ?? "未知错误"] })
+				});
+				return this.props.children;
+			}
+		};
+		/**
+		* The studio project list: an inline create form plus one row per project.
+		* Wrapped in an error boundary so crashes surface in the UI instead of being
+		* swallowed by the upstream slot boundary.
+		*/
+		function ProjectList(props) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectListErrorBoundary, { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectListInner, { ...props }) });
+		}
 		//#endregion
 		//#region src/client/StudioFrame.tsx
 		/**
@@ -408,7 +458,9 @@ window.__ModuleLoader__.load({
 			const error = useStore((store) => store.error);
 			const creating = useStore((store) => store.creating);
 			(0, react.useEffect)(() => {
-				refreshProjects();
+				refreshProjects().catch((error) => {
+					console.error("[canvas-studio] refreshProjects failed on mount:", error);
+				});
 			}, [refreshProjects]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csFrame",
@@ -511,6 +563,7 @@ window.__ModuleLoader__.load({
 							select(project.id);
 							try {
 								const workspace = await ctx.workspaces.create({ path: project.dir });
+								await ctx.workspaces.rename(workspace.workspaceId, project.name);
 								ctx.workspaces.startSession(workspace.workspaceId);
 							} catch (cause) {
 								setFailed(cause instanceof Error ? cause.message : "项目会话绑定失败");

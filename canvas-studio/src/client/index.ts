@@ -62,6 +62,9 @@ export function apply(ctx: ClientContext): void {
             // binding is idempotent; the returned workspace is then in the
             // runtime list and the shared New Session action can navigate.
             const workspace = await ctx.workspaces.create({ path: project.dir })
+            // Keep the workspace/session title in sync with the project name
+            // so the conversation header matches the project list.
+            await ctx.workspaces.rename(workspace.workspaceId, project.name)
             ctx.workspaces.startSession(workspace.workspaceId)
           } catch (cause) {
             setFailed(cause instanceof Error ? cause.message : '项目会话绑定失败')

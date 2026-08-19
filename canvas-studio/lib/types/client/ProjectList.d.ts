@@ -12,6 +12,7 @@ export interface ProjectListProps {
 }
 /**
  * The studio project list: an inline create form plus one row per project.
- * Clicking a row opens the project (session binding happens in the callback).
+ * Wrapped in an error boundary so crashes surface in the UI instead of being
+ * swallowed by the upstream slot boundary.
  */
 export declare function ProjectList(props: ProjectListProps): import("react").JSX.Element;
