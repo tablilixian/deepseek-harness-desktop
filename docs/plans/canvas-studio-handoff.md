@@ -36,7 +36,33 @@ canvas-studio/
 
 ### 未提交
 
-仓库有未提交改动(新增 canvas-studio/、根 package.json、yarn.lock)。建议开工前先提交一次(仓库规则:方向性大改动前提交)。
+已提交并推送:`canvas-studio` 分支(commit `4155603d`,含 canvas-studio/、docs/plans/、根 package.json/yarn.lock)。仓库已配 fork 双 remote(见 §7)。
+
+## 7. Git 工作流(fork 双 remote)
+
+```sh
+# remote 布局(已配置)
+git remote -v
+# origin   git@github.com:tablilixian/deepseek-harness-desktop.git   ← 自己的 fork(开发分支推这里)
+# upstream git@github.com:anywhere-labs/deepseek-harness-desktop.git ← 上游(只 fetch)
+
+# 日常开发:在 canvas-studio 分支提交 + 推送
+git checkout canvas-studio
+git add ... && git commit -m "feat(canvas-studio): ..."
+git push                                  # 推到自己 fork 的 canvas-studio
+
+# 同步上游(随时可做;两步):
+git fetch upstream                        # 拉取上游最新
+git push origin upstream/master:master    # fork 的 master 对齐上游(快进合并)
+# 把上游合进开发分支:
+git merge upstream/master                 # 在 canvas-studio 上执行;插件在仓库根,冲突概率低
+# 若上游更新了子模块 pin,再跑:
+git submodule update --init --recursive
+```
+
+注意:master 永远只跟踪上游(本地 `git pull` 拉上游);所有开发在 `canvas-studio`。上游 AGENTS.md 的仓库规则(不编辑子模块、根 Yarn 工作流)照常适用。
+
+## 8. 新对话提示词(直接粘贴)
 
 ## 2. 已验证机制(源码级核实,不要推翻)
 
