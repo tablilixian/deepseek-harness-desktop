@@ -1,14 +1,16 @@
-# Canvas Studio 交接文档(2026-08-19,P1 完成)
+# Canvas Studio 交接文档(2026-08-19,P2 完成)
 
 > 用途:新开对话继续开发前的完整上下文。本文件 + [`docs/plans/canvas-studio.md`](./canvas-studio.md)(完整计划)是当前权威。本文件记录"当前状态、已验证机制、环境事实、下一步"。
 
 ## 1. 当前状态
 
-**P1(骨架 + 三栏工作台)已完成,桌面 GUI 验证通过**:
+**P1(骨架 + 三栏工作台)+ P2(项目注册表)已完成**:
 
 - 仓库根新增 `canvas-studio/` 独立包(已入根 workspaces,一行)
-- 桌面 desktop profile 已集成:`corepack yarn dev` 启动后可见三栏工作台(左=项目占位、中=画布占位、右=官方对话区)
+- 桌面 desktop profile 已集成:`corepack yarn dev` 启动后可见三栏工作台(左=项目列表、中=画布占位、右=官方对话区)
+- P2:P1 后新增项目注册表(Host)+ 项目列表 UI(Client)+ 会话绑定(workspace = 项目目录)
 - 开发环境已就绪:root `corepack yarn install` 完成、子模块已初始化 + `upstream:build` 完成
+- P2 headless 验证全过(build/typecheck/check、studio profile web 冒烟);桌面 GUI 由人工确认(步骤见 §4)
 
 ### 已建文件
 
@@ -24,19 +26,27 @@ canvas-studio/
 │   ├── dev-install.mjs   # 未用(桌面集成走了手工 pnpm,见 §4)
 │   └── verify-client-loader.mjs  # 单模块注册验证
 └── src/
-    ├── index.ts               # Host:name/inject/apply 空插件
+    ├── contracts/
+    │   └── project.ts    # StudioProject 共享类型(双半 type-only 引用,运行时不出现)
+    ├── projects.ts       # Host:ProjectRegistry($DSH_HOME/canvas-studio/projects.json + projects/<id>/assets)
+    ├── routes.ts         # Host:registerStudioRoutes(GET/POST /canvas-studio/projects,loopback+同源检查)
+    ├── index.ts          # Host:name/inject(['webServer'])/apply(注册表 + 路由)
     └── client/
-        ├── index.ts           # apply:advanced 模式跳过 + provide layout + register root
+        ├── index.ts      # apply:advanced 跳过 + provide layout + register root(store + inject)
         ├── layout-controller.ts  # ILayout 实现(P1 全 no-op)
-        ├── StudioFrame.tsx    # 三栏框架(renderSlot conversation + shell.overlay)
-        └── styles.ts          # 注入 <style data-plugin="canvas-studio">
+        ├── api.ts        # listStudioProjects / createStudioProject(market api.ts 模式)
+        ├── project-store.ts      # createProjectStore() 工厂(defineStore)
+        ├── contracts.ts  # StudioProjectListInjected(注入面类型)
+        ├── ProjectList.tsx       # 项目列表 + 新建表单(纯展示组件)
+        ├── StudioFrame.tsx       # 三栏框架(左侧接 ProjectList,useStore 读取)
+        └── styles.ts     # 注入 <style data-plugin="canvas-studio">
 ```
 
 根级改动:`package.json` workspaces 加 `canvas-studio`(lockfile 已更新)。
 
 ### 未提交
 
-已提交并推送:`canvas-studio` 分支(commit `4155603d`,含 canvas-studio/、docs/plans/、根 package.json/yarn.lock)。仓库已配 fork 双 remote(见 §7)。
+上次已提交并推送:`canvas-studio` 分支(P1 commit `4155603d` + handoff `30c935c3`)。本次 P2 改动尚未提交(等人工确认桌面 GUI 后一并提交)。
 
 ## 7. Git 工作流(fork 双 remote)
 
@@ -76,6 +86,10 @@ git submodule update --init --recursive
 8. **桌面 profile 的 pnpm 是 v11**(store v11):子模块 dsh CLI 转发的 pnpm 是 v10 会报 store 不匹配。桌面 profile 操作须在 profile 目录直接 `corepack pnpm@11.7.0 <verb> <spec>`,再手工维护 `dsh.profile.bundles`(dsh 的 reconcile 不经过时跳过)。
 9. **上游构建前提**:跑 web 冒烟(任意 profile)需先 `corepack yarn upstream:build`。
 10. **canvas-studio 的 client bundle 无运行时上游依赖**:对 `@deepseek-ai/*` 全是 type-only import(被擦除),唯一运行时外部依赖是 `react/jsx-runtime`(shell 提供)。external 列表照抄 market。
+11. **client bundle 可运行时 require runtime store 引擎**:`@deepseek-ai/dsh-client-runtime/client` 是上游 `CLIENT_EXTERNALS` 的文档化豁免(RUNTIME_STORE_EXEMPTION),loader 模块表直接应答 —— P2 起 `defineStore` 从它 import(已在 external 列表)。
+12. **workspace.create 幂等**:Host `ensureWorkspace` 按路径 resolve-by-path 复用,client `manager.create` 成功后 upsert 进本地列表 → create 返回即可 `startSession(workspaceId)`。绑定流程:`ctx.workspaces.create({ path: project.dir })` + `startSession(workspace.workspaceId)`。
+13. **项目注册表权限**:目录/注册表 0700/0600;写注册表走 `writeFileAtomic`(`@deepseek-ai/dsh-atomic-write`,新 dependencies)。Host 半新增依赖 atomic-write/home-paths/host-webserver,canvas-studio 自带嵌套 node_modules,profile `link:` 安装无需重装。
+14. **webServer 路由信任模型**:与 community-market 一致 —— GET 要求 loopback 权威(remoteAddress 回环 + host=127.0.0.1:port + sec-fetch-site 非 cross-site),POST 加同源 Origin。冒烟时 curl 必须带 `-H "origin: http://127.0.0.1:3080"`。
 
 ## 3. 环境事实
 
@@ -102,49 +116,59 @@ cd deepseek-harness && node --import tsx/esm apps/cli/src/bin.ts --profile studi
 
 # 桌面启动
 corepack yarn dev
+# 桌面 P2 人工确认点:左侧项目列表可见;点「+ 新建项目」输入名 → 创建 → 目录落盘
+# (~/.dsh/canvas-studio/projects/<id>/assets)+ 列表出现该项并高亮、右栏会话切换(标题/工作区变化)
+
+# web 冒烟 + 路由自测(studio profile 起来后)
+curl http://127.0.0.1:3080/canvas-studio/projects
+curl -X POST -H "host: 127.0.0.1:3080" -H "origin: http://127.0.0.1:3080" \
+  -H 'content-type: application/json' -d '{"name":"冒烟项目"}' \
+  http://127.0.0.1:3080/canvas-studio/projects
+# 无 origin 的 POST 应 405;非法名(空/斜杠/缺字段)应 400
 
 # 桌面 profile 装/卸插件(必须 corepack pnpm@11.7.0,然后手工改 bundles)
 cd ~/.dsh/profiles/desktop && corepack pnpm@11.7.0 add /Users/wl/.../canvas-studio
 # 或 remove;bundles 列表在 ~/.dsh/profiles/desktop/package.json 手工增删
+# 注:canvas-studio 是 link: 安装,新依赖(atomic-write 等)自带嵌套 node_modules,无需重装
 ```
 
-## 5. 下一步:P2(项目注册表)
+## 5. 下一步:P3(工具 + 产物托管)
 
-按计划 §6 P2 与 §11:
+按计划 §6 P3 与 §7(先读 API 参考文档再动手):
 
-1. **Host 项目注册表**:`$DSH_HOME/canvas-studio/projects.json`(注册表)+ `projects/<id>/` 目录(含 `assets/` 子目录)。参考 `resolveDshHome()`(`deepseek-harness/packages/util/home-paths`)。写文件用 atomic write(参考桌面壳 replace 模式)。
-2. **webServer 路由**:参照 `dsh-community-market/src/host/routes.ts`(`registerMarketRoutes` 模式),提供 `GET/POST /canvas-studio/projects` 等;client 侧参照 `dsh-community-market/src/client/api.ts`(fetch 模式,同源)。
-3. **Client 项目列表**:替换 `StudioFrame.tsx` 左侧占位;"新建项目"按钮生效(输入项目名→POST→列表刷新);项目切换。
-4. **会话绑定**:研究 `ctx.workspaces.startSession(workspaceId)`(先例:`deepseek-harness/packages/client/ui-sidebar/src/client/index.ts` 的 startSession 按钮)。决定项目↔workspace↔session 映射(建议:每项目一个 workspace,项目打开 = 创建/复用 workspace + startSession,后续挂 sessionId 到项目记录)。
-5. **P2 验证标准**:新建项目 → 目录落盘 + 注册表更新 → 会话切换正确。
+1. **读 API 参考文档**:细化 `image_generate` / `video_generate` / `video_composite` 三个工具的参数设计(§7.1:同步返回、超时、取消语义、产物 → `assets/` → URL)
+2. **凭证配置**:插件 Config(`apiBaseUrl` + `apiKey` 明文),Config 结构照上游惯例
+3. **工具注册**:`ctx.tools.register()` / `defineTool`,产物写入项目目录 `assets/`(写文件用 `writeFileAtomic`,参考 `ProjectRegistry.assetsDir()`)
+4. **产物静态路由**:Host 侧 webServer 路由出 URL(可参考 `ROUTE_ASSETS` 的 media 模式:GET + loopback + 安全头)
+5. **画布渲染前置**:client 侧 `session/event`(tool/call → tool/result)监听按 §7.6 先做 store 动作映射(P4 画布组件的输入)
+6. **验证**:对话中直接产出图片/视频;会话内工具调用 → 项目目录出现产物
 
-P2 待研究文件:market 的 `src/host/routes.ts`、`src/client/api.ts`、client runtime 的 workspaces service(`deepseek-harness/packages/client/runtime/src/client/workspaces/`)。
+P3 待研究文件:`ctx.tools.register()` 教程(basic/tool)、`dsh-host-webserver` 路由 API(已用过 register exact)、工具产物处理先例(extension-cookbook)。
 
 ## 6. 纪律提醒
 
 - 不编辑 `deepseek-harness/` 子模块;桌面产品文件(dsh-plugin-desktop 等)不动
-- client 组件纪律:props 四份额(PropsRuntime/PropsRenderSlots/PropsStore/inject),组件不见 ctx;store 用 `createXXXStore()` 工厂;产品文案中文、注释英文;样式注入 `<style data-plugin>`(P1 模式),不引入 CSS Modules/Tailwind
-- Host 侧按上游惯例:name/inject/Config/apply,`ctx.get()` 读可选服务
-- 完成 P2 后:更新本交接文档 + 计划文档 §6 的 P2 行,提交一次
+- client 组件纪律:props 四份额(PropsRuntime/PropsRenderSlots/PropsStore/inject),组件不见 ctx;store 用 `createXXXStore()` 工厂(defineStore);async 业务全在 apply/inject 回调,经 store actions 提交;产品文案中文、注释英文;样式注入 `<style data-plugin>`(P1 模式),不引入 CSS Modules/Tailwind
+- Host 侧按上游惯例:name/inject/Config/apply,`ctx.get()` 读可选服务;webServer 路由注册返回 disposer,经 `ctx.effect()` 挂载
+- 完成 P3 后:更新本交接文档 + 计划文档 §6 的 P3 行,提交一次
 
 ## 7. 新对话提示词(直接粘贴)
 
 ```
 继续 Canvas Studio 插件开发(DeepSeek Harness Desktop 仓库
 /Users/wl/Desktop/job/learn/WL_AI_Studio/reference/deepseek-harness-desktop)。
-P1 已完成并桌面验证通过(三栏工作台正常显示)。
+P1(三栏工作台)+ P2(项目注册表)已完成,P2 headless 验证通过;桌面 GUI 确认点:新建项目 → 目录落盘 + 会话切换。
 
 先读这两个文档再动手:
 1. docs/plans/canvas-studio.md —— 完整计划(P1-P7 阶段、WL-AI-Director 模型映射、组合约束)
-2. docs/plans/canvas-studio-handoff.md —— 交接状态(P1 完成细节、已验证机制、环境事实、命令备忘、下一步 P2)
+2. docs/plans/canvas-studio-handoff.md —— 交接状态(P2 完成细节、已验证机制、环境事实、命令备忘、下一步 P3)
 
 注意:AGENTS.md 是仓库规则(不编辑 deepseek-harness/ 子模块、上游命令走根脚本)。
 
-当前任务:P2 项目注册表。
-1. Host 半:项目注册表 $DSH_HOME/canvas-studio/projects.json + projects/<id>/ 目录(assets/ 子目录),atomic write;
-   参照 dsh-community-market/src/host/routes.ts 注册 webServer 路由(GET/POST /canvas-studio/projects)。
-2. Client 半:替换 StudioFrame.tsx 左侧占位为项目列表(新建/切换),参照 dsh-community-market/src/client/api.ts 的 fetch 模式;
-   会话绑定研究 ctx.workspaces.startSession(先例 ui-sidebar 的 New Session 按钮)。
-3. 验证:build/typecheck/check 通过;studio profile web 冒烟;桌面 corepack yarn dev 人工确认。
-完成 P2 后更新两份文档并提交。
+当前任务:P3 工具 + 产物托管(先读 API 参考文档再设计三个工具)。
+1. 读 API 参考文档,细化 image_generate / video_generate / video_composite 参数(计划 §7.1:同步返回、超时、取消语义)
+2. 插件 Config(apiBaseUrl + apiKey 明文);ctx.tools.register() 注册三个工具;产物写项目 assets/(writeFileAtomic)
+3. Host 产物静态路由出 URL(webServer GET + loopback + 安全头);client 半 session/event 监听做 §7.6 store 动作映射
+4. 验证:build/typecheck/check 通过;studio profile web 冒烟;桌面 corepack yarn dev 人工确认。
+完成 P3 后更新两份文档并提交。
 ```

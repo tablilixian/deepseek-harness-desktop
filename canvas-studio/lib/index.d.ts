@@ -1,12 +1,12 @@
 /**
- * Canvas Studio host half. P1 ships the composition only: the row exists so
- * the profile layer and the browser client-module graph can mount. Project
- * registry, asset serving, and the media tools land in P2/P3.
+ * Canvas Studio host half: the project registry (durable records under
+ * `$DSH_HOME/canvas-studio/`) and its webServer HTTP face. The media tools
+ * and asset serving land in P3.
  */
 import type { Context } from '@deepseek-ai/cordis';
 /** Stable Cordis plugin name matching the bundle patch row. */
 export declare const name = "canvas-studio";
 /** Services required by the host plugin. */
 export declare const inject: string[];
-/** Host plugin body: nothing to mount before the project registry (P2). */
-export declare function apply(_ctx: Context): void;
+/** Host plugin body: the project registry and its routes. */
+export declare function apply(ctx: Context): void;

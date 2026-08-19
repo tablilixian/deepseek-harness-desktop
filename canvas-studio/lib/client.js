@@ -4,7 +4,43 @@ window.__ModuleLoader__.load({
 		var module = { exports: {} };
 		var exports = module.exports;
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+		let _deepseek_ai_dsh_client_runtime_client = require("@deepseek-ai/dsh-client-runtime/client");
+		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
+		//#region src/client/api.ts
+		/** HTTP facts used to localize safe Client-facing Studio failures. */
+		var StudioApiError = class extends Error {
+			status;
+			code;
+			constructor(message, status, code) {
+				super(message);
+				this.status = status;
+				this.code = code;
+				this.name = "StudioApiError";
+			}
+		};
+		async function readJson(response) {
+			const value = await response.json();
+			if (!response.ok) throw new StudioApiError(typeof value.error === "string" ? value.error : `request failed: ${response.status}`, response.status, typeof value.code === "string" ? value.code : void 0);
+			return value;
+		}
+		/** List all registered projects. */
+		async function listStudioProjects(signal) {
+			return (await readJson(await fetch("/canvas-studio/projects", {
+				cache: "no-store",
+				...signal === void 0 ? {} : { signal }
+			}))).projects;
+		}
+		/** Create a project and return its record. */
+		async function createStudioProject(name, signal) {
+			return (await readJson(await fetch("/canvas-studio/projects", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ name }),
+				...signal === void 0 ? {} : { signal }
+			}))).project;
+		}
+		//#endregion
 		//#region src/client/layout-controller.ts
 		/**
 		* Studio-owned implementation of the standard panel-action face. The studio
@@ -19,6 +55,50 @@ window.__ModuleLoader__.load({
 			/** Close the details panel (no-op: the studio frame renders no details column). */
 			closeDetails() {}
 		};
+		//#endregion
+		//#region src/client/project-store.ts
+		/**
+		* Project-list viewing store: the registry snapshot plus the current
+		* selection. Reads happen through the framework-bound `useStore`; writes
+		* through the declared actions only (async fetching lives in the apply-world
+		* inject callbacks, which commit through these actions).
+		*/
+		/**
+		* Create the project-list store handle.
+		* @returns the store handle (spec + type + identity + factory in one).
+		*/
+		function createProjectStore() {
+			return (0, _deepseek_ai_dsh_client_runtime_client.defineStore)({
+				init: () => ({
+					projects: [],
+					selectedProjectId: null,
+					phase: "idle",
+					error: null,
+					creating: false
+				}),
+				actions: {
+					setPhase: (draft, phase) => {
+						draft.phase = phase;
+					},
+					setLoaded: (draft, projects) => {
+						draft.projects = projects;
+						draft.phase = "idle";
+						draft.error = null;
+						if (draft.selectedProjectId !== null && !projects.some((project) => project.id === draft.selectedProjectId)) draft.selectedProjectId = null;
+					},
+					setFailed: (draft, error) => {
+						draft.phase = "error";
+						draft.error = error;
+					},
+					select: (draft, projectId) => {
+						draft.selectedProjectId = projectId;
+					},
+					setCreating: (draft, creating) => {
+						draft.creating = creating;
+					}
+				}
+			});
+		}
 		//#endregion
 		//#region src/client/styles.ts
 		/**
@@ -73,6 +153,113 @@ window.__ModuleLoader__.load({
   text-align: center;
 }
 
+.csProjectList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.csProjectNew {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.csProjectNew:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csProjectForm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.csProjectNameInput {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+}
+
+.csProjectFormActions {
+  display: flex;
+  gap: 6px;
+}
+
+.csProjectFormActions button {
+  font: inherit;
+  flex: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+
+.csProjectFormActions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csProjectItem {
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.csProjectItem:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.csProjectItemActive {
+  border-color: color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.csProjectName {
+  font-weight: 500;
+}
+
+.csProjectDate {
+  font-size: 12px;
+  color: color-mix(in srgb, currentColor 50%, transparent);
+}
+
+.csProjectError {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  font-size: 13px;
+  color: color-mix(in srgb, #d1242f 85%, currentColor);
+}
+
+.csProjectError button {
+  font: inherit;
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+
 .csCanvas {
   position: relative;
   overflow: hidden;
@@ -115,13 +302,114 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/client/ProjectList.tsx
+		/** Relative-day label for the project creation date. */
+		function createdLabel(project) {
+			return new Date(project.createdAt).toLocaleDateString();
+		}
+		/**
+		* The studio project list: an inline create form plus one row per project.
+		* Clicking a row opens the project (session binding happens in the callback).
+		*/
+		function ProjectList(props) {
+			const { projects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props;
+			const [formOpen, setFormOpen] = (0, react.useState)(false);
+			const [draftName, setDraftName] = (0, react.useState)("");
+			const submit = async () => {
+				const name = draftName.trim();
+				if (name.length === 0 || creating) return;
+				await onCreate(name);
+				setFormOpen(false);
+				setDraftName("");
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: "csProjectList",
+				children: [
+					!formOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: "csProjectNew",
+						disabled: creating,
+						onClick: () => setFormOpen(true),
+						children: "+ 新建项目"
+					}),
+					formOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csProjectForm",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							className: "csProjectNameInput",
+							value: draftName,
+							placeholder: "项目名",
+							autoFocus: true,
+							disabled: creating,
+							onChange: (event) => {
+								setDraftName(event.target.value);
+							},
+							onKeyDown: (event) => {
+								if (event.key === "Enter") submit();
+								if (event.key === "Escape") setFormOpen(false);
+							}
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: "csProjectFormActions",
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								disabled: creating || draftName.trim().length === 0,
+								onClick: () => void submit(),
+								children: creating ? "创建中" : "创建"
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								disabled: creating,
+								onClick: () => setFormOpen(false),
+								children: "取消"
+							})]
+						})]
+					}),
+					phase === "loading" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csProjectsEmpty",
+						children: "加载中…"
+					}),
+					phase === "error" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csProjectError",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: error }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							onClick: onRefresh,
+							children: "重试"
+						})]
+					}),
+					phase === "idle" && projects.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csProjectsEmpty",
+						children: "还没有项目,点击「新建项目」开始创作"
+					}),
+					projects.map((project) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+						type: "button",
+						className: project.id === selectedProjectId ? "csProjectItem csProjectItemActive" : "csProjectItem",
+						onClick: () => onOpen(project),
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csProjectName",
+							children: project.name
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csProjectDate",
+							children: createdLabel(project)
+						})]
+					}, project.id))
+				]
+			});
+		}
+		//#endregion
 		//#region src/client/StudioFrame.tsx
 		/**
 		* Three-column studio frame: project list, canvas surface, and the official
 		* conversation seat on the right. The sidebar and details seats stay
 		* declared (upstream registrants keep their paths) but are not rendered.
 		*/
-		function StudioFrame({ renderSlot }) {
+		function StudioFrame(props) {
+			const { renderSlot, useStore, refreshProjects, createProject, openProject } = props;
+			const projects = useStore((store) => store.projects);
+			const selectedProjectId = useStore((store) => store.selectedProjectId);
+			const phase = useStore((store) => store.phase);
+			const error = useStore((store) => store.error);
+			const creating = useStore((store) => store.creating);
+			(0, react.useEffect)(() => {
+				refreshProjects();
+			}, [refreshProjects]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csFrame",
 				children: [
@@ -131,12 +419,19 @@ window.__ModuleLoader__.load({
 							className: "csProjectsHeader",
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "项目" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 								type: "button",
-								disabled: true,
-								children: "新建项目"
+								disabled: phase === "loading" || creating,
+								onClick: () => void refreshProjects(),
+								children: "刷新"
 							})]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: "csProjectsEmpty",
-							children: "项目列表将在后续阶段提供"
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectList, {
+							projects,
+							selectedProjectId,
+							phase,
+							error,
+							creating,
+							onRefresh: () => void refreshProjects(),
+							onCreate: createProject,
+							onOpen: openProject
 						})]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("main", {
@@ -161,12 +456,16 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/index.ts
 		/** Services required before the studio frame can mount. */
-		const inject = ["slots"];
+		const inject = ["slots", "workspaces"];
 		/**
 		* Client plugin body: provide the standard ctx.layout contract (owned by the
 		* disabled ui-layout row) and register the studio frame into the runtime's
 		* built-in root slot, declaring the standard child seats so the upstream
 		* sidebar/conversation/details plugins keep their registration paths.
+		*
+		* Project switching binds the conversation to the project's workspace: each
+		* project owns one workspace registered at its disk directory, and opening a
+		* project connects (reusing a blank session) and navigates to it.
 		* @param ctx - active browser Cordis context.
 		*/
 		function apply(ctx) {
@@ -198,7 +497,44 @@ window.__ModuleLoader__.load({
 							scope: "root"
 						}
 					},
-					inject: () => ({ layout })
+					store: createProjectStore,
+					inject: ({ select, setPhase, setLoaded, setFailed, setCreating }) => {
+						const refreshProjects = async () => {
+							setPhase("loading");
+							try {
+								setLoaded(await listStudioProjects());
+							} catch (cause) {
+								setFailed(cause instanceof Error ? cause.message : "项目列表加载失败");
+							}
+						};
+						const openProject = async (project) => {
+							select(project.id);
+							try {
+								const workspace = await ctx.workspaces.create({ path: project.dir });
+								ctx.workspaces.startSession(workspace.workspaceId);
+							} catch (cause) {
+								setFailed(cause instanceof Error ? cause.message : "项目会话绑定失败");
+							}
+						};
+						const createProject = async (name) => {
+							setCreating(true);
+							try {
+								const project = await createStudioProject(name);
+								await refreshProjects();
+								await openProject(project);
+							} catch (cause) {
+								setFailed(cause instanceof Error ? cause.message : "项目创建失败");
+							} finally {
+								setCreating(false);
+							}
+						};
+						return {
+							layout,
+							refreshProjects,
+							createProject,
+							openProject
+						};
+					}
 				}, StudioFrame);
 				return () => {
 					disposeRegistration();

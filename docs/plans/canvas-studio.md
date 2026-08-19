@@ -79,7 +79,7 @@ canvas-studio/
 | 阶段 | 内容 | 验证 |
 | --- | --- | --- |
 | **P1 骨架** | 独立包 + 双半构建 + patch 禁用 ui-layout + root occupant 三栏布局 + 官方对话区渲染 | `corepack yarn dev`;成功标准:加载无错、官方聊天区原样出现在右栏 |
-| **P2 项目** | Host 项目注册表 + 磁盘建目录 + 新建/切换 + session 绑定 | 新建项目 → 会话切换正确、目录落盘 |
+| **P2 项目** | Host 项目注册表 + 磁盘建目录 + 新建/切换 + session 绑定 | 新建项目 → 会话切换正确、目录落盘 ✅ 已完成(2026-08-19,见 §13) |
 | **P3 工具** | 三个工具接同步 POST API + 凭证配置 + 产物托管(先读 API 参考文档) | 对话中直接产出图片/视频 |
 | **P4 画布** | canvas 组件 + 节点状态机(session/event)+ 产物渲染 + 血缘连线 | 跑通"文字 → 完整视频"全链路 |
 | **P5 交互** | 节点级打断/改提示/重试(cancel/steer/followup) | 中途打断、修改、单节点重试 |
@@ -234,3 +234,18 @@ P1 骨架已完成并通过 headless 验证(2026-08-19):
 - **in-box bundle 不进 profile pnpm**:`@deepseek-ai/dsh-web-app` 的 frontend 未发布,profile manifest 直接列名即可(经 `$DSH_HOME/profiles/node_modules` 愈合回退解析)
 - **上游构建前提**:从源码跑 web 冒烟需先 `corepack yarn upstream:build`(frontend dist + 各 client bundle)
 - **桌面 profile 的 pnpm 是 v11**:profile node_modules 由桌面壳的 pnpm 11 维护(store v11);CLI 转发的 pnpm 是 v10 会报 store 不匹配 → 在 profile 目录直接用 `corepack pnpm@11.7.0 <verb> <spec>`,再手工维护 `dsh.profile.bundles` 列表
+
+## 13. P2 验证结论(已落地)
+
+P2 项目注册表已完成并通过 headless 验证(2026-08-19):
+
+- **Host 注册表**:`$DSH_HOME/canvas-studio/projects.json`(`{version:1,projects[]}`)+ `projects/<id>/`(含 `assets/`);目录 0700、注册表 0600;写注册表走 `@deepseek-ai/dsh-atomic-write`(随机后缀 temp + rename)
+- **路由**:`GET/POST /canvas-studio/projects` 注册进 `ctx.webServer`(kind exact);GET 要求 loopback 权威(remoteAddress 回环 + host 端口/主机名匹配 + sec-fetch-site 非 cross-site),POST 额外要求同源 Origin —— 与 community-market 同一信任模型
+- **Client**:`ProjectList` 替换左侧占位(新建表单/项目列表/加载/错误态),`createProjectStore()` 工厂(defineStore,`@deepseek-ai/dsh-client-runtime/client` 是官方 RUNTIME_STORE_EXEMPTION external,可运行时 require);async fetch 全在 inject 回调,经 store actions 提交
+- **会话绑定**(已定案):每项目一个 workspace,路径 = 项目磁盘目录;打开项目 = `ctx.workspaces.create({ path: project.dir })`(Host `ensureWorkspace` 按路径幂等,返回值即注册表内记录)+ `ctx.workspaces.startSession(workspaceId)`(复用/新建 blank session 并导航)。项目记录暂不持久化 sessionId(P3+ 再挂)
+- **冒烟**:studio profile 启动 0 错误;GET 200 空表、POST 201 建项目(目录+assets 落盘、注册表更新)、无 Origin POST 405、非法名(空/斜杠/缺字段)400;`/plugins/canvas-studio/client.js` 200(rev 更新)
+
+### 新增源码级事实
+
+- **client bundle 运行时依赖**:`defineStore` 从 `@deepseek-ai/dsh-client-runtime/client` require —— 该 specifier 是上游 `CLIENT_EXTERNALS` 的文档化豁免(RUNTIME_STORE_EXEMPTION),loader 模块表直接应答,canvas-studio 的 external 列表含它即可
+- **workspace.create 幂等**:Host 侧 `ensureWorkspace` 先 `registry.resolveByPath` 再建,client 侧 `manager.create` 成功后 upsert 进本地列表 —— 所以 create 返回后 `startSession(workspaceId)` 一定能找到该 workspace

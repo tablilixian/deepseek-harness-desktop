@@ -6,6 +6,10 @@ export declare const inject: string[];
  * disabled ui-layout row) and register the studio frame into the runtime's
  * built-in root slot, declaring the standard child seats so the upstream
  * sidebar/conversation/details plugins keep their registration paths.
+ *
+ * Project switching binds the conversation to the project's workspace: each
+ * project owns one workspace registered at its disk directory, and opening a
+ * project connects (reusing a blank session) and navigates to it.
  * @param ctx - active browser Cordis context.
  */
 export declare function apply(ctx: ClientContext): void;

@@ -50,6 +50,113 @@ const STUDIO_STYLES = `
   text-align: center;
 }
 
+.csProjectList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.csProjectNew {
+  font: inherit;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.csProjectNew:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csProjectForm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.csProjectNameInput {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+}
+
+.csProjectFormActions {
+  display: flex;
+  gap: 6px;
+}
+
+.csProjectFormActions button {
+  font: inherit;
+  flex: 1;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+
+.csProjectFormActions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csProjectItem {
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.csProjectItem:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.csProjectItemActive {
+  border-color: color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.csProjectName {
+  font-weight: 500;
+}
+
+.csProjectDate {
+  font-size: 12px;
+  color: color-mix(in srgb, currentColor 50%, transparent);
+}
+
+.csProjectError {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  font-size: 13px;
+  color: color-mix(in srgb, #d1242f 85%, currentColor);
+}
+
+.csProjectError button {
+  font: inherit;
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: transparent;
+  cursor: pointer;
+}
+
 .csCanvas {
   position: relative;
   overflow: hidden;
