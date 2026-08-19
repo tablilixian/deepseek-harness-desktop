@@ -1,4 +1,4 @@
-# Canvas Studio 交接文档(2026-08-19,P2 完成)
+# Canvas Studio 交接文档(2026-08-19,P3 代码完成,待验收)
 
 > 用途:新开对话继续开发前的完整上下文。本文件 + [`docs/plans/canvas-studio.md`](./canvas-studio.md)(完整计划)是当前权威。本文件记录"当前状态、已验证机制、环境事实、下一步"。
 
@@ -11,12 +11,14 @@
 - P2:P1 后新增项目注册表(Host)+ 项目列表 UI(Client)+ 会话绑定(workspace = 项目目录)
 - 开发环境已就绪:root `corepack yarn install` 完成、子模块已初始化 + `upstream:build` 完成
 - P2 headless 验证全过(build/typecheck/check、studio profile web 冒烟);**桌面 GUI 已确认**:左侧项目列表可见、`+ 新建项目` 新建/切换正常、右栏会话标题与项目名已统一(通过 `ctx.workspaces.rename` 同步,详见计划 §13)
+- **P3(工具 + 产物托管)代码完成**:`build` / `typecheck` 通过,**待桌面/CLI 人工验收**(需用户配 Drama Backend 环境变量 + key)。三个工具已注册(`image_generate` / `video_generate` / `video_composite`),调用走 Host 侧生成 + 落盘 + 静态托管闭环,避免浏览器 CORS。详见计划文档 §15。
 
 ### 已建文件
 
 ```
 canvas-studio/
 ├── package.json          # dsh.bundle.patch + dsh.client + exports["./client"] + scripts
+│                        # + dependencies: @deepseek-ai/dsh-tools / dsh-llm (rc.7)
 ├── cordis.patch.yml      # insert 自身行 + 禁用 ui-layout
 ├── tsconfig.json         # Host(tsc 产出 lib/index.js)
 ├── tsconfig.client.json  # Client 声明(tsc --emitDeclarationOnly → lib/types/client)
@@ -26,17 +28,21 @@ canvas-studio/
 │   ├── dev-install.mjs   # 未用(桌面集成走了手工 pnpm,见 §4)
 │   └── verify-client-loader.mjs  # 单模块注册验证
 └── src/
+    ├── config.ts         # [P3] 明文配置:DRAMA_API_BASE/KEY、ENDPOINTS、sizeForAspectRatio、newAssetId
     ├── contracts/
     │   └── project.ts    # StudioProject 共享类型(双半 type-only 引用,运行时不出现)
     ├── projects.ts       # Host:ProjectRegistry($DSH_HOME/canvas-studio/projects.json + projects/<id>/assets)
-    ├── routes.ts         # Host:registerStudioRoutes(GET/POST /canvas-studio/projects,loopback+同源检查)
+    ├── generate.ts       # [P3] Host 生成核心:uploadImage / callDrama / generateAsset(Host 落盘)
+    ├── routes.ts         # Host:GET/POST /canvas-studio/projects + [P3] POST /generate + GET /assets(prefix,loopback+同源)
     ├── index.ts          # Host:name/inject(['webServer'])/apply(注册表 + 路由)
     └── client/
         ├── index.ts      # apply:advanced 跳过 + provide layout + register root(store + inject)
+        │               # [P3] 注册三个 studio 工具(activeProjectId 跟踪)
         ├── layout-controller.ts  # ILayout 实现(P1 全 no-op)
-        ├── api.ts        # listStudioProjects / createStudioProject(market api.ts 模式)
+        ├── api.ts        # listStudioProjects / createStudioProject + [P3] generateAsset()
         ├── project-store.ts      # createProjectStore() 工厂(defineStore)
         ├── contracts.ts  # StudioProjectListInjected(注入面类型)
+        ├── tools.ts      # [P3] createStudioTools():3 个 defineTool(image_generate/video_generate/video_composite)
         ├── ProjectList.tsx       # 项目列表 + 新建表单(纯展示组件)
         ├── StudioFrame.tsx       # 三栏框架(左侧接 ProjectList,useStore 读取)
         └── styles.ts     # 注入 <style data-plugin="canvas-studio">
@@ -46,9 +52,10 @@ canvas-studio/
 
 ### 已提交
 
-- P1 骨架:`4155603d`(skeleton)+ `30c935c3`(handoff 文档/fork 工作流)
+- P1 骨架:`4155603dd`(skeleton)+ `30c935c3`(handoff 文档/fork 工作流)
 - P2 项目注册表核心:`8786414361`
-- **P2 收尾 + 深色主题:`9c8f5f3255`** —— 包含:可见性修复(`currentColor`/`--dsw-fg` → 官方 `--dsw-alias-*` 语义 token,自动跟随 light/dark)、会话标题同步 `workspaces.rename`、防御性 ErrorBoundary、`docs/plans` 更新。本地已提交,**尚未 push 到 fork**(`origin/canvas-studio` 仍停在 `30c935c3`)。
+- **P2 收尾 + 深色主题:`a0e74865ed`** —— 包含:可见性修复(`currentColor`/`--dsw-fg` → 官方 `--dsw-alias-*` 语义 token,自动跟随 light/dark)、会话标题同步 `workspaces.rename`、防御性 ErrorBoundary、`docs/plans` 更新。**已推送到 fork**(`origin/canvas-studio` = `a0e74865ed`,fast-forward `30c935c3..a0e74865ed`)。
+- **P3(工具 + 产物托管):代码完成,`build`/`typecheck` 通过,尚未提交**(见 §5)。工作树改动:`canvas-studio/src/{config,generate,routes,client/api,client/index,client/tools}.ts` + `package.json` + 重建 `lib/` + `docs/plans/{canvas-studio.md,canvas-studio-handoff.md}`。注意 `deepseek-harness/` 子模块当前为 dirty(`git status` 显示 `m`),提交 P3 时务必 `--` 排除子模块、只 stage canvas-studio 与 docs。
 
 ## 7. Git 工作流(fork 双 remote)
 
@@ -134,18 +141,22 @@ cd ~/.dsh/profiles/desktop && corepack pnpm@11.7.0 add /Users/wl/.../canvas-stud
 # 注:canvas-studio 是 link: 安装,新依赖(atomic-write 等)自带嵌套 node_modules,无需重装
 ```
 
-## 5. 下一步:P3(工具 + 产物托管)
+## 5. 当前进度:P3 完成 → 下一步 P4
 
-按计划 §6 P3 与 §7(先读 API 参考文档再动手):
+**P3 已实现(代码完成,待验收)** —— 偏离原计划 §5 的地方(均已按用户"先用明文、验收后再整理"的指示处理):
 
-1. **读 API 参考文档**:细化 `image_generate` / `video_generate` / `video_composite` 三个工具的参数设计(§7.1:同步返回、超时、取消语义、产物 → `assets/` → URL)
-2. **凭证配置**:插件 Config(`apiBaseUrl` + `apiKey` 明文),Config 结构照上游惯例
-3. **工具注册**:`ctx.tools.register()` / `defineTool`,产物写入项目目录 `assets/`(写文件用 `writeFileAtomic`,参考 `ProjectRegistry.assetsDir()`)
-4. **产物静态路由**:Host 侧 webServer 路由出 URL(可参考 `ROUTE_ASSETS` 的 media 模式:GET + loopback + 安全头)
-5. **画布渲染前置**:client 侧 `session/event`(tool/call → tool/result)监听按 §7.6 先做 store 动作映射(P4 画布组件的输入)
-6. **验证**:对话中直接产出图片/视频;会话内工具调用 → 项目目录出现产物
+1. **架构决策(关键)**:生成 + 落盘放在 **Host(Node)**,不走浏览器直连 Drama Backend(避免 CORS)。client 工具 `POST /canvas-studio/generate` → Host 调 Drama → 下载媒体 → 写 `assetsDir(projectId)/<uuid>.<png|mp4>` → 返回 loopback URL `http://127.0.0.1:${port}/canvas-studio/assets/<projectId>/<file>`。
+2. **凭证配置**:按用户要求**明文**写在 `src/config.ts`(`DRAMA_API_BASE`/`DRAMA_API_KEY` + 环境变量覆盖),未做 Config 面/加密 —— 验收通过后整理。
+3. **工具注册**:`src/client/tools.ts` 用 `defineTool` 注册 `image_generate`(txt2image/image2image)、`video_generate`(image2videomsr 图生视频)、`video_composite`(image2videomkr 首尾帧合成,`frame_index=-1` 取尾帧)。产物经 `output.render` → `TextBlock` 回模型。
+4. **产物静态路由**:Host `routes.ts` 新增 `GET /canvas-studio/assets`(prefix,loopback + 同源检查,`nosniff`/`no-store`,防 `..` 穿越)。`POST /canvas-studio/generate`(exact,同源)串起 `generateAsset`。
+5. **画布渲染前置**:`client/index.ts` 跟踪 `activeProjectId`;工具 `requireProject()` 在无效项目时抛错。P4 画布组件监听 `tool/call → tool/result` 的 store 映射**尚未做**(留给 P4)。
+6. **验证**:`build`/`typecheck` 通过(client bundle ≈234 kB 含 dsh-tools)。**桌面/CLI 人工验收待用户配 `CANVAS_STUDIO_DRAMA_API_BASE` + `CANVAS_STUDIO_DRAMA_API_KEY` 并跑一次工具调用**(见计划 §15 验收步骤)。
 
-P3 待研究文件:`ctx.tools.register()` 教程(basic/tool)、`dsh-host-webserver` 路由 API(已用过 register exact)、工具产物处理先例(extension-cookbook)。
+P3 已知简化(验收后整理):明文配置;组合仅首尾帧(非多关键帧/网格);无显式 `timeoutMs`;尺寸固定(9:16/1:1/16:9)。
+
+**下一步 P4(画布渲染)**:读 §7.6,在 client 侧监听 session `tool/call`/`tool/result` 事件 → 映射到 store 动作,把对话产出的图片/视频渲染进中间画布(P3 已为其铺好 store 入口 + 产物 URL)。
+
+纪律:完成 P4 后同样更新两文档再提交;提交时排除 dirty 的子模块。
 
 ## 6. 纪律提醒
 

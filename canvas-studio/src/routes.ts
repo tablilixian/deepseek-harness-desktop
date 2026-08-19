@@ -1,17 +1,23 @@
 /**
  * Canvas Studio webServer routes: the project registry HTTP face consumed by
- * the browser client. Reads require a local loopback request; mutations add a
- * same-origin requirement (the established community-market pattern).
+ * the browser client, plus the P3 media-generation and asset-serving faces.
+ * Reads require a local loopback request; mutations add a same-origin
+ * requirement (the established community-market pattern).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { readFile } from 'node:fs/promises'
 import { BlockList, isIP } from 'node:net'
+import { extname, join, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { StudioProject } from './contracts/project.js'
 import type { ProjectRegistry } from './projects.js'
+import { generateAsset, type GenerateParams } from './generate.js'
 
 const ROUTE_PROJECTS = '/canvas-studio/projects'
-const MAX_BODY_BYTES = 16 * 1024
+const ROUTE_GENERATE = '/canvas-studio/generate'
+const ROUTE_ASSETS = '/canvas-studio/assets'
+const MAX_BODY_BYTES = 16 * 1024 * 1024
 
 const loopbackAddresses = new BlockList()
 loopbackAddresses.addSubnet('127.0.0.0', 8, 'ipv4')
@@ -125,7 +131,7 @@ function readJson(req: IncomingMessage, signal: AbortSignal): Promise<unknown> {
       }
     }
     const onError = (cause: Error) => finish(() => reject(cause))
-    const onRequestAbort = () => finish(() => reject(new DOMException('The request was aborted', 'AbortError')))
+    const onRequestAbort = () => finish(() => reject(abortReason()))
     const onSignalAbort = () => finish(() => reject(abortReason()))
     req.on('data', onData)
     req.once('end', onEnd)
@@ -146,7 +152,7 @@ function asProjectName(value: unknown): string {
 }
 
 /**
- * Register the canvas-studio project routes.
+ * Register the canvas-studio project, generation, and asset routes.
  * @param ctx - active Host context (webServer service injected).
  * @param registry - the project registry this plugin owns.
  * @returns the route disposer (all registered routes).
@@ -195,6 +201,103 @@ export function registerStudioRoutes(ctx: Context, registry: ProjectRegistry): (
         }
       } finally {
         stopWatching()
+      }
+    }}),
+
+    // P3: media generation. The client tool posts the generation request; the
+    // Host calls Drama Backend, downloads the asset, writes it to the project's
+    // assets/ directory, and returns the webServer-hosted URL.
+    ctx.webServer.register({ kind: 'exact', path: ROUTE_GENERATE, handler: async (req, res) => {
+      if (!mutationAllowed(req, expectedPort)) {
+        sendJson(res, 403, { error: 'canvas-studio generate requires a local same-origin POST' })
+        return
+      }
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'generate requires POST' })
+        return
+      }
+      const controller = new AbortController()
+      const stopWatching = () => {
+        req.off('aborted', onRequestAbort)
+        res.off('close', onResponseClose)
+      }
+      const onRequestAbort = () => controller.abort()
+      const onResponseClose = () => {
+        if (!res.writableEnded) controller.abort()
+      }
+      req.once('aborted', onRequestAbort)
+      res.once('close', onResponseClose)
+      try {
+        const body = await readJson(req, controller.signal) as {
+          tool?: unknown
+          projectId?: unknown
+          params?: unknown
+        }
+        if (typeof body.tool !== 'string' || typeof body.projectId !== 'string') {
+          sendJson(res, 400, { error: '缺少 tool 或 projectId' })
+          return
+        }
+        const params = (body.params ?? {}) as GenerateParams
+        const result = await generateAsset(
+          registry,
+          expectedPort,
+          body.tool,
+          body.projectId,
+          params,
+          controller.signal,
+        )
+        if (!controller.signal.aborted && !res.destroyed) sendJson(res, 200, result)
+      } catch (cause) {
+        if (!controller.signal.aborted && !res.destroyed) {
+          sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'generate failed' })
+        }
+      } finally {
+        stopWatching()
+      }
+    }}),
+
+    // P3: asset serving. The Host writes generated media into each project's
+    // assets/ directory; this prefix route streams those files back. Only
+    // loopback + same-origin requests are allowed, and path traversal is
+    // blocked by verifying the resolved path stays under the project assets dir.
+    ctx.webServer.register({ kind: 'prefix', path: ROUTE_ASSETS, handler: async (req, res) => {
+      if (!requestAllowed(req, expectedPort)) {
+        sendJson(res, 403, { error: 'canvas-studio request authority rejected' })
+        return
+      }
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'assets only support GET' })
+        return
+      }
+      const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${expectedPort}`)
+      const relative = decodeURIComponent(requestUrl.pathname.replace(ROUTE_ASSETS, ''))
+      const parts = relative.split('/').filter(Boolean)
+      if (parts.length !== 2) {
+        sendJson(res, 400, { error: 'asset path must be /<projectId>/<file>' })
+        return
+      }
+      const projectId = parts[0]
+      const file = parts[1]
+      if (!projectId || !file) {
+        sendJson(res, 400, { error: 'asset path must be /<projectId>/<file>' })
+        return
+      }
+      const base = registry.assetsDir(projectId)
+      const target = join(base, file)
+      if (!target.startsWith(base + sep)) {
+        sendJson(res, 403, { error: 'forbidden asset path' })
+        return
+      }
+      try {
+        const data = await readFile(target)
+        const contentType = extname(file).toLowerCase() === '.mp4' ? 'video/mp4' : 'image/png'
+        res.statusCode = 200
+        res.setHeader('content-type', contentType)
+        res.setHeader('cache-control', 'no-store')
+        res.setHeader('x-content-type-options', 'nosniff')
+        res.end(data)
+      } catch {
+        sendJson(res, 404, { error: 'asset not found' })
       }
     }}),
   ]

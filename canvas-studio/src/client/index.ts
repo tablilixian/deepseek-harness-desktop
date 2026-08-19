@@ -7,9 +7,10 @@ import { StudioLayoutController } from './layout-controller.js'
 import { createProjectStore } from './project-store.js'
 import { installStudioStyles } from './styles.js'
 import { StudioFrame } from './StudioFrame.js'
+import { createStudioTools } from './tools.js'
 
 /** Services required before the studio frame can mount. */
-export const inject = ['slots', 'workspaces']
+export const inject = ['slots', 'workspaces', 'tools']
 
 /**
  * Client plugin body: provide the standard ctx.layout contract (owned by the
@@ -23,6 +24,9 @@ export const inject = ['slots', 'workspaces']
  * @param ctx - active browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
+  // Tracks the project the user last opened/created so the media tools know
+  // where to write generated assets. Tool calls read this via a closure.
+  let activeProjectId: string | null = null
   // The desktop advanced shell owns the root slot with its own children
   // declarations; the studio frame is a compatibility-mode surface, so the
   // desktop's advanced frame keeps the desktop presentation unchanged.
@@ -35,6 +39,11 @@ export function apply(ctx: ClientContext): void {
   }
   const layout = new StudioLayoutController()
   ctx.effect(() => installStudioStyles(), 'canvas-studio: studio styles')
+  ctx.effect(() => {
+    const definitions = createStudioTools({ getActiveProjectId: () => activeProjectId })
+    const disposers = definitions.map((definition) => ctx.tools.register(definition))
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'canvas-studio: media generation tools')
   ctx.effect(() => {
     const disposeService = ctx.reflect.provide('layout', layout)
     const disposeRegistration = ctx.slots.register({
@@ -57,6 +66,7 @@ export function apply(ctx: ClientContext): void {
         }
         const openProject = async (project: StudioProject): Promise<void> => {
           select(project.id)
+          activeProjectId = project.id
           try {
             // workspace.create resolves an existing registration by path, so
             // binding is idempotent; the returned workspace is then in the

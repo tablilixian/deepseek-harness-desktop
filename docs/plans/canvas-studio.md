@@ -266,3 +266,32 @@ P2 项目注册表已完成并通过 headless 验证(2026-08-19):
 - **深色主题适配(已完成,2026-08-19)**:调研结论 —— 官方设计系统由 `@deepseek-ai/dsh-client-ui-theme` 拥有 `--dsw-alias-*` 语义 token(编进 web shell `base.css`,全局加载,与 `ui-layout` 无关),按 `body[data-ds-dark-theme]` 区分明暗两套值;`data-ds-dark-theme` 由 `ui-theme` 的 host 引导脚本按偏好写入 body(桌面已启用深色,对话区即证)。canvas-studio 的 `styles.ts` 已全部改用 `--dsw-alias-*` token(背景 `--dsw-alias-bg-base`、文字 `--dsw-alias-label-primary`、边框 `--dsw-alias-border-l2`、hover/active `--dsw-alias-interactive-bg-*`、错误 `--dsw-alias-state-error-primary`、滚动条按官方契约重绑 `--dsw-alias-scrollbar-*`),自动跟随应用主题,不再硬编码颜色。后续 P3/P4 新增 UI 一律沿用 `--dsw-alias-*`,不得写字面色或 `currentColor`。
 - **rename 失败降级**:当前 `openProject` 的 `rename` 抛错会中止会话启动;若实际遇到标题冲突等,建议改为"尽力改名、失败只日志"(见 §13 会话标题同步条)。
 - **项目记录持久化 sessionId**:P2 设计上暂不持久化,打开项目每次重建 workspace;如要避免重复 workspace 堆积,可在 P3+ 把 sessionId 写回项目注册表。
+
+## 15. P3 实现记录（2026-08-19）
+
+P3「工具 + 产物托管」代码落地,构建与类型检查通过（`canvas-studio` 工作区）。核心思路:**生成与落盘放在 Host 侧(Node,规避渲染进程 CORS),client 工具经 webServer 路由调 Host**,Host 调 Drama Backend → 写项目 `assets/` → 返回托管 URL。配置按用户要求先用明文(环境变量优先,回退明文常量),验收后再整理。
+
+### 新增 / 修改文件
+- `src/config.ts`（新增,Host）:明文配置 `DRAMA_API_BASE` / `DRAMA_API_KEY`(环境变量 `CANVAS_STUDIO_DRAMA_API_BASE` / `CANVAS_STUDIO_DRAMA_API_KEY` 优先,回退明文常量,验收后整理);导出 `DRAMA_ENDPOINTS`、`sizeForAspectRatio`、`newAssetId`。接口形态参考 WL-AI-Director `services/adapters/imageAdapter.ts` / `videoAdapter.ts`。
+- `src/generate.ts`（新增,Host）:`generateAsset(registry, port, tool, projectId, params, signal)` —— 按工具分派 Drama Backend 端点(txt2image / image2image / image2videomsr / image2videomkr)、上传参考图、下载产物、写 `assetsDir(projectId)`、返回 `{url,width,height,duration?}`。
+- `src/routes.ts`（改,Host）:新增 `POST /canvas-studio/generate`(同源自 POST,校验后调 `generateAsset`)与 `GET /canvas-studio/assets`(prefix,loopback+同源校验 + 路径穿越防护,流回 png/mp4)。
+- `src/client/api.ts`（改）:新增 `generateAsset(projectId, tool, params)` helper,POST `/canvas-studio/generate`。
+- `src/client/tools.ts`（新增,client）:`createStudioTools(context)` 返回 `image_generate` / `video_generate` / `video_composite` 三个 `defineTool` 定义(参数 schema + output schema + render 文本块);execute 调 `generateAsset`。
+- `src/client/index.ts`（改）:`inject` 加 `'tools'`;新增模块级 `activeProjectId`(openProject/createProject 时更新),`apply` 内 `ctx.tools.register` 注册三工具。
+
+### 工具语义（首版,验收后增强）
+- `image_generate(prompt, aspectRatio?, imageUrl?, negativePrompt?)`:文生图;传 `imageUrl` 走图生图。返回 `{url,width,height}`。
+- `video_generate(prompt, imageUrl, aspectRatio?, duration?)`:图生视频(image2videomsr)。`imageUrl` 通常来自 `image_generate` 产物。返回 `{url,width,height,duration}`。
+- `video_composite(prompt, imageUrls[], aspectRatio?, duration?)`:多图合成视频(首尾帧 image2videomkr)。返回同上。
+
+### 验收方式
+1. 启动桌面(兼容模式)并打开/新建一个项目。
+2. 设置 Drama Backend 环境变量(或改 `src/config.ts` 明文常量):`CANVAS_STUDIO_DRAMA_API_BASE`、`CANVAS_STUDIO_DRAMA_API_KEY`。
+3. 在对话中让 agent 调用 `image_generate` → 出现图片 URL;再 `video_generate(imageUrl=…)` → 视频 URL。
+4. 产物落在 `~/.dsh/canvas-studio/projects/<id>/assets/`;浏览器经 `http://127.0.0.1:<port>/canvas-studio/assets/<id>/<file>` 访问。
+
+### 已知简化（待 P3 收尾 / 整理）
+- 配置明文,验收后改为加密 / 配置中心;API key 不应进仓库。
+- `video_composite` 当前仅首尾帧插值,九宫格 / 多关键帧(MKR grid)、音频合成等后续增强。
+- 工具未显式声明 `timeoutMs`(`exec.signal` 已转发到 fetch,同步 API 下取消为本地中断)。
+- 产物尺寸固定按宽高比映射,未接 WL 的 `sizeConfig` 全量。
