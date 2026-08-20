@@ -21,6 +21,18 @@ export interface CanvasToolbarProps {
   onDistribute(direction: 'horizontal' | 'vertical'): void
   onAutoArrange(): void
   onAddNode(kind: ManualNodeKind): void
+  /** Toggle the layer list overlay inside the canvas. */
+  layersOpen: boolean
+  onToggleLayers(): void
+  /** Current zoom level (percent) shown next to the zoom buttons. */
+  scale: number
+  onZoomOut(): void
+  onZoomIn(): void
+  onFitContent(): void
+  onResetZoom(): void
+  /** Show / hide the minimap overlay. */
+  minimapVisible: boolean
+  onToggleMinimap(): void
 }
 
 const ALIGN_LABELS: Readonly<Record<AlignTarget, string>> = {
@@ -38,7 +50,7 @@ const ALIGN_LABELS: Readonly<Record<AlignTarget, string>> = {
  * prompt). Everything is props-driven — the frame wires the store actions.
  */
 export function CanvasToolbar(props: CanvasToolbarProps) {
-  const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode } = props
+  const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props
   return (
     <div className="csToolbar">
       <div className="csToolbarGroup">
@@ -73,6 +85,23 @@ export function CanvasToolbar(props: CanvasToolbarProps) {
         <button type="button" className="csToolbarButton" onClick={() => { onAddNode('sticky') }}>+ 便签</button>
         <button type="button" className="csToolbarButton" onClick={() => { onAddNode('text') }}>+ 文本</button>
         <button type="button" className="csToolbarButton" onClick={() => { onAddNode('prompt') }}>+ 提示</button>
+      </div>
+      <div className="csToolbarGroup">
+        <button type="button" className="csToolbarButton" onClick={onToggleLayers}>
+          {layersOpen ? '隐藏图层' : '显示图层'}
+        </button>
+      </div>
+      <div className="csToolbarGroup">
+        <span className="csToolbarZoomValue">{Math.round(scale * 100)}%</span>
+        <button type="button" className="csToolbarButton" title="缩小" onClick={onZoomOut}>−</button>
+        <button type="button" className="csToolbarButton" title="放大" onClick={onZoomIn}>+</button>
+        <button type="button" className="csToolbarButton" title="适配内容" onClick={onFitContent}>⤢</button>
+        <button type="button" className="csToolbarButton" title="重置缩放" onClick={onResetZoom}>1:1</button>
+      </div>
+      <div className="csToolbarGroup">
+        <button type="button" className="csToolbarButton" onClick={onToggleMinimap}>
+          {minimapVisible ? '隐藏小地图' : '显示小地图'}
+        </button>
       </div>
     </div>
   )

@@ -1,15 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StudioProjectListInjected } from './contracts.js'
 import { nodesOf, selectedNodeOf } from './project-store.js'
 import { ProjectList } from './ProjectList.js'
 import { CanvasToolbar } from './canvas/CanvasToolbar.js'
-import { CanvasSurface } from './canvas/CanvasSurface.js'
+import { CanvasSurface, type CanvasSurfaceHandle } from './canvas/CanvasSurface.js'
 import { CanvasTimeline } from './canvas/CanvasTimeline.js'
 import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
 import type { StudioCanvasNode } from '../contracts/canvas.js'
+
+// Zoom step for the toolbar +/− buttons (matches the surface wheel step).
+const ZOOM_STEP = 1.2
 
 /** Studio root frame props: the standard root shares plus the studio inject face. */
 export type StudioFrameProps = PropsRuntime<'root'>
@@ -41,6 +44,10 @@ export function StudioFrame(props: StudioFrameProps) {
   const historyLength = useStudio(store => store.history.length)
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [layersOpen, setLayersOpen] = useState(true)
+  const [zoomLevel, setZoomLevel] = useState(1)
+  const [minimapVisible, setMinimapVisible] = useState(true)
+  const surfaceRef = useRef<CanvasSurfaceHandle>(null)
   const [menu, setMenu] = useState<{ node: StudioCanvasNode; x: number; y: number } | null>(null)
 
   // 首次挂载即拉取项目列表，无需手动点「刷新」。
@@ -115,26 +122,44 @@ export function StudioFrame(props: StudioFrameProps) {
     }
     return (
       <>
-        <CanvasSurface
-          nodes={nodes}
-          selectedNodeId={selectedNodeId}
-          selectedNodeIds={selectedNodeIds}
-          onSelectNode={(id, multi) => { actions.selectNode(id, multi) }}
-          onSelectAllNodes={() => { actions.selectAllNodes() }}
-          onMoveNode={(id, x, y) => { actions.moveNode(projectId, id, x, y) }}
-          onUpdateNode={(id, updates) => { actions.updateNode(projectId, id, updates) }}
-          onBeginEdit={beginEdit}
-          onPersist={persist}
-          onRemoveNodes={handleDelete}
-          onCopy={() => { actions.copySelected(projectId) }}
-          onPaste={() => { persistAfter(() => actions.pasteNodes(projectId)) }}
-          onUndo={handleUndo}
-          onRedo={handleRedo}
-          onLinkLayers={(sourceIds, targetId) => { persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId)) }}
-          onRename={handleRename}
-          onContextMenu={(node, x, y) => { setMenu({ node, x, y }) }}
-          focusNodeId={focusNodeId}
-        />
+        <div className="csCanvasBody">
+          <CanvasSurface
+            nodes={nodes}
+            selectedNodeId={selectedNodeId}
+            selectedNodeIds={selectedNodeIds}
+            onSelectNode={(id, multi) => { actions.selectNode(id, multi) }}
+            onSelectAllNodes={() => { actions.selectAllNodes() }}
+            onMoveNode={(id, x, y) => { actions.moveNode(projectId, id, x, y) }}
+            onUpdateNode={(id, updates) => { actions.updateNode(projectId, id, updates) }}
+            onBeginEdit={beginEdit}
+            onPersist={persist}
+            onRemoveNodes={handleDelete}
+            onCopy={() => { actions.copySelected(projectId) }}
+            onPaste={() => { persistAfter(() => actions.pasteNodes(projectId)) }}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+            onLinkLayers={(sourceIds, targetId) => { persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId)) }}
+            onRename={handleRename}
+            onContextMenu={(node, x, y) => { setMenu({ node, x, y }) }}
+            focusNodeId={focusNodeId}
+            ref={surfaceRef}
+            onScaleChange={setZoomLevel}
+            minimapVisible={minimapVisible}
+          />
+          {layersOpen && (
+            <aside className="csCanvasLayers">
+              <LayerPanel
+                nodes={nodes}
+                selectedNodeIds={selectedNodeIds}
+                onSelect={(id, multi) => { actions.selectNode(id, multi) }}
+                onDelete={handleDelete}
+                onToggleLock={id => { if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id)) }}
+                onToggleVisibility={handleToggleVisibility}
+                onReorder={handleReorder}
+              />
+            </aside>
+          )}
+        </div>
         <CanvasTimeline nodes={nodes} selectedNodeId={selectedNodeId} onSelect={handleTimelineSelect} />
       </>
     )
@@ -180,19 +205,19 @@ export function StudioFrame(props: StudioFrameProps) {
           onDistribute={direction => { if (projectId !== null) persistAfter(() => actions.distributeNodes(projectId, selectedNodeIds, direction)) }}
           onAutoArrange={() => { if (projectId !== null) persistAfter(() => actions.autoArrange(projectId)) }}
           onAddNode={kind => { if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind)) }}
+          layersOpen={layersOpen}
+          onToggleLayers={() => { setLayersOpen(open => !open) }}
+          scale={zoomLevel}
+          onZoomOut={() => { surfaceRef.current?.zoomBy(1 / ZOOM_STEP) }}
+          onZoomIn={() => { surfaceRef.current?.zoomBy(ZOOM_STEP) }}
+          onFitContent={() => { surfaceRef.current?.fitToContent() }}
+          onResetZoom={() => { surfaceRef.current?.resetZoom() }}
+          minimapVisible={minimapVisible}
+          onToggleMinimap={() => { setMinimapVisible(visible => !visible) }}
         />
         {canvasBody}
       </main>
-      <aside className="csSide">
-        <LayerPanel
-          nodes={nodes}
-          selectedNodeIds={selectedNodeIds}
-          onSelect={(id, multi) => { actions.selectNode(id, multi) }}
-          onDelete={handleDelete}
-          onToggleLock={id => { if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id)) }}
-          onToggleVisibility={handleToggleVisibility}
-          onReorder={handleReorder}
-        />
+      <aside className="csChat">
         <section className="csConversation">
           {renderSlot('conversation', {})}
         </section>

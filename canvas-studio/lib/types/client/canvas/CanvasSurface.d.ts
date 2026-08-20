@@ -30,6 +30,16 @@ export interface CanvasSurfaceProps {
     onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void;
     /** When set, center this node in the viewport (timeline / review jump). */
     focusNodeId?: string | null;
+    /** Report the current zoom level so the frame can show it in the toolbar. */
+    onScaleChange?(scale: number): void;
+    /** Whether the minimap overlay is shown (toggle lives in the toolbar). */
+    minimapVisible?: boolean;
+}
+/** Imperative zoom controls exposed to the frame toolbar. */
+export interface CanvasSurfaceHandle {
+    zoomBy(factor: number): void;
+    fitToContent(): void;
+    resetZoom(): void;
 }
 /**
  * The infinite canvas: a grid background that pans/zooms with content, node
@@ -44,4 +54,4 @@ export interface CanvasSurfaceProps {
  * selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
  * undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
  */
-export declare function CanvasSurface(props: CanvasSurfaceProps): import("react").JSX.Element;
+export declare const CanvasSurface: import("react").ForwardRefExoticComponent<CanvasSurfaceProps & import("react").RefAttributes<CanvasSurfaceHandle>>;

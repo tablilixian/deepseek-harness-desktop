@@ -4,9 +4,10 @@
 
 ## 1. 当前状态
 
-**P1–P4+ 全部完成,参考画布 S1–S7 集成完成并已提交推送。**
+**P1–P4+ 全部完成,参考画布 S1–S7 集成完成并已提交推送。UI 布局经过多轮调整,当前为最终形态。**
 
 - 仓库根新增 `canvas-studio/` 独立包(已入根 workspaces,一行),桌面 profile 已集成(`corepack yarn dev` 可见三栏工作台)。
+- 布局:左栏项目列表,中间无限画布(顶部固定工具栏 + 底部分镜时间线),右栏仅为官方对话区。工具栏集中了缩放 ±/适配/重置、图层显隐、小地图显隐和所有编辑操作。图层列表作为可开关的悬浮面板叠在画布右上角;小地图也支持工具条显隐开关。
 - P1(骨架 + 三栏)、P2(项目注册表 + 会话绑定)、P3(媒体工具 + 产物托管,Host 侧注册 + 落盘 + 静态托管)、P4(捕获生成产物上画布)、P4+(持久化画布 + 重启恢复 + 血缘 + 会话级项目归属)均已完成。
 - **参考画布集成(S1–S7)已完成**:把用户提供的 WL-AI-Director 风格画布参考(`reference/canvas-module-design.md` + `reference/canvas/` 92 个文件)概念级借鉴进 Canvas Studio,全部按 DSH 纪律重写,每个借鉴点带来源文件标注(见集成计划文档 §4/§5 的来源地图与许可证边界)。**已提交 `9a314b6e88` 并推送到 fork(`origin/canvas-studio`)**。
 - **验证状态**:`corepack yarn workspace canvas-studio check`(build + verify:loader + typecheck)全绿,`test:smoke` **16/16 通过**。根级 `corepack yarn check` 仍被缺失的 `dsh-community-fabric` / `dsh-community-market` 包阻塞(既有仓库状态,与本次改动无关,见 §5)。
@@ -22,7 +23,7 @@
 | S2 连线渲染 | `CanvasEdges.tsx` 重写:按操作类型着色的水平贝塞尔(`|dx|*0.5`)、箭头 marker、中点中文操作胶囊、多源角色标签(首帧/中间帧/尾帧)、端点选中高亮;props 改 `selectedNodeIds` | 完成 |
 | S3 状态与交互 | `project-store.ts` 全量重写(多选、undo/redo 快照历史 cap 20、剪贴板、z 序、编组/解组、对齐/分布、`autoArrange` 按血缘深度、`linkLayers`、pending 节点三件套);`canvas-math.ts`(clamp/calculateSnap 5px 六类对齐线 + 网格吸附/contentBounds/screenToWorld/worldToScreen);`CanvasNode.tsx` 重写(交互元素抑制、8 向缩放把手、内联重命名、连线手柄、锁定/加载/错误角标、flip/opacity);`CanvasSurface.tsx` 重写(中键/Shift 平移、Ctrl+滚轮绕光标缩放 0.1–5、fitToContent、窗口快捷键 Delete/Ctrl+C/V/Z/Y/A/Escape、拖拽吸附 + 引导线、resize/link 手势、缩放簇、内嵌 Minimap) | 完成 |
 | S4 生成中占位 | pending 节点数据流:`asset-capture.ts` `onToolCall` 放置占位节点(loading + 进度条),`onToolError` 从 `tool/result` 的 `data.error` 标记错误(字符串/`{message}`/兜底文案);成功结果触发画布重载(单一真相源从 Host 重读) | 完成 |
-| S5 面板 | 新增 `CanvasToolbar`(撤销/重做/删除/编组/对齐/分布/整理布局/新建便签·文本·提示)、`LayerPanel`(图层列表:缩略图/锁定/可见性/层级/删除 + 搜索)、`LayerDetailPanel`(标题/透明度/镜像/锁定/层级/生成参数预览/重试/修改提示词/打断/删除 + 内联 steer 输入)、`Minimap`(内容拟合 + 视口框拖拽导航);全部并入 `StudioFrame` 布局 | 完成 |
+| S5 面板 | 新增 `CanvasToolbar`(撤销/重做/删除/编组/对齐/分布/整理布局/新建便签·文本·提示 + 图层显隐/缩放 ±/适配/重置/小地图显隐)、`LayerPanel`(图层列表:缩略图/锁定/可见性/层级/删除 + 搜索,作为可开关悬浮面板叠在画布右上角)、`LayerDetailPanel`(标题/透明度/镜像/锁定/层级/生成参数预览/重试/修改提示词/打断/删除 + 内联 steer 输入)、`Minimap`(内容拟合 + 视口框拖拽导航,支持工具条显隐开关);全部并入 `StudioFrame` 布局 | 完成 |
 | S6 编组/对齐/布局/连线 | 已随 S3 的 store actions + CanvasSurface 手势落地(对齐/分布/编组/解组/手动连线/整理布局) | 完成 |
 | S7 节点级重试/修改提示词/打断 | `generate.ts` 支持 `retryOf`(原地更新节点,保留 id/位置/血缘/编组,不产生新边;`generationPrompt` 不夹带锚点);`api.ts` 新增 `retryStudioNode`(解析 `generationPrompt` 重放原参数 + overrides);客户端注入 `'sessions'`,`cancelCurrentTurn` 经 `ctx.sessions.binding(current).session.cancel()` 打断;上下文菜单与属性面板接通重试/修改提示词/打断 | 完成 |
 
@@ -66,7 +67,7 @@ canvas-studio/
             ├── canvas-math.ts    # [S3 新增] clamp/calculateSnap/contentBounds/screenToWorld/worldToScreen
             ├── CanvasEdges.tsx   # [S2] 操作类型着色边 + 角色胶囊
             ├── CanvasNode.tsx    # [S3/S4] 节点盒 + 缩放/重命名/连线/角标/占位
-            ├── CanvasSurface.tsx # [S3] 无限画布(平移/缩放/拖拽/吸附/快捷键/最小图)
+            ├── CanvasSurface.tsx # [S3] 无限画布(平移/缩放/拖拽/吸附/快捷键/forwardRef 暴露 zoomBy/fitToContent/resetZoom + 小地图开关)
             ├── CanvasTimeline.tsx # [P4+] 按时间回看/定位条
             ├── Minimap.tsx       # [S5 新增] 内容拟合 + 视口框拖拽导航
             ├── CanvasToolbar.tsx # [S5 新增] 工具栏
@@ -176,6 +177,6 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 
 ## 10. 下一步
 
-1. **桌面可视化验收(建议)**:重启 `corepack yarn dev`(兼容模式)→ 打开/新建项目 → 验证:画布平移/缩放/拖拽、节点缩放/重命名/连线手柄、右键菜单(重试/修改提示词/打断)、图层列表/属性面板、工具栏(编组/对齐/整理布局)、时间线回看、`?cs-dev-seed=1` 种子画面。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
+1. **桌面可视化验收(建议)**:重启 `corepack yarn dev`(兼容模式)→ 打开/新建项目 → 验证:画布平移/缩放/拖拽、节点缩放/重命名/连线手柄、右键菜单(重试/修改提示词/打断)、图层列表(工具条开关/画布右上角浮窗)、属性面板、工具栏(缩放 ±/适配/重置/小地图显隐/图层显隐/编组/对齐/整理布局)、时间线回看。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
 2. **单测补强(可选)**:store 的 undo/redo/分组/对齐/吸附(需在 React 外跑,测试框架支持 import `project-store.ts` 经 tsx)——当前 smoke 已覆盖 capture 与 generate 核心路径。
 3. **收尾**:`docs/plans/canvas-studio.md` 主计划的 P4+ 章节按本次 S1–S7 结果修订(§17 完整版画布、§19 会话级归属需标注"已落地")。

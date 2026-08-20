@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { StudioCanvasNode } from '../../contracts/canvas.js'
 import { calculateSnap, clamp, contentBounds, screenToWorld } from './canvas-math.js'
 import { CanvasEdges } from './CanvasEdges.js'
@@ -59,6 +59,17 @@ export interface CanvasSurfaceProps {
   onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void
   /** When set, center this node in the viewport (timeline / review jump). */
   focusNodeId?: string | null
+  /** Report the current zoom level so the frame can show it in the toolbar. */
+  onScaleChange?(scale: number): void
+  /** Whether the minimap overlay is shown (toggle lives in the toolbar). */
+  minimapVisible?: boolean
+}
+
+/** Imperative zoom controls exposed to the frame toolbar. */
+export interface CanvasSurfaceHandle {
+  zoomBy(factor: number): void
+  fitToContent(): void
+  resetZoom(): void
 }
 
 /**
@@ -74,7 +85,7 @@ export interface CanvasSurfaceProps {
  * selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
  * undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
  */
-export function CanvasSurface(props: CanvasSurfaceProps) {
+export const CanvasSurface = forwardRef<CanvasSurfaceHandle, CanvasSurfaceProps>(function CanvasSurface(props, ref) {
   const {
     nodes,
     selectedNodeIds,
@@ -93,6 +104,8 @@ export function CanvasSurface(props: CanvasSurfaceProps) {
     onRename,
     onContextMenu,
     focusNodeId,
+    onScaleChange,
+    minimapVisible = true,
   } = props
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const [scale, setScale] = useState(1)
@@ -365,6 +378,14 @@ export function CanvasSurface(props: CanvasSurfaceProps) {
   const visibleNodes = nodes.filter(node => node.visible !== false)
   const ordered = [...visibleNodes].sort(compareNodes)
 
+  // Report the zoom level to the frame so the toolbar can display it.
+  useEffect(() => {
+    onScaleChange?.(scale)
+  }, [scale, onScaleChange])
+
+  // Expose zoom actions (incl. keyboard-driven zoomBy/fit/reset) to the frame.
+  useImperativeHandle(ref, () => ({ zoomBy, fitToContent, resetZoom }), [zoomBy, fitToContent, resetZoom])
+
   return (
     <div
       className="csCanvasSurface"
@@ -414,14 +435,7 @@ export function CanvasSurface(props: CanvasSurfaceProps) {
           </svg>
         )}
       </div>
-      <div className="csCanvasZoomCluster">
-        <span className="csCanvasZoom">{Math.round(scale * 100)}%</span>
-        <button type="button" className="csCanvasZoomButton" title="缩小" onClick={() => { zoomBy(1 / ZOOM_STEP) }}>−</button>
-        <button type="button" className="csCanvasZoomButton" title="放大" onClick={() => { zoomBy(ZOOM_STEP) }}>+</button>
-        <button type="button" className="csCanvasZoomButton" title="适配内容" onClick={fitToContent}>⤢</button>
-        <button type="button" className="csCanvasZoomButton" title="重置缩放" onClick={resetZoom}>1:1</button>
-      </div>
-      <Minimap nodes={visibleNodes} offset={offset} scale={scale} onSetOffset={setOffset} />
+      {minimapVisible && <Minimap nodes={visibleNodes} offset={offset} scale={scale} onSetOffset={setOffset} />}
     </div>
   )
-}
+})

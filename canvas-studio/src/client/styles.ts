@@ -219,6 +219,16 @@ const STUDIO_STYLES = `
   background: var(--dsw-alias-bg-base);
 }
 
+/* Middle region between the top toolbar and the bottom timeline: the pannable
+ * surface plus the floating layer-list overlay share this positioned box. */
+.csCanvasBody {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .csCanvasEmpty {
   position: absolute;
   inset: 0;
@@ -330,19 +340,6 @@ const STUDIO_STYLES = `
   pointer-events: none;
 }
 
-.csCanvasZoom {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-bg-base);
-  border: 1px solid var(--dsw-alias-border-l2);
-  pointer-events: none;
-}
-
 .csTimeline {
   display: flex;
   gap: 8px;
@@ -415,8 +412,10 @@ const STUDIO_STYLES = `
 
 .csConversation {
   position: relative;
+  flex: 1 1 auto;
   min-width: 0;
-  border-left: 1px solid var(--dsw-alias-border-l2);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .csOverlay {
@@ -477,6 +476,15 @@ const STUDIO_STYLES = `
 .csToolbarButton:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.csToolbarZoomValue {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  padding: 0 4px;
+  min-width: 40px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 /* ---- Snap alignment guides ---- */
@@ -717,45 +725,6 @@ const STUDIO_STYLES = `
   user-select: none;
 }
 
-/* ---- Zoom cluster ---- */
-.csCanvasZoomCluster {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
-  border: 1px solid var(--dsw-alias-border-l2);
-}
-
-.csCanvasZoom {
-  padding: 2px 6px;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.csCanvasZoomButton {
-  font: inherit;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.csCanvasZoomButton:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
-}
-
 /* ---- Minimap ---- */
 .csMinimap {
   position: absolute;
@@ -777,12 +746,36 @@ const STUDIO_STYLES = `
   display: block;
 }
 
-/* ---- Side column (layer list + conversation) ---- */
-.csSide {
+/* ---- Right column (conversation only) ---- */
+.csChat {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* ---- Floating layer-list overlay (inside the canvas body) ---- */
+.csCanvasLayers {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  width: 260px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.csCanvasLayers .csLayerPanel {
+  max-height: 320px;
+  border-bottom: none;
 }
 
 /* ---- Layer panel ---- */

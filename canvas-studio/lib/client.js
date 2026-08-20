@@ -1128,6 +1128,16 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-base);
 }
 
+/* Middle region between the top toolbar and the bottom timeline: the pannable
+ * surface plus the floating layer-list overlay share this positioned box. */
+.csCanvasBody {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .csCanvasEmpty {
   position: absolute;
   inset: 0;
@@ -1239,19 +1249,6 @@ window.__ModuleLoader__.load({
   pointer-events: none;
 }
 
-.csCanvasZoom {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-bg-base);
-  border: 1px solid var(--dsw-alias-border-l2);
-  pointer-events: none;
-}
-
 .csTimeline {
   display: flex;
   gap: 8px;
@@ -1324,8 +1321,10 @@ window.__ModuleLoader__.load({
 
 .csConversation {
   position: relative;
+  flex: 1 1 auto;
   min-width: 0;
-  border-left: 1px solid var(--dsw-alias-border-l2);
+  min-height: 0;
+  overflow: hidden;
 }
 
 .csOverlay {
@@ -1386,6 +1385,15 @@ window.__ModuleLoader__.load({
 .csToolbarButton:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.csToolbarZoomValue {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  padding: 0 4px;
+  min-width: 40px;
+  text-align: center;
+  white-space: nowrap;
 }
 
 /* ---- Snap alignment guides ---- */
@@ -1626,45 +1634,6 @@ window.__ModuleLoader__.load({
   user-select: none;
 }
 
-/* ---- Zoom cluster ---- */
-.csCanvasZoomCluster {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-base);
-  border: 1px solid var(--dsw-alias-border-l2);
-}
-
-.csCanvasZoom {
-  padding: 2px 6px;
-  font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.csCanvasZoomButton {
-  font: inherit;
-  width: 22px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  border-radius: 5px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.csCanvasZoomButton:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary);
-}
-
 /* ---- Minimap ---- */
 .csMinimap {
   position: absolute;
@@ -1686,12 +1655,36 @@ window.__ModuleLoader__.load({
   display: block;
 }
 
-/* ---- Side column (layer list + conversation) ---- */
-.csSide {
+/* ---- Right column (conversation only) ---- */
+.csChat {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* ---- Floating layer-list overlay (inside the canvas body) ---- */
+.csCanvasLayers {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  width: 260px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.csCanvasLayers .csLayerPanel {
+  max-height: 320px;
+  border-bottom: none;
 }
 
 /* ---- Layer panel ---- */
@@ -2195,7 +2188,7 @@ window.__ModuleLoader__.load({
 		* prompt). Everything is props-driven — the frame wires the store actions.
 		*/
 		function CanvasToolbar(props) {
-			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode } = props;
+			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csToolbar",
 				children: [
@@ -2314,6 +2307,61 @@ window.__ModuleLoader__.load({
 								children: "+ 提示"
 							})
 						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csToolbarGroup",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csToolbarButton",
+							onClick: onToggleLayers,
+							children: layersOpen ? "隐藏图层" : "显示图层"
+						})
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csToolbarGroup",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: "csToolbarZoomValue",
+								children: [Math.round(scale * 100), "%"]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "缩小",
+								onClick: onZoomOut,
+								children: "−"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "放大",
+								onClick: onZoomIn,
+								children: "+"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "适配内容",
+								onClick: onFitContent,
+								children: "⤢"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "重置缩放",
+								onClick: onResetZoom,
+								children: "1:1"
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csToolbarGroup",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csToolbarButton",
+							onClick: onToggleMinimap,
+							children: minimapVisible ? "隐藏小地图" : "显示小地图"
+						})
 					})
 				]
 			});
@@ -2901,7 +2949,7 @@ window.__ModuleLoader__.load({
 		/** Zoom clamp range (reference design doc §9.6: 0.1x – 5x). */
 		const MIN_SCALE = .1;
 		const MAX_SCALE = 5;
-		const ZOOM_STEP = 1.2;
+		const ZOOM_STEP$1 = 1.2;
 		const MIN_NODE_SIZE = 50;
 		/**
 		* The infinite canvas: a grid background that pans/zooms with content, node
@@ -2916,8 +2964,8 @@ window.__ModuleLoader__.load({
 		* selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
 		* undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
 		*/
-		function CanvasSurface(props) {
-			const { nodes, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId } = props;
+		const CanvasSurface = (0, react.forwardRef)(function CanvasSurface(props, ref) {
+			const { nodes, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId, onScaleChange, minimapVisible = true } = props;
 			const [offset, setOffset] = (0, react.useState)({
 				x: 0,
 				y: 0
@@ -2980,7 +3028,7 @@ window.__ModuleLoader__.load({
 				if (el === null) return;
 				const onWheel = (event) => {
 					event.preventDefault();
-					if (event.ctrlKey || event.metaKey) zoomAround(event.clientX, event.clientY, event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+					if (event.ctrlKey || event.metaKey) zoomAround(event.clientX, event.clientY, event.deltaY < 0 ? ZOOM_STEP$1 : 1 / ZOOM_STEP$1);
 					else panBy(-event.deltaX, -event.deltaY);
 				};
 				el.addEventListener("wheel", onWheel, { passive: false });
@@ -3228,6 +3276,18 @@ window.__ModuleLoader__.load({
 			};
 			const visibleNodes = nodes.filter((node) => node.visible !== false);
 			const ordered = [...visibleNodes].sort(compareNodes);
+			(0, react.useEffect)(() => {
+				onScaleChange?.(scale);
+			}, [scale, onScaleChange]);
+			(0, react.useImperativeHandle)(ref, () => ({
+				zoomBy,
+				fitToContent,
+				resetZoom
+			}), [
+				zoomBy,
+				fitToContent,
+				resetZoom
+			]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csCanvasSurface",
 				ref: containerRef,
@@ -3241,96 +3301,52 @@ window.__ModuleLoader__.load({
 					backgroundPosition: `${offset.x}px ${offset.y}px`,
 					backgroundSize: `${40 * scale}px ${40 * scale}px`
 				},
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "csCanvasLayer",
-						style: {
-							transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-							transformOrigin: "0 0"
-						},
-						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasEdges, {
-								nodes: visibleNodes,
-								selectedNodeIds
-							}),
-							guides.vertical.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-								className: "csGuide csGuideVertical",
-								style: { left: position }
-							}, `gv-${position}`)),
-							guides.horizontal.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-								className: "csGuide csGuideHorizontal",
-								style: { top: position }
-							}, `gh-${position}`)),
-							ordered.map((node) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasNode, {
-								node,
-								selected: selectedNodeIds.includes(node.id),
-								onNodePointerDown,
-								onResizePointerDown,
-								onLinkPointerDown,
-								onRenameSubmit: onRename,
-								onContextMenu
-							}, node.id)),
-							linkLine !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
-								className: "csEdges",
-								width: 1,
-								height: 1,
-								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
-									className: "csEdge csEdgeDraft",
-									d: `M ${linkLine.fromX} ${linkLine.fromY} L ${linkLine.toX} ${linkLine.toY}`
-								})
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: "csCanvasLayer",
+					style: {
+						transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+						transformOrigin: "0 0"
+					},
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasEdges, {
+							nodes: visibleNodes,
+							selectedNodeIds
+						}),
+						guides.vertical.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: "csGuide csGuideVertical",
+							style: { left: position }
+						}, `gv-${position}`)),
+						guides.horizontal.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: "csGuide csGuideHorizontal",
+							style: { top: position }
+						}, `gh-${position}`)),
+						ordered.map((node) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasNode, {
+							node,
+							selected: selectedNodeIds.includes(node.id),
+							onNodePointerDown,
+							onResizePointerDown,
+							onLinkPointerDown,
+							onRenameSubmit: onRename,
+							onContextMenu
+						}, node.id)),
+						linkLine !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
+							className: "csEdges",
+							width: 1,
+							height: 1,
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+								className: "csEdge csEdgeDraft",
+								d: `M ${linkLine.fromX} ${linkLine.fromY} L ${linkLine.toX} ${linkLine.toY}`
 							})
-						]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "csCanvasZoomCluster",
-						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								className: "csCanvasZoom",
-								children: [Math.round(scale * 100), "%"]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csCanvasZoomButton",
-								title: "缩小",
-								onClick: () => {
-									zoomBy(1 / ZOOM_STEP);
-								},
-								children: "−"
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csCanvasZoomButton",
-								title: "放大",
-								onClick: () => {
-									zoomBy(ZOOM_STEP);
-								},
-								children: "+"
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csCanvasZoomButton",
-								title: "适配内容",
-								onClick: fitToContent,
-								children: "⤢"
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csCanvasZoomButton",
-								title: "重置缩放",
-								onClick: resetZoom,
-								children: "1:1"
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Minimap, {
-						nodes: visibleNodes,
-						offset,
-						scale,
-						onSetOffset: setOffset
-					})
-				]
+						})
+					]
+				}), minimapVisible && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Minimap, {
+					nodes: visibleNodes,
+					offset,
+					scale,
+					onSetOffset: setOffset
+				})]
 			});
-		}
+		});
 		//#endregion
 		//#region src/client/canvas/CanvasTimeline.tsx
 		/** Human-readable labels for the node kinds. */
@@ -3925,6 +3941,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/StudioFrame.tsx
+		const ZOOM_STEP = 1.2;
 		/**
 		* Three-region studio frame: project list + layer list on the left, the canvas
 		* surface (toolbar on top, review timeline at the bottom) in the center, and
@@ -3950,6 +3967,10 @@ window.__ModuleLoader__.load({
 			const historyLength = useStudio((store) => store.history.length);
 			const [focusNodeId, setFocusNodeId] = (0, react.useState)(null);
 			const [detailOpen, setDetailOpen] = (0, react.useState)(false);
+			const [layersOpen, setLayersOpen] = (0, react.useState)(true);
+			const [zoomLevel, setZoomLevel] = (0, react.useState)(1);
+			const [minimapVisible, setMinimapVisible] = (0, react.useState)(true);
+			const surfaceRef = (0, react.useRef)(null);
 			const [menu, setMenu] = (0, react.useState)(null);
 			(0, react.useEffect)(() => {
 				refreshProjects();
@@ -4024,45 +4045,66 @@ window.__ModuleLoader__.load({
 					className: "csCanvasEmpty",
 					children: "打开或新建一个项目，开始创作"
 				});
-				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
-					nodes,
-					selectedNodeId,
-					selectedNodeIds,
-					onSelectNode: (id, multi) => {
-						actions.selectNode(id, multi);
-					},
-					onSelectAllNodes: () => {
-						actions.selectAllNodes();
-					},
-					onMoveNode: (id, x, y) => {
-						actions.moveNode(projectId, id, x, y);
-					},
-					onUpdateNode: (id, updates) => {
-						actions.updateNode(projectId, id, updates);
-					},
-					onBeginEdit: beginEdit,
-					onPersist: persist,
-					onRemoveNodes: handleDelete,
-					onCopy: () => {
-						actions.copySelected(projectId);
-					},
-					onPaste: () => {
-						persistAfter(() => actions.pasteNodes(projectId));
-					},
-					onUndo: handleUndo,
-					onRedo: handleRedo,
-					onLinkLayers: (sourceIds, targetId) => {
-						persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
-					},
-					onRename: handleRename,
-					onContextMenu: (node, x, y) => {
-						setMenu({
-							node,
-							x,
-							y
-						});
-					},
-					focusNodeId
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: "csCanvasBody",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
+						nodes,
+						selectedNodeId,
+						selectedNodeIds,
+						onSelectNode: (id, multi) => {
+							actions.selectNode(id, multi);
+						},
+						onSelectAllNodes: () => {
+							actions.selectAllNodes();
+						},
+						onMoveNode: (id, x, y) => {
+							actions.moveNode(projectId, id, x, y);
+						},
+						onUpdateNode: (id, updates) => {
+							actions.updateNode(projectId, id, updates);
+						},
+						onBeginEdit: beginEdit,
+						onPersist: persist,
+						onRemoveNodes: handleDelete,
+						onCopy: () => {
+							actions.copySelected(projectId);
+						},
+						onPaste: () => {
+							persistAfter(() => actions.pasteNodes(projectId));
+						},
+						onUndo: handleUndo,
+						onRedo: handleRedo,
+						onLinkLayers: (sourceIds, targetId) => {
+							persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
+						},
+						onRename: handleRename,
+						onContextMenu: (node, x, y) => {
+							setMenu({
+								node,
+								x,
+								y
+							});
+						},
+						focusNodeId,
+						ref: surfaceRef,
+						onScaleChange: setZoomLevel,
+						minimapVisible
+					}), layersOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
+						className: "csCanvasLayers",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
+							nodes,
+							selectedNodeIds,
+							onSelect: (id, multi) => {
+								actions.selectNode(id, multi);
+							},
+							onDelete: handleDelete,
+							onToggleLock: (id) => {
+								if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+							},
+							onToggleVisibility: handleToggleVisibility,
+							onReorder: handleReorder
+						})
+					})]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasTimeline, {
 					nodes,
 					selectedNodeId,
@@ -4123,27 +4165,36 @@ window.__ModuleLoader__.load({
 							},
 							onAddNode: (kind) => {
 								if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
+							},
+							layersOpen,
+							onToggleLayers: () => {
+								setLayersOpen((open) => !open);
+							},
+							scale: zoomLevel,
+							onZoomOut: () => {
+								surfaceRef.current?.zoomBy(1 / ZOOM_STEP);
+							},
+							onZoomIn: () => {
+								surfaceRef.current?.zoomBy(ZOOM_STEP);
+							},
+							onFitContent: () => {
+								surfaceRef.current?.fitToContent();
+							},
+							onResetZoom: () => {
+								surfaceRef.current?.resetZoom();
+							},
+							minimapVisible,
+							onToggleMinimap: () => {
+								setMinimapVisible((visible) => !visible);
 							}
 						}), canvasBody]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
-						className: "csSide",
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
-							nodes,
-							selectedNodeIds,
-							onSelect: (id, multi) => {
-								actions.selectNode(id, multi);
-							},
-							onDelete: handleDelete,
-							onToggleLock: (id) => {
-								if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
-							},
-							onToggleVisibility: handleToggleVisibility,
-							onReorder: handleReorder
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
+						className: "csChat",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
 							className: "csConversation",
 							children: renderSlot("conversation", {})
-						})]
+						})
 					}),
 					selectedNode !== null && projectId !== null && detailOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerDetailPanel, {
 						node: selectedNode,

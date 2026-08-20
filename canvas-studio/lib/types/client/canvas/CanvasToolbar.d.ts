@@ -18,6 +18,18 @@ export interface CanvasToolbarProps {
     onDistribute(direction: 'horizontal' | 'vertical'): void;
     onAutoArrange(): void;
     onAddNode(kind: ManualNodeKind): void;
+    /** Toggle the layer list overlay inside the canvas. */
+    layersOpen: boolean;
+    onToggleLayers(): void;
+    /** Current zoom level (percent) shown next to the zoom buttons. */
+    scale: number;
+    onZoomOut(): void;
+    onZoomIn(): void;
+    onFitContent(): void;
+    onResetZoom(): void;
+    /** Show / hide the minimap overlay. */
+    minimapVisible: boolean;
+    onToggleMinimap(): void;
 }
 /**
  * The canvas toolbar: undo/redo, selection editing (delete/group/ungroup/
