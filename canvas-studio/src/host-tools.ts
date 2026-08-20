@@ -26,7 +26,7 @@ const resultSchema = {
 }
 
 /** 把产物结果渲染成模型可读的文本块。 */
-function renderResult(value: unknown): ContentBlock[] {
+function renderResult(_args: unknown, value: unknown): ContentBlock[] {
   const result = value as GenerateResult
   const duration = result.duration !== undefined ? `, ${result.duration}s` : ''
   return [{ type: 'text', text: `已生成产物: ${result.url} (${result.width}x${result.height}${duration})` }]

@@ -22,7 +22,7 @@ const resultSchema = {
     },
 };
 /** 把产物结果渲染成模型可读的文本块。 */
-function renderResult(value) {
+function renderResult(_args, value) {
     const result = value;
     const duration = result.duration !== undefined ? `, ${result.duration}s` : '';
     return [{ type: 'text', text: `已生成产物: ${result.url} (${result.width}x${result.height}${duration})` }];
