@@ -1,0 +1,216 @@
+import { useState } from 'react'
+import type { StudioCanvasNode, StudioCanvasNodeKind } from '../../contracts/canvas.js'
+import { OPERATION_LABELS } from './CanvasNode.js'
+
+/** Human-readable kind labels for the detail panel. */
+const KIND_LABELS: Readonly<Record<StudioCanvasNodeKind, string>> = {
+  image: '图片',
+  video: '视频',
+  sticky: '便签',
+  text: '文本',
+  prompt: '提示',
+  group: '分组',
+}
+
+/** Props for the layer detail panel. */
+export interface LayerDetailPanelProps {
+  node: StudioCanvasNode
+  onClose(): void
+  onRename(id: string, title: string): void
+  onSetOpacity(id: string, opacity: number): void
+  onToggleFlip(id: string, axis: 'flipX' | 'flipY'): void
+  onToggleLock(id: string): void
+  onToggleVisibility(id: string, visible: boolean): void
+  onReorder(id: string, direction: 'front' | 'back'): void
+  onDelete(id: string): void
+  /** Node-level retry (agent nodes with generationPrompt). */
+  onRetry(id: string): void
+  /** Steer the agent with a new prompt (agent nodes). */
+  onSteer(id: string, prompt: string): void
+  /** Cancel the running turn (loading nodes). */
+  onCancel(id: string): void
+}
+
+/**
+ * The layer detail panel: edit the selected node's title, opacity, flip,
+ * lock/visibility, z-order, and run node-level generation actions (retry /
+ * steer / cancel). Reference LayerDetailPanel semantics, DSH tokens.
+ */
+export function LayerDetailPanel(props: LayerDetailPanelProps) {
+  const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel } = props
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleInput, setTitleInput] = useState(node.title ?? '')
+  const [steering, setSteering] = useState(false)
+  const [steerInput, setSteerInput] = useState('')
+
+  const isAgent = node.origin === 'agent' && node.toolName !== undefined
+  const operation = node.operationType !== undefined ? (OPERATION_LABELS[node.operationType] ?? node.operationType) : null
+  const generationPrompt: string | null = node.generationPrompt !== undefined ? node.generationPrompt : null
+
+  const submitTitle = (): void => {
+    setEditingTitle(false)
+    if (titleInput.trim().length > 0) onRename(node.id, titleInput.trim())
+  }
+
+  const submitSteer = (): void => {
+    setSteering(false)
+    if (steerInput.trim().length > 0) onSteer(node.id, steerInput.trim())
+  }
+
+  const formatTime = (value: number): string => {
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString()
+  }
+
+  return (
+    <aside className="csDetailPanel" onClick={event => { event.stopPropagation() }}>
+      <header className="csDetailPanelHeader">
+        <span>节点属性</span>
+        <button type="button" className="csDetailPanelClose" onClick={onClose}>×</button>
+      </header>
+      <div className="csDetailPanelBody">
+        <div className="csDetailRow">
+          <span className="csDetailLabel">标题</span>
+          {editingTitle
+            ? (
+              <input
+                className="csDetailInput"
+                value={titleInput}
+                autoFocus
+                onChange={event => { setTitleInput(event.target.value) }}
+                onBlur={submitTitle}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') submitTitle()
+                  if (event.key === 'Escape') setEditingTitle(false)
+                }}
+              />
+            )
+            : (
+              <span className="csDetailValue csDetailValueClickable" onClick={() => { setTitleInput(node.title ?? ''); setEditingTitle(true) }}>
+                {node.title ?? KIND_LABELS[node.kind]}
+              </span>
+            )}
+        </div>
+        <div className="csDetailRow">
+          <span className="csDetailLabel">类型</span>
+          <span className="csDetailValue">{KIND_LABELS[node.kind]}{operation !== null ? ` · ${operation}` : ''}</span>
+        </div>
+        {node.toolName !== undefined && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">工具</span>
+            <span className="csDetailValue">{node.toolName}</span>
+          </div>
+        )}
+        {node.duration !== undefined && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">时长</span>
+            <span className="csDetailValue">{node.duration}s</span>
+          </div>
+        )}
+        <div className="csDetailRow">
+          <span className="csDetailLabel">创建时间</span>
+          <span className="csDetailValue">{formatTime(node.createdAt)}</span>
+        </div>
+        <div className="csDetailRow">
+          <span className="csDetailLabel">透明度</span>
+          <input
+            className="csDetailRange"
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round((node.opacity ?? 1) * 100)}
+            onChange={event => { onSetOpacity(node.id, Number(event.target.value) / 100) }}
+          />
+          <span className="csDetailValue">{Math.round((node.opacity ?? 1) * 100)}%</span>
+        </div>
+        <div className="csDetailRow">
+          <span className="csDetailLabel">镜像</span>
+          <button
+            type="button"
+            className={node.flipX ? 'csDetailButton csDetailButtonActive' : 'csDetailButton'}
+            onClick={() => { onToggleFlip(node.id, 'flipX') }}
+          >
+            水平
+          </button>
+          <button
+            type="button"
+            className={node.flipY ? 'csDetailButton csDetailButtonActive' : 'csDetailButton'}
+            onClick={() => { onToggleFlip(node.id, 'flipY') }}
+          >
+            垂直
+          </button>
+        </div>
+        <div className="csDetailRow">
+          <span className="csDetailLabel">锁定 / 可见</span>
+          <button
+            type="button"
+            className={node.locked ? 'csDetailButton csDetailButtonActive' : 'csDetailButton'}
+            onClick={() => { onToggleLock(node.id) }}
+          >
+            {node.locked ? '已锁定' : '锁定'}
+          </button>
+          <button
+            type="button"
+            className={node.visible === false ? 'csDetailButton' : 'csDetailButton csDetailButtonActive'}
+            onClick={() => { onToggleVisibility(node.id, node.visible === false) }}
+          >
+            {node.visible === false ? '已隐藏' : '可见'}
+          </button>
+        </div>
+        <div className="csDetailRow">
+          <span className="csDetailLabel">层级</span>
+          <button type="button" className="csDetailButton" onClick={() => { onReorder(node.id, 'front') }}>置顶</button>
+          <button type="button" className="csDetailButton" onClick={() => { onReorder(node.id, 'back') }}>置底</button>
+        </div>
+        {generationPrompt !== null && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">生成参数</span>
+            <pre className="csDetailPrompt">{generationPrompt}</pre>
+          </div>
+        )}
+        {node.error !== undefined && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">错误</span>
+            <span className="csDetailError">{node.error}</span>
+          </div>
+        )}
+        <div className="csDetailRow">
+          <span className="csDetailLabel">操作</span>
+          <div className="csDetailActions">
+            {node.isLoading
+              ? <button type="button" className="csDetailButton" onClick={() => { onCancel(node.id) }}>打断</button>
+              : null}
+            {isAgent && generationPrompt !== null && !node.isLoading
+              ? (
+                <>
+                  <button type="button" className="csDetailButton" onClick={() => { onRetry(node.id) }}>重试</button>
+                  <button type="button" className="csDetailButton" onClick={() => { setSteerInput(''); setSteering(true) }}>修改提示词</button>
+                </>
+              )
+              : null}
+            <button type="button" className="csDetailButton csDetailButtonDanger" onClick={() => { onDelete(node.id) }}>删除</button>
+          </div>
+        </div>
+      </div>
+      {steering && (
+        <div className="csDetailSteer">
+          <input
+            className="csDetailInput"
+            placeholder="新的提示词…（沿用原参考图重新生成）"
+            value={steerInput}
+            autoFocus
+            onChange={event => { setSteerInput(event.target.value) }}
+            onKeyDown={event => {
+              if (event.key === 'Enter') submitSteer()
+              if (event.key === 'Escape') setSteering(false)
+            }}
+          />
+          <div className="csDetailActions">
+            <button type="button" className="csDetailButton" onClick={submitSteer}>提交</button>
+            <button type="button" className="csDetailButton" onClick={() => { setSteering(false) }}>取消</button>
+          </div>
+        </div>
+      )}
+    </aside>
+  )
+}

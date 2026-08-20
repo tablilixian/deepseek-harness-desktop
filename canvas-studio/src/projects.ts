@@ -10,6 +10,7 @@ import { join, sep } from 'node:path'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { StudioProject } from './contracts/project.js'
+import { CANVAS_DOCUMENT_VERSION, NODE_DEFAULTS } from './contracts/canvas.js'
 import type { StudioCanvasDocument, StudioCanvasNode } from './contracts/canvas.js'
 
 /** Registry file format version; bump with a migration when the shape changes. */
@@ -112,7 +113,10 @@ export class ProjectRegistry {
     const incomingIds = new Set(nodes.map((node) => node.id))
     const existing = await this.readCanvas(projectId)
     const preserved = existing.filter((node) => !incomingIds.has(node.id))
-    const document: StudioCanvasDocument = { version: REGISTRY_VERSION, nodes: [...nodes, ...preserved] }
+    const document: StudioCanvasDocument = {
+      version: CANVAS_DOCUMENT_VERSION,
+      nodes: [...nodes, ...preserved],
+    }
     await writeFileAtomic(this.canvasFile(projectId), `${JSON.stringify(document, null, 2)}\n`, {
       mode: 0o600,
       dirMode: 0o700,
@@ -272,5 +276,22 @@ function normalizeCanvasDocument(value: unknown): StudioCanvasNode[] {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return []
   const document = value as Record<string, unknown>
   if (!Array.isArray(document.nodes)) return []
-  return document.nodes.filter(isCanvasNode)
+  // S1 migration: nodes predating the visual-state fields get defaults. zIndex
+  // falls back to the document order (stable for ties broken by createdAt).
+  let nextZ = 1
+  return document.nodes
+    .filter(isCanvasNode)
+    .map((node) => {
+      const migrated: StudioCanvasNode = {
+        ...node,
+        locked: node.locked ?? NODE_DEFAULTS.locked,
+        visible: node.visible ?? NODE_DEFAULTS.visible,
+        opacity: node.opacity ?? NODE_DEFAULTS.opacity,
+        flipX: node.flipX ?? NODE_DEFAULTS.flipX,
+        flipY: node.flipY ?? NODE_DEFAULTS.flipY,
+        zIndex: node.zIndex ?? nextZ,
+      }
+      nextZ += 1
+      return migrated
+    })
 }

@@ -3,8 +3,13 @@ import type { InjectFace, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/ds
 import type { StudioProjectListInjected } from './contracts.js'
 import { nodesOf, selectedNodeOf } from './project-store.js'
 import { ProjectList } from './ProjectList.js'
+import { CanvasToolbar } from './canvas/CanvasToolbar.js'
 import { CanvasSurface } from './canvas/CanvasSurface.js'
 import { CanvasTimeline } from './canvas/CanvasTimeline.js'
+import { LayerPanel } from './canvas/LayerPanel.js'
+import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
+import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
+import type { StudioCanvasNode } from '../contracts/canvas.js'
 
 /** Studio root frame props: the standard root shares plus the studio inject face. */
 export type StudioFrameProps = PropsRuntime<'root'>
@@ -12,61 +17,122 @@ export type StudioFrameProps = PropsRuntime<'root'>
   & InjectFace<StudioProjectListInjected>
 
 /**
- * Three-column studio frame: project list, canvas surface + review timeline,
- * and the official conversation seat on the right. The sidebar and details
- * seats stay declared (upstream registrants keep their paths) but are not
- * rendered. The canvas shows every captured node of the selected project
- * (image/video/sticky/text/prompt) with bloodline edges; the timeline lets the
- * user review and jump to any node.
+ * Three-region studio frame: project list + layer list on the left, the canvas
+ * surface (toolbar on top, review timeline at the bottom) in the center, and
+ * the official conversation seat on the right. The sidebar and details seats
+ * stay declared (upstream registrants keep their paths) but are not rendered.
+ * A single selected node opens the detail panel; a context menu offers node
+ * ordering / lock / generation actions. The canvas shows every captured node
+ * of the selected project (image/video/sticky/text/prompt/group) with
+ * bloodline edges; the timeline lets the user review and jump to any node.
  */
 export function StudioFrame(props: StudioFrameProps) {
-  const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, selectNode, moveNode, removeNode } = props
+  const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, retryNode, steerNode, cancelCurrentTurn, actions } = props
   const projects = useStudio(store => store.projects)
   const selectedProjectId = useStudio(store => store.selectedProjectId)
   const selectedNodeId = useStudio(store => store.selectedNodeId)
+  const selectedNodeIds = useStudio(store => store.selectedNodeIds)
   const nodes = useStudio(store => nodesOf(store, store.selectedProjectId))
   const selectedNode = useStudio(store => selectedNodeOf(store))
   const phase = useStudio(store => store.phase)
   const error = useStudio(store => store.error)
   const creating = useStudio(store => store.creating)
+  const historyIndex = useStudio(store => store.historyIndex)
+  const historyLength = useStudio(store => store.history.length)
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [menu, setMenu] = useState<{ node: StudioCanvasNode; x: number; y: number } | null>(null)
 
   // 首次挂载即拉取项目列表，无需手动点「刷新」。
   useEffect(() => { void refreshProjects() }, [refreshProjects])
+  // 右键菜单：任意按下即关闭。
+  useEffect(() => {
+    if (menu === null) return
+    const close = () => { setMenu(null) }
+    window.addEventListener('mousedown', close)
+    return () => { window.removeEventListener('mousedown', close) }
+  }, [menu])
 
-  const handleMove = (id: string, x: number, y: number): void => {
-    if (selectedProjectId === null) return
-    moveNode(selectedProjectId, id, x, y)
+  const projectId = selectedProjectId
+  const beginEdit = (): void => {
+    if (projectId !== null) actions.pushHistory(projectId)
   }
-  const handlePersist = (): void => {
-    if (selectedProjectId === null) return
-    persistCanvas(selectedProjectId)
+  const persist = (): void => {
+    if (projectId !== null) void persistCanvas(projectId).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '画布保存失败')
+    })
   }
-  const handleDelete = (): void => {
-    if (selectedProjectId === null || selectedNodeId === null) return
-    removeNode(selectedProjectId, selectedNodeId)
-    handlePersist()
+  const persistAfter = (mutate: () => void): void => {
+    mutate()
+    persist()
+  }
+  const handleDelete = (ids: string[]): void => {
+    if (projectId === null || ids.length === 0) return
+    persistAfter(() => actions.removeNodes(projectId, ids))
+    setDetailOpen(false)
+  }
+  const handleToggleVisibility = (id: string): void => {
+    if (projectId === null) return
+    const node = nodes.find(candidate => candidate.id === id)
+    if (node === undefined) return
+    actions.setVisibility(projectId, id, node.visible === false)
+  }
+  const handleReorder = (id: string, direction: 'front' | 'back' | 'forward' | 'backward'): void => {
+    if (projectId === null) return
+    persistAfter(() => actions.reorderNode(projectId, id, direction))
+  }
+  const handleUndo = (): void => {
+    persistAfter(() => actions.undo())
+  }
+  const handleRedo = (): void => {
+    persistAfter(() => actions.redo())
+  }
+  const handleRename = (id: string, title: string): void => {
+    if (projectId === null) return
+    persistAfter(() => actions.renameNode(projectId, id, title))
+  }
+  const handleRetry = (id: string): void => {
+    if (projectId === null) return
+    void retryNode(projectId, id).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '重试失败')
+    })
+  }
+  const handleSteer = (id: string, prompt: string): void => {
+    if (projectId === null) return
+    void steerNode(projectId, id, prompt).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '重新生成失败')
+    })
   }
   const handleTimelineSelect = (id: string): void => {
-    selectNode(id)
+    actions.selectNode(id)
     setFocusNodeId(id)
+    setDetailOpen(false)
   }
 
   const canvasBody = ((): React.ReactNode => {
-    if (selectedProjectId === null) {
+    if (projectId === null) {
       return <div className="csCanvasEmpty">打开或新建一个项目，开始创作</div>
-    }
-    if (nodes.length === 0) {
-      return <div className="csCanvasEmpty">尚未生成画布内容 —— 在右侧对话让 agent 生成图片或视频</div>
     }
     return (
       <>
         <CanvasSurface
           nodes={nodes}
           selectedNodeId={selectedNodeId}
-          onSelectNode={selectNode}
-          onMoveNode={handleMove}
-          onPersist={handlePersist}
+          selectedNodeIds={selectedNodeIds}
+          onSelectNode={(id, multi) => { actions.selectNode(id, multi) }}
+          onSelectAllNodes={() => { actions.selectAllNodes() }}
+          onMoveNode={(id, x, y) => { actions.moveNode(projectId, id, x, y) }}
+          onUpdateNode={(id, updates) => { actions.updateNode(projectId, id, updates) }}
+          onBeginEdit={beginEdit}
+          onPersist={persist}
+          onRemoveNodes={handleDelete}
+          onCopy={() => { actions.copySelected(projectId) }}
+          onPaste={() => { persistAfter(() => actions.pasteNodes(projectId)) }}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onLinkLayers={(sourceIds, targetId) => { persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId)) }}
+          onRename={handleRename}
+          onContextMenu={(node, x, y) => { setMenu({ node, x, y }) }}
           focusNodeId={focusNodeId}
         />
         <CanvasTimeline nodes={nodes} selectedNodeId={selectedNodeId} onSelect={handleTimelineSelect} />
@@ -96,20 +162,81 @@ export function StudioFrame(props: StudioFrameProps) {
         />
       </aside>
       <main className="csCanvas">
-        {selectedNode !== null && (
-          <div className="csCanvasToolbar">
-            <span className="csCanvasToolbarInfo">
-              已选中：{selectedNode.kind}
-              {selectedNode.title ? ` · ${selectedNode.title}` : ''}
-            </span>
-            <button type="button" className="csCanvasToolbarDelete" onClick={handleDelete}>删除节点</button>
-          </div>
-        )}
+        <CanvasToolbar
+          canUndo={historyIndex >= 0}
+          canRedo={historyIndex + 1 < historyLength}
+          selectedCount={selectedNodeIds.length}
+          hasSelection={selectedNodeIds.length > 0}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onDelete={() => { handleDelete(selectedNodeIds) }}
+          onGroup={() => { if (projectId !== null) persistAfter(() => actions.groupSelected(projectId)) }}
+          onUngroup={() => {
+            if (selectedNode !== null && selectedNode.kind === 'group' && projectId !== null) {
+              persistAfter(() => actions.ungroup(projectId, selectedNode.id))
+            }
+          }}
+          onAlign={alignment => { if (projectId !== null) persistAfter(() => actions.alignNodes(projectId, selectedNodeIds, alignment)) }}
+          onDistribute={direction => { if (projectId !== null) persistAfter(() => actions.distributeNodes(projectId, selectedNodeIds, direction)) }}
+          onAutoArrange={() => { if (projectId !== null) persistAfter(() => actions.autoArrange(projectId)) }}
+          onAddNode={kind => { if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind)) }}
+        />
         {canvasBody}
       </main>
-      <section className="csConversation">
-        {renderSlot('conversation', {})}
-      </section>
+      <aside className="csSide">
+        <LayerPanel
+          nodes={nodes}
+          selectedNodeIds={selectedNodeIds}
+          onSelect={(id, multi) => { actions.selectNode(id, multi) }}
+          onDelete={handleDelete}
+          onToggleLock={id => { if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id)) }}
+          onToggleVisibility={handleToggleVisibility}
+          onReorder={handleReorder}
+        />
+        <section className="csConversation">
+          {renderSlot('conversation', {})}
+        </section>
+      </aside>
+      {selectedNode !== null && projectId !== null && detailOpen && (
+        <LayerDetailPanel
+          node={selectedNode}
+          onClose={() => { setDetailOpen(false) }}
+          onRename={handleRename}
+          onSetOpacity={(id, opacity) => { if (projectId !== null) persistAfter(() => actions.setOpacity(projectId, id, opacity)) }}
+          onToggleFlip={(id, axis) => {
+            if (projectId !== null) {
+              const node = nodes.find(candidate => candidate.id === id)
+              if (node === undefined) return
+              persistAfter(() => actions.updateNode(projectId, id, { [axis]: !node[axis] }))
+            }
+          }}
+          onToggleLock={id => { if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id)) }}
+          onToggleVisibility={handleToggleVisibility}
+          onReorder={handleReorder}
+          onDelete={id => { handleDelete([id]) }}
+          onRetry={handleRetry}
+          onSteer={handleSteer}
+          onCancel={() => { void cancelCurrentTurn() }}
+        />
+      )}
+      {menu !== null && projectId !== null && (
+        <CanvasContextMenu
+          node={menu.node}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => { setMenu(null) }}
+          onRename={id => { actions.selectNode(id); setDetailOpen(true) }}
+          onCopy={id => { actions.selectNode(id); actions.copySelected(projectId) }}
+          onDelete={id => { handleDelete([id]) }}
+          onReorder={handleReorder}
+          onToggleLock={id => { if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id)) }}
+          onToggleVisibility={handleToggleVisibility}
+          onRetry={handleRetry}
+          onSteer={id => { actions.selectNode(id); setDetailOpen(true) }}
+          onCancel={() => { void cancelCurrentTurn() }}
+          onUngroup={id => { if (projectId !== null) persistAfter(() => actions.ungroup(projectId, id)) }}
+        />
+      )}
       <div className="csOverlay" data-cs-overlay>
         {renderSlot('shell.overlay', {})}
       </div>

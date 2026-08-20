@@ -4,6 +4,7 @@
  */
 import type { StudioProject } from '../contracts/project.js'
 import type { StudioCanvasNode } from '../contracts/canvas.js'
+import type { GenerateParams } from '../generate.js'
 
 /** HTTP facts used to localize safe Client-facing Studio failures. */
 export class StudioApiError extends Error {
@@ -91,4 +92,42 @@ export async function saveStudioCanvas(projectId: string, nodes: readonly Studio
     body: JSON.stringify({ projectId, nodes }),
     ...(signal === undefined ? {} : { signal }),
   }))
+}
+
+/**
+ * 解析节点上保存的生成参数（generationPrompt 是原参数 JSON）；无法解析或缺失时
+ * 返回 null。重试 / 修改提示词都基于它重放原参数（plan §7.8）。
+ */
+function generationParamsOf(node: StudioCanvasNode): GenerateParams | null {
+  if (node.generationPrompt === undefined) return null
+  try {
+    const value = JSON.parse(node.generationPrompt) as unknown
+    if (value === null || typeof value !== 'object') return null
+    return value as GenerateParams
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 节点级重试 / 修改提示词：按原参数（可带 overrides）重新请求 Host 生成，
+ * 并把结果写回原节点（retryOf，不产生新边）。成功后返回新的产物 URL。
+ */
+export async function retryStudioNode(
+  projectId: string,
+  node: StudioCanvasNode,
+  overrides?: Partial<GenerateParams>,
+  signal?: AbortSignal,
+): Promise<{ url: string }> {
+  if (node.toolName === undefined) throw new Error('节点缺少工具名，无法重试')
+  const base = generationParamsOf(node)
+  if (base === null) throw new Error('节点缺少可重放的生成参数')
+  const params: GenerateParams = { ...base, ...overrides, retryOf: node.id }
+  const response = await readJson<{ url: string }>(await fetch('/canvas-studio/generate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tool: node.toolName, projectId, params }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+  return response
 }

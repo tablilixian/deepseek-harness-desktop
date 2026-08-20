@@ -1,14 +1,31 @@
-import type { StudioCanvasNode } from '../../contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasOperationType } from '../../contracts/canvas.js';
+/** Human-readable operation labels (edge chip + detail panel). */
+export declare const OPERATION_LABELS: Readonly<Partial<Record<StudioCanvasOperationType, string>>>;
+/** Resize corners (grid of 9, center omitted). */
+declare const RESIZE_CORNERS: readonly ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
+export type ResizeCorner = typeof RESIZE_CORNERS[number];
 /** Props for a single canvas node box. */
 export interface CanvasNodeProps {
     node: StudioCanvasNode;
     selected: boolean;
-    onPointerDown(event: React.PointerEvent): void;
+    /** Begin a drag (also selects; multi-select via ctrl/cmd). */
+    onNodePointerDown(event: React.PointerEvent, node: StudioCanvasNode): void;
+    /** Begin a resize gesture. */
+    onResizePointerDown(event: React.PointerEvent, node: StudioCanvasNode, corner: ResizeCorner): void;
+    /** Begin a manual connection drag (S6). */
+    onLinkPointerDown(event: React.PointerEvent, node: StudioCanvasNode): void;
+    /** Commit an inline rename. */
+    onRenameSubmit(id: string, title: string): void;
+    /** Request the context menu at screen coordinates. */
+    onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void;
 }
 /**
- * One canvas node: an image/video media box or a text annotation box, placed
- * at its canvas-space coordinates. The surface owns pan/zoom/drag; this
- * component is purely presentational and reports pointer-down so the surface
- * can begin a node drag.
+ * One canvas node: media box or text annotation, placed at its canvas-space
+ * coordinates. The surface owns pan/zoom/drag/resize gestures; this component
+ * is presentational and reports pointer-downs with the intended gesture.
+ * Visual state follows the reference LayerData semantics: locked (no drag),
+ * loading overlay, error badge, opacity, flipX/flipY (media only), hidden
+ * nodes are filtered by the surface.
  */
 export declare function CanvasNode(props: CanvasNodeProps): import("react").JSX.Element;
+export {};

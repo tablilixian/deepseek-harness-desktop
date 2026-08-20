@@ -37,6 +37,8 @@ window.__ModuleLoader__.load({
 		* @returns 节点 definition，供 `ctx.conversationEvents.register` 注册。
 		*/
 		function createAssetCaptureDefinition(hooks) {
+			const onToolCall = hooks.onToolCall ?? (() => {});
+			const onToolError = hooks.onToolError ?? (() => {});
 			const match = (event) => {
 				if (event.type === "tool/call") {
 					const data = event.data;
@@ -61,16 +63,31 @@ window.__ModuleLoader__.load({
 				match,
 				start: (_context, startMatch) => {
 					const data = startMatch.event.data;
+					const toolName = data.name;
+					const rawArguments = typeof data.arguments === "string" ? data.arguments : "";
+					const projectId = hooks.getSelectedProjectId();
+					if (projectId !== null) onToolCall(projectId, {
+						toolName,
+						runId: String(data.callId),
+						kind: STUDIO_TOOL_KINDS[toolName],
+						arguments: rawArguments
+					});
 					return {
-						toolName: data.name,
-						sourceUrl: sourceUrlFromArguments(data.arguments) ?? ""
+						toolName,
+						sourceUrl: sourceUrlFromArguments(data.arguments) ?? "",
+						kind: STUDIO_TOOL_KINDS[toolName]
 					};
 				},
 				update: (context, updateMatch) => {
 					const state = context.state;
-					if (updateMatch.event.type === "tool/result") {
-						const projectId = hooks.getSelectedProjectId();
-						if (projectId !== null) hooks.reloadCanvas(projectId);
+					const projectId = hooks.getSelectedProjectId();
+					if (updateMatch.event.type === "tool/result" && projectId !== null) {
+						const data = updateMatch.event.data;
+						if (data.error !== void 0) {
+							const error = data.error;
+							const message = typeof error === "string" ? error : error !== null && typeof error === "object" && typeof error.message === "string" ? error.message : "生成失败";
+							onToolError(projectId, String(data.message.source.callId), message);
+						} else hooks.reloadCanvas(projectId);
 					}
 					return state;
 				},
@@ -154,6 +171,44 @@ window.__ModuleLoader__.load({
 				...signal === void 0 ? {} : { signal }
 			}));
 		}
+		/**
+		* 解析节点上保存的生成参数（generationPrompt 是原参数 JSON）；无法解析或缺失时
+		* 返回 null。重试 / 修改提示词都基于它重放原参数（plan §7.8）。
+		*/
+		function generationParamsOf(node) {
+			if (node.generationPrompt === void 0) return null;
+			try {
+				const value = JSON.parse(node.generationPrompt);
+				if (value === null || typeof value !== "object") return null;
+				return value;
+			} catch {
+				return null;
+			}
+		}
+		/**
+		* 节点级重试 / 修改提示词：按原参数（可带 overrides）重新请求 Host 生成，
+		* 并把结果写回原节点（retryOf，不产生新边）。成功后返回新的产物 URL。
+		*/
+		async function retryStudioNode(projectId, node, overrides, signal) {
+			if (node.toolName === void 0) throw new Error("节点缺少工具名，无法重试");
+			const base = generationParamsOf(node);
+			if (base === null) throw new Error("节点缺少可重放的生成参数");
+			const params = {
+				...base,
+				...overrides,
+				retryOf: node.id
+			};
+			return await readJson(await fetch("/canvas-studio/generate", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					tool: node.toolName,
+					projectId,
+					params
+				}),
+				...signal === void 0 ? {} : { signal }
+			}));
+		}
 		//#endregion
 		//#region src/client/layout-controller.ts
 		/**
@@ -172,16 +227,25 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/project-store.ts
 		/**
-		* Project + canvas viewing store: the registry snapshot, the current
-		* selection, and the per-project canvas node list.
+		* Project + canvas store: the registry snapshot, the current selection
+		* (single + multi), per-project canvas node lists, snapshot history
+		* (undo/redo), and the clipboard.
 		*
 		* Reads happen through the framework-bound `useStore`; writes go through the
 		* declared actions only (async fetching lives in the apply-world inject
 		* callbacks, which commit through these actions). The canvas node list is the
 		* full P4+ model: every captured generation result (image/video) or manual
-		* annotation (sticky/text/prompt) is a node, and bloodline edges are derived
-		* from each node's `sourceIds` at render time (plan §7.3).
+		* annotation (sticky/text/prompt/group) is a node, and bloodline edges are
+		* derived from each node's `sourceIds` at render time (plan §7.3).
+		*
+		* History semantics follow the reference canvas store (snapshot the pre-mutation
+		* list, cap 20): atomic actions snapshot first, while drags call `pushHistory`
+		* explicitly at drag start (moveNode itself never snapshots — it fires every
+		* pointer-move frame). Transient generation state (isLoading/progress/error)
+		* lives on client-minted pending nodes and is stripped on reload.
 		*/
+		/** Snapshot-history cap (reference: MAX_HISTORY = 20). */
+		const MAX_HISTORY = 20;
 		/** Default rendered box size per node kind (canvas-space pixels). */
 		const NODE_SIZE = {
 			image: {
@@ -203,6 +267,10 @@ window.__ModuleLoader__.load({
 			prompt: {
 				width: 240,
 				height: 120
+			},
+			group: {
+				width: 320,
+				height: 220
 			}
 		};
 		/** Auto-layout grid for freshly captured nodes. */
@@ -211,6 +279,12 @@ window.__ModuleLoader__.load({
 			stepX: 300,
 			stepY: 240,
 			columns: 4
+		};
+		/** Default titles for manually added annotation nodes. */
+		const NODE_TITLES = {
+			sticky: "便签",
+			text: "文本",
+			prompt: "提示"
 		};
 		/** Mint a node id in the browser (secure context over loopback). */
 		function newNodeId() {
@@ -228,6 +302,77 @@ window.__ModuleLoader__.load({
 			if (state.selectedNodeId === null || state.selectedProjectId === null) return null;
 			return nodesOf(state, state.selectedProjectId).find((node) => node.id === state.selectedNodeId) ?? null;
 		}
+		/** 渲染序：zIndex 升序，同层按 createdAt 稳定。 */
+		function compareNodes(left, right) {
+			const leftZ = left.zIndex ?? 0;
+			const rightZ = right.zIndex ?? 0;
+			if (leftZ !== rightZ) return leftZ - rightZ;
+			return left.createdAt - right.createdAt;
+		}
+		/** 从节点列表里找 union 边界（空表返回 null）。 */
+		function boundsOf(nodes) {
+			if (nodes.length === 0) return null;
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const node of nodes) {
+				minX = Math.min(minX, node.x);
+				minY = Math.min(minY, node.y);
+				maxX = Math.max(maxX, node.x + node.width);
+				maxY = Math.max(maxY, node.y + node.height);
+			}
+			return {
+				x: minX,
+				y: minY,
+				width: maxX - minX,
+				height: maxY - minY
+			};
+		}
+		/** 血缘深度（sourceIds/parentId 链长），用于自动布局分层。 */
+		function depthOf(byId, node, seen) {
+			if (seen.has(node.id)) return 0;
+			seen.add(node.id);
+			const parents = [...node.sourceIds, ...node.parentId !== void 0 ? [node.parentId] : []];
+			let maxDepth = 0;
+			for (const parentId of parents) {
+				const parent = byId.get(parentId);
+				if (parent === void 0) continue;
+				maxDepth = Math.max(maxDepth, depthOf(byId, parent, seen) + 1);
+			}
+			return maxDepth;
+		}
+		/** 简化版血缘自动布局：按深度分层，每层横向排布（reference autoLayout 的树语义降级版）。 */
+		function layoutByDepth(nodes) {
+			const byId = new Map(nodes.map((node) => [node.id, node]));
+			const depths = /* @__PURE__ */ new Map();
+			for (const node of nodes) depths.set(node.id, depthOf(byId, node, /* @__PURE__ */ new Set()));
+			const maxDepth = Math.max(0, ...depths.values());
+			const column = /* @__PURE__ */ new Map();
+			const positions = /* @__PURE__ */ new Map();
+			for (const node of [...nodes].sort(compareNodes)) {
+				const depth = depths.get(node.id) ?? 0;
+				const index = column.get(depth) ?? 0;
+				column.set(depth, index + 1);
+				positions.set(node.id, {
+					x: LAYOUT.origin + index * LAYOUT.stepX,
+					y: LAYOUT.origin + depth * (LAYOUT.stepY + 60) + (maxDepth - depth) * 0
+				});
+			}
+			return positions;
+		}
+		/** 快照当前节点列表进历史（内部实现：先截断 redo 尾部，再压入）。 */
+		function snapshotHistory(history, historyIndex, projectId, nodes) {
+			const trimmed = history.slice(0, historyIndex + 1);
+			trimmed.push({
+				projectId,
+				nodes: [...nodes]
+			});
+			return {
+				history: trimmed.slice(-20),
+				historyIndex: Math.min(trimmed.length - 1, MAX_HISTORY - 1)
+			};
+		}
 		/**
 		* Create the project + canvas store handle.
 		* @returns the store handle (spec + type + identity + factory in one).
@@ -238,10 +383,14 @@ window.__ModuleLoader__.load({
 					projects: [],
 					selectedProjectId: null,
 					selectedNodeId: null,
+					selectedNodeIds: [],
 					phase: "idle",
 					error: null,
 					creating: false,
-					nodes: {}
+					nodes: {},
+					history: [],
+					historyIndex: -1,
+					clipboard: []
 				}),
 				actions: {
 					setPhase: (draft, phase) => {
@@ -254,6 +403,7 @@ window.__ModuleLoader__.load({
 						if (draft.selectedProjectId !== null && !projects.some((project) => project.id === draft.selectedProjectId)) {
 							draft.selectedProjectId = null;
 							draft.selectedNodeId = null;
+							draft.selectedNodeIds = [];
 						}
 					},
 					setFailed: (draft, error) => {
@@ -263,14 +413,19 @@ window.__ModuleLoader__.load({
 					select: (draft, projectId) => {
 						draft.selectedProjectId = projectId;
 						draft.selectedNodeId = null;
+						draft.selectedNodeIds = [];
 					},
 					setCreating: (draft, creating) => {
 						draft.creating = creating;
 					},
 					setNodes: (draft, projectId, nodes) => {
+						const clean = nodes.map((node) => {
+							const { isLoading: _isLoading, progress: _progress, error: _error, ...rest } = node;
+							return rest;
+						});
 						draft.nodes = {
 							...draft.nodes,
-							[projectId]: [...nodes]
+							[projectId]: clean
 						};
 					},
 					addAsset: (draft, projectId, asset) => {
@@ -302,39 +457,450 @@ window.__ModuleLoader__.load({
 							[projectId]: [...existing, node]
 						};
 					},
+					selectNode: (draft, id, multi = false) => {
+						if (multi && id !== null) {
+							const roster = new Set(draft.selectedNodeIds);
+							if (roster.has(id)) roster.delete(id);
+							else roster.add(id);
+							draft.selectedNodeIds = [...roster];
+							draft.selectedNodeId = roster.size === 1 ? id : null;
+						} else {
+							draft.selectedNodeIds = id === null ? [] : [id];
+							draft.selectedNodeId = id;
+						}
+					},
+					selectAllNodes: (draft) => {
+						if (draft.selectedProjectId === null) return;
+						const ids = nodesOf(draft, draft.selectedProjectId).map((node) => node.id);
+						draft.selectedNodeIds = ids;
+						draft.selectedNodeId = ids.length === 1 ? ids[0] : null;
+					},
 					moveNode: (draft, projectId, id, x, y) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const node = existing.find((candidate) => candidate.id === id);
+						if (node === void 0) return;
+						const deltaX = x - node.x;
+						const deltaY = y - node.y;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((candidate) => candidate.id === id ? {
+								...candidate,
+								x,
+								y
+							} : candidate.parentId === id ? {
+								...candidate,
+								x: candidate.x + deltaX,
+								y: candidate.y + deltaY
+							} : candidate)
+						};
+					},
+					updateNode: (draft, projectId, id, updates) => {
 						const existing = draft.nodes[projectId];
 						if (existing === void 0) return;
 						draft.nodes = {
 							...draft.nodes,
 							[projectId]: existing.map((node) => node.id === id ? {
 								...node,
-								x,
-								y
+								...updates
 							} : node)
 						};
 					},
-					selectNode: (draft, id) => {
-						draft.selectedNodeId = id;
+					removeNodes: (draft, projectId, ids) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || ids.length === 0) return;
+						const removed = new Set(ids);
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.filter((node) => !removed.has(node.id)).map((node) => {
+								const survivors = {
+									...node,
+									sourceIds: node.sourceIds.filter((sourceId) => !removed.has(sourceId))
+								};
+								if (node.parentId !== void 0 && removed.has(node.parentId)) {
+									const { parentId: _staleParent, ...rest } = survivors;
+									return rest;
+								}
+								return survivors;
+							})
+						};
+						draft.selectedNodeIds = draft.selectedNodeIds.filter((id) => !removed.has(id));
+						if (draft.selectedNodeId !== null && removed.has(draft.selectedNodeId)) draft.selectedNodeId = draft.selectedNodeIds.length === 1 ? draft.selectedNodeIds[0] : null;
 					},
-					removeNode: (draft, projectId, id) => {
+					pushHistory: (draft, projectId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+					},
+					undo: (draft) => {
+						if (draft.historyIndex < 0 || draft.historyIndex >= draft.history.length) return;
+						const entry = draft.history[draft.historyIndex];
+						draft.nodes = {
+							...draft.nodes,
+							[entry.projectId]: [...entry.nodes]
+						};
+						draft.historyIndex -= 1;
+						draft.selectedNodeId = null;
+						draft.selectedNodeIds = [];
+					},
+					redo: (draft) => {
+						const nextIndex = draft.historyIndex + 1;
+						if (nextIndex >= draft.history.length) return;
+						const entry = draft.history[nextIndex];
+						draft.nodes = {
+							...draft.nodes,
+							[entry.projectId]: [...entry.nodes]
+						};
+						draft.historyIndex = nextIndex;
+						draft.selectedNodeId = null;
+						draft.selectedNodeIds = [];
+					},
+					copySelected: (draft, projectId) => {
+						const byId = new Map(nodesOf(draft, projectId).map((node) => [node.id, node]));
+						draft.clipboard = draft.selectedNodeIds.map((id) => byId.get(id)).filter((node) => node !== void 0);
+					},
+					pasteNodes: (draft, projectId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || draft.clipboard.length === 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const idMap = /* @__PURE__ */ new Map();
+						const pasted = draft.clipboard.map((node) => {
+							const newId = newNodeId();
+							idMap.set(node.id, newId);
+							return {
+								...node,
+								id: newId,
+								x: node.x + 20,
+								y: node.y + 20,
+								createdAt: Date.now()
+							};
+						});
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing, ...pasted.map((node) => ({
+								...node,
+								sourceIds: node.sourceIds.map((sourceId) => idMap.get(sourceId) ?? sourceId),
+								...node.parentId !== void 0 ? { parentId: idMap.get(node.parentId) ?? node.parentId } : {}
+							}))]
+						};
+						draft.selectedNodeIds = pasted.map((node) => node.id);
+						draft.selectedNodeId = pasted.length === 1 ? pasted[0].id : null;
+					},
+					reorderNode: (draft, projectId, id, direction) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const node = existing.find((candidate) => candidate.id === id);
+						if (node === void 0) return;
+						const sorted = [...existing].sort(compareNodes);
+						const index = sorted.findIndex((candidate) => candidate.id === id);
+						if (index === -1) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						let targetZ = node.zIndex ?? 0;
+						if (direction === "front") targetZ = Math.max(0, ...existing.map((candidate) => candidate.zIndex ?? 0)) + 1;
+						else if (direction === "back") targetZ = Math.min(0, ...existing.map((candidate) => candidate.zIndex ?? 0)) - 1;
+						else if (direction === "forward") {
+							const next = sorted[index + 1];
+							if (next !== void 0) targetZ = (next.zIndex ?? 0) + 1;
+						} else if (direction === "backward") {
+							const previous = sorted[index - 1];
+							if (previous !== void 0) targetZ = (previous.zIndex ?? 0) - 1;
+						}
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((candidate) => candidate.id === id ? {
+								...candidate,
+								zIndex: targetZ
+							} : candidate)
+						};
+					},
+					toggleLock: (draft, projectId, id) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => node.id === id ? {
+								...node,
+								locked: !node.locked
+							} : node)
+						};
+					},
+					setVisibility: (draft, projectId, id, visible) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => node.id === id ? {
+								...node,
+								visible
+							} : node)
+						};
+					},
+					setOpacity: (draft, projectId, id, opacity) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const clamped = Math.min(1, Math.max(0, opacity));
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => node.id === id ? {
+								...node,
+								opacity: clamped
+							} : node)
+						};
+					},
+					renameNode: (draft, projectId, id, title) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const nextTitle = title.trim();
+						if (nextTitle.length === 0) return;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => node.id === id ? {
+								...node,
+								title: nextTitle
+							} : node)
+						};
+					},
+					linkLayers: (draft, projectId, sourceIds, targetId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || sourceIds.length === 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => {
+								if (node.id !== targetId) return node;
+								const merged = [...node.sourceIds];
+								for (const sourceId of sourceIds) if (sourceId !== targetId && !merged.includes(sourceId)) merged.push(sourceId);
+								return {
+									...node,
+									sourceIds: merged
+								};
+							})
+						};
+					},
+					groupSelected: (draft, projectId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || draft.selectedNodeIds.length < 2) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const byId = new Map(existing.map((node) => [node.id, node]));
+						const members = draft.selectedNodeIds.map((id) => byId.get(id)).filter((node) => node !== void 0);
+						const bounds = boundsOf(members);
+						if (bounds === null) return;
+						const group = {
+							id: newNodeId(),
+							kind: "group",
+							title: "分组",
+							x: bounds.x - 12,
+							y: bounds.y - 12,
+							width: bounds.width + 24,
+							height: bounds.height + 24,
+							createdAt: Date.now(),
+							origin: "manual",
+							sourceIds: [],
+							zIndex: Math.min(...members.map((node) => node.zIndex ?? 0)) - 1
+						};
+						const memberIds = new Set(members.map((node) => node.id));
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing.map((node) => memberIds.has(node.id) ? {
+								...node,
+								parentId: group.id
+							} : node), group]
+						};
+						draft.selectedNodeIds = [group.id];
+						draft.selectedNodeId = group.id;
+					},
+					ungroup: (draft, projectId, groupId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.filter((node) => node.id !== groupId).map((node) => {
+								if (node.parentId !== groupId) return node;
+								const { parentId: _staleParent, ...rest } = node;
+								return rest;
+							})
+						};
+						draft.selectedNodeIds = draft.selectedNodeIds.filter((id) => id !== groupId);
+						if (draft.selectedNodeId === groupId) draft.selectedNodeId = null;
+					},
+					alignNodes: (draft, projectId, ids, alignment) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || ids.length < 2) return;
+						const byId = new Map(existing.map((node) => [node.id, node]));
+						const members = ids.map((id) => byId.get(id)).filter((node) => node !== void 0);
+						const bounds = boundsOf(members);
+						if (bounds === null) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const updates = /* @__PURE__ */ new Map();
+						for (const node of members) {
+							let x = node.x;
+							let y = node.y;
+							if (alignment === "left") x = bounds.x;
+							else if (alignment === "center") x = bounds.x + (bounds.width - node.width) / 2;
+							else if (alignment === "right") x = bounds.x + bounds.width - node.width;
+							else if (alignment === "top") y = bounds.y;
+							else if (alignment === "middle") y = bounds.y + (bounds.height - node.height) / 2;
+							else if (alignment === "bottom") y = bounds.y + bounds.height - node.height;
+							updates.set(node.id, {
+								x,
+								y
+							});
+						}
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => {
+								const update = updates.get(node.id);
+								return update === void 0 ? node : {
+									...node,
+									...update
+								};
+							})
+						};
+					},
+					distributeNodes: (draft, projectId, ids, direction) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || ids.length < 3) return;
+						const byId = new Map(existing.map((node) => [node.id, node]));
+						const members = ids.map((id) => byId.get(id)).filter((node) => node !== void 0);
+						const sorted = direction === "horizontal" ? [...members].sort((left, right) => left.x - right.x) : [...members].sort((left, right) => left.y - right.y);
+						if (sorted.length < 3) return;
+						const first = sorted[0];
+						const last = sorted[sorted.length - 1];
+						const gap = (direction === "horizontal" ? last.x + last.width - first.x : last.y + last.height - first.y) / (sorted.length - 1);
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const updates = /* @__PURE__ */ new Map();
+						sorted.forEach((node, index) => {
+							const offset = direction === "horizontal" ? first.x + gap * index : first.y + gap * index;
+							updates.set(node.id, direction === "horizontal" ? { x: offset } : { y: offset });
+						});
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => {
+								const update = updates.get(node.id);
+								return update === void 0 ? node : {
+									...node,
+									...update
+								};
+							})
+						};
+					},
+					autoArrange: (draft, projectId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0 || existing.length === 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const positions = layoutByDepth(existing);
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.map((node) => {
+								const position = positions.get(node.id);
+								return position === void 0 ? node : {
+									...node,
+									x: position.x,
+									y: position.y
+								};
+							})
+						};
+					},
+					setPendingNode: (draft, projectId, node) => {
+						const existing = draft.nodes[projectId] ?? [];
+						if (existing.some((candidate) => candidate.runId === node.runId && candidate.isLoading)) return;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing, node]
+						};
+					},
+					addNode: (draft, projectId, kind) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const index = existing.length;
+						const size = NODE_SIZE[kind];
+						const defaults = kind === "sticky" ? { text: "新便签" } : kind === "text" ? { text: "新文本" } : { text: "新提示" };
+						const node = {
+							id: newNodeId(),
+							kind,
+							title: NODE_TITLES[kind],
+							x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
+							y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+							width: size.width,
+							height: size.height,
+							createdAt: Date.now(),
+							origin: "manual",
+							sourceIds: [],
+							...defaults
+						};
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing, node]
+						};
+						draft.selectedNodeIds = [node.id];
+						draft.selectedNodeId = node.id;
+					},
+					removePendingByRunId: (draft, projectId, runId) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const pending = existing.find((node) => node.runId === runId && node.isLoading);
+						if (pending === void 0) return;
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: existing.filter((node) => node.id !== pending.id)
+						};
+					},
+					markPendingError: (draft, projectId, runId, error) => {
 						const existing = draft.nodes[projectId];
 						if (existing === void 0) return;
 						draft.nodes = {
 							...draft.nodes,
-							[projectId]: existing.filter((node) => node.id !== id).map((node) => node.sourceIds.includes(id) ? {
+							[projectId]: existing.map((node) => node.runId === runId && node.isLoading ? {
 								...node,
-								sourceIds: node.sourceIds.filter((sourceId) => sourceId !== id)
+								isLoading: false,
+								error
 							} : node)
 						};
-						if (draft.selectedNodeId === id) draft.selectedNodeId = null;
 					},
 					clearProject: (draft, projectId) => {
 						draft.nodes = {
 							...draft.nodes,
 							[projectId]: []
 						};
-						if (draft.selectedNodeId !== null) draft.selectedNodeId = null;
+						draft.selectedNodeId = null;
+						draft.selectedNodeIds = [];
 					}
 				}
 			});
@@ -355,7 +921,7 @@ window.__ModuleLoader__.load({
 
 .csFrame {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 440px;
+  grid-template-columns: 280px minmax(0, 1fr) 380px;
   height: 100%;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
@@ -560,28 +1126,6 @@ window.__ModuleLoader__.load({
   min-width: 0;
   overflow: hidden;
   background: var(--dsw-alias-bg-base);
-}
-
-.csCanvasToolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
-  font-size: 13px;
-  color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-bg-base);
-}
-
-.csCanvasToolbarDelete {
-  font: inherit;
-  padding: 3px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: transparent;
-  color: var(--dsw-alias-state-error-primary);
-  cursor: pointer;
 }
 
 .csCanvasEmpty {
@@ -794,6 +1338,697 @@ window.__ModuleLoader__.load({
 .csOverlay > * {
   pointer-events: auto;
 }
+
+/* ---- Canvas toolbar (floating strip above the surface) ---- */
+.csToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  z-index: 5;
+}
+
+.csToolbarGroup {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: 8px;
+  margin-right: 4px;
+  border-right: 1px solid var(--dsw-alias-border-l2);
+}
+
+.csToolbarGroup:last-child {
+  border-right: none;
+  padding-right: 0;
+  margin-right: 0;
+}
+
+.csToolbarButton {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.csToolbarButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csToolbarButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- Snap alignment guides ---- */
+.csGuide {
+  position: absolute;
+  background: var(--dsw-alias-interactive-bg-active);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.csGuideVertical {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.csGuideHorizontal {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+/* ---- Node visual states ---- */
+.csNodeLocked {
+  opacity: 0.75;
+  cursor: not-allowed;
+}
+
+.csNodeError {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.csNodeLoading {
+  border-style: dashed;
+  border-color: var(--dsw-alias-interactive-bg-active);
+}
+
+.csNodeMediaBox {
+  width: 100%;
+  height: 100%;
+}
+
+.csNodeGroup {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px;
+  height: 100%;
+  box-sizing: border-box;
+  border: 1px dashed var(--dsw-alias-interactive-bg-active);
+  border-radius: 8px;
+  background: rgb(99 102 241 / 6%);
+}
+
+.csNodeResize {
+  position: absolute;
+  z-index: 4;
+}
+
+.csNodeResizeN {
+  top: -4px;
+  left: 8px;
+  right: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.csNodeResizeS {
+  bottom: -4px;
+  left: 8px;
+  right: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.csNodeResizeE {
+  top: 8px;
+  bottom: 8px;
+  right: -4px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.csNodeResizeW {
+  top: 8px;
+  bottom: 8px;
+  left: -4px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.csNodeResizeNW {
+  top: -4px;
+  left: -4px;
+  width: 10px;
+  height: 10px;
+  cursor: nwse-resize;
+}
+
+.csNodeResizeNE {
+  top: -4px;
+  right: -4px;
+  width: 10px;
+  height: 10px;
+  cursor: nesw-resize;
+}
+
+.csNodeResizeSW {
+  bottom: -4px;
+  left: -4px;
+  width: 10px;
+  height: 10px;
+  cursor: nesw-resize;
+}
+
+.csNodeResizeSE {
+  bottom: -4px;
+  right: -4px;
+  width: 10px;
+  height: 10px;
+  cursor: nwse-resize;
+}
+
+.csNodeResizeN, .csNodeResizeS, .csNodeResizeE, .csNodeResizeW {
+  opacity: 0;
+}
+
+.csNode:hover .csNodeResize,
+.csNodeSelected .csNodeResize {
+  opacity: 1;
+}
+
+.csNodeLinkHandle {
+  position: absolute;
+  right: -9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--dsw-alias-bg-base);
+  background: var(--dsw-alias-interactive-bg-active);
+  cursor: crosshair;
+  z-index: 4;
+}
+
+.csNodeLinkHandle:hover {
+  box-shadow: 0 0 0 2px var(--dsw-alias-interactive-bg-active);
+}
+
+.csNodeOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--dsw-alias-bg-base);
+  opacity: 0.92;
+}
+
+.csNodeOverlayLabel {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csNodeProgress {
+  width: 70%;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--dsw-alias-border-l2);
+}
+
+.csNodeProgressBar {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-interactive-bg-active);
+  animation: csProgressSlide 1.2s ease-in-out infinite;
+}
+
+@keyframes csProgressSlide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.csNodeBadge {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csNodeBadgeError {
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.csNodeBadgeLock {
+  left: auto;
+  right: -8px;
+}
+
+.csNodeRename {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  right: 4px;
+  z-index: 5;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--dsw-alias-interactive-bg-active);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ---- Edge draft line + chip text ---- */
+.csEdgeDraft {
+  stroke-dasharray: 6 4;
+  stroke: var(--dsw-alias-interactive-bg-active);
+}
+
+.csEdgeChipText {
+  font-family: inherit;
+  user-select: none;
+}
+
+/* ---- Zoom cluster ---- */
+.csCanvasZoomCluster {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+}
+
+.csCanvasZoom {
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csCanvasZoomButton {
+  font: inherit;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.csCanvasZoomButton:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ---- Minimap ---- */
+.csMinimap {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  cursor: grab;
+  user-select: none;
+}
+
+.csMinimap:active {
+  cursor: grabbing;
+}
+
+.csMinimap svg {
+  display: block;
+}
+
+/* ---- Side column (layer list + conversation) ---- */
+.csSide {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* ---- Layer panel ---- */
+.csLayerPanel {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-primary);
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.csLayerPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.csLayerSearch {
+  font: inherit;
+  font-size: 12px;
+  flex: 0 0 120px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csLayerList {
+  overflow-y: auto;
+  padding: 0 6px 8px;
+}
+
+.csLayerRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.csLayerRow:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.csLayerRowActive {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.csLayerThumb {
+  flex: 0 0 40px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+
+.csLayerThumb img,
+.csLayerThumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.csLayerThumbKind {
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.csLayerTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+
+.csLayerActions {
+  display: flex;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.csLayerAction {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.csLayerAction:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csLayerActionActive {
+  color: var(--dsw-alias-label-primary);
+}
+
+.csLayerActionDanger:hover {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.csLayerEmpty {
+  padding: 16px 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ---- Layer detail panel (overlay) ---- */
+.csDetailPanel {
+  position: fixed;
+  top: 64px;
+  right: 12px;
+  z-index: 30;
+  width: 320px;
+  max-height: calc(100% - 80px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
+  overflow: hidden;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.csDetailPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.csDetailPanelClose {
+  font: inherit;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.csDetailPanelClose:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csDetailPanelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.csDetailRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.csDetailLabel {
+  flex: 0 0 72px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.csDetailValue {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-primary);
+}
+
+.csDetailValueClickable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.csDetailInput {
+  font: inherit;
+  font-size: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csDetailRange {
+  flex: 1 1 auto;
+  accent-color: var(--dsw-alias-interactive-bg-active);
+}
+
+.csDetailButton {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.csDetailButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csDetailButtonActive {
+  border-color: var(--dsw-alias-interactive-bg-active);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csDetailButtonDanger {
+  border-color: transparent;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.csDetailPrompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csDetailError {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-state-error-primary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.csDetailActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+}
+
+.csDetailSteer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* ---- Node context menu ---- */
+.csContextMenu {
+  position: fixed;
+  z-index: 50;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 16%);
+}
+
+.csMenuAction {
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.csMenuAction:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.csMenuAction:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.csMenuActionDanger {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.csMenuActionDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
 `;
 		/** Inject the studio stylesheet once per browser lifetime. */
 		function installStudioStyles() {
@@ -945,36 +2180,399 @@ window.__ModuleLoader__.load({
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectListErrorBoundary, { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectListInner, { ...props }) });
 		}
 		//#endregion
+		//#region src/client/canvas/CanvasToolbar.tsx
+		const ALIGN_LABELS = {
+			left: "左对齐",
+			center: "水平居中",
+			right: "右对齐",
+			top: "顶对齐",
+			middle: "垂直居中",
+			bottom: "底对齐"
+		};
+		/**
+		* The canvas toolbar: undo/redo, selection editing (delete/group/ungroup/
+		* align/distribute), auto-arrange, and manual node creation (sticky/text/
+		* prompt). Everything is props-driven — the frame wires the store actions.
+		*/
+		function CanvasToolbar(props) {
+			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode } = props;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: "csToolbar",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csToolbarGroup",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csToolbarButton",
+							disabled: !canUndo,
+							title: "撤销 (Ctrl+Z)",
+							onClick: onUndo,
+							children: "↩ 撤销"
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csToolbarButton",
+							disabled: !canRedo,
+							title: "重做 (Ctrl+Shift+Z)",
+							onClick: onRedo,
+							children: "↪ 重做"
+						})]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csToolbarGroup",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								disabled: !hasSelection,
+								onClick: onDelete,
+								children: "删除"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								disabled: selectedCount < 2,
+								onClick: onGroup,
+								children: "编组"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								disabled: selectedCount !== 1,
+								onClick: onUngroup,
+								children: "解组"
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csToolbarGroup",
+						children: Object.keys(ALIGN_LABELS).map((alignment) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csToolbarButton",
+							disabled: selectedCount < 2,
+							title: ALIGN_LABELS[alignment],
+							onClick: () => {
+								onAlign(alignment);
+							},
+							children: ALIGN_LABELS[alignment]
+						}, alignment))
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csToolbarGroup",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								disabled: selectedCount < 3,
+								onClick: () => {
+									onDistribute("horizontal");
+								},
+								children: "水平分布"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								disabled: selectedCount < 3,
+								onClick: () => {
+									onDistribute("vertical");
+								},
+								children: "垂直分布"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "按血缘深度整理布局",
+								onClick: onAutoArrange,
+								children: "整理布局"
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csToolbarGroup",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								onClick: () => {
+									onAddNode("sticky");
+								},
+								children: "+ 便签"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								onClick: () => {
+									onAddNode("text");
+								},
+								children: "+ 文本"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								onClick: () => {
+									onAddNode("prompt");
+								},
+								children: "+ 提示"
+							})
+						]
+					})
+				]
+			});
+		}
+		//#endregion
+		//#region src/client/canvas/canvas-math.ts
+		/** Clamp a value into [min, max]. */
+		function clamp(value, min, max) {
+			return Math.min(Math.max(value, min), max);
+		}
+		/** Snap threshold in canvas-space pixels. */
+		const SNAP_THRESHOLD = 5;
+		/**
+		* Snap a dragged node's target position against every other node: left/right/
+		* center edges on both axes, with optional grid snapping first.
+		*/
+		function calculateSnap(nodes, dragged, targetX, targetY, options = {}) {
+			const { gridSnap = false, gridSize = 50 } = options;
+			const guides = [];
+			if (gridSnap) return {
+				x: Math.round(targetX / gridSize) * gridSize,
+				y: Math.round(targetY / gridSize) * gridSize,
+				guides
+			};
+			let snapX = targetX;
+			let snapY = targetY;
+			const draggedRight = targetX + dragged.width;
+			const draggedBottom = targetY + dragged.height;
+			const draggedCenterX = targetX + dragged.width / 2;
+			const draggedCenterY = targetY + dragged.height / 2;
+			for (const node of nodes) {
+				if (node.id === dragged.id) continue;
+				if (node.visible === false) continue;
+				const right = node.x + node.width;
+				const bottom = node.y + node.height;
+				const centerX = node.x + node.width / 2;
+				const centerY = node.y + node.height / 2;
+				if (Math.abs(targetX - node.x) < SNAP_THRESHOLD) {
+					snapX = node.x;
+					guides.push({
+						type: "vertical",
+						position: node.x
+					});
+				}
+				if (Math.abs(draggedRight - right) < SNAP_THRESHOLD) {
+					snapX = right - dragged.width;
+					guides.push({
+						type: "vertical",
+						position: right
+					});
+				}
+				if (Math.abs(draggedCenterX - centerX) < SNAP_THRESHOLD) {
+					snapX = centerX - dragged.width / 2;
+					guides.push({
+						type: "vertical",
+						position: centerX
+					});
+				}
+				if (Math.abs(targetY - node.y) < SNAP_THRESHOLD) {
+					snapY = node.y;
+					guides.push({
+						type: "horizontal",
+						position: node.y
+					});
+				}
+				if (Math.abs(draggedBottom - bottom) < SNAP_THRESHOLD) {
+					snapY = bottom - dragged.height;
+					guides.push({
+						type: "horizontal",
+						position: bottom
+					});
+				}
+				if (Math.abs(draggedCenterY - centerY) < SNAP_THRESHOLD) {
+					snapY = centerY - dragged.height / 2;
+					guides.push({
+						type: "horizontal",
+						position: centerY
+					});
+				}
+			}
+			return {
+				x: snapX,
+				y: snapY,
+				guides
+			};
+		}
+		/** Union bounds of nodes (null when empty). */
+		function contentBounds(nodes) {
+			if (nodes.length === 0) return null;
+			let minX = Infinity;
+			let minY = Infinity;
+			let maxX = -Infinity;
+			let maxY = -Infinity;
+			for (const node of nodes) {
+				if (node.visible === false) continue;
+				minX = Math.min(minX, node.x);
+				minY = Math.min(minY, node.y);
+				maxX = Math.max(maxX, node.x + node.width);
+				maxY = Math.max(maxY, node.y + node.height);
+			}
+			if (minX === Infinity) return null;
+			return {
+				x: minX,
+				y: minY,
+				width: maxX - minX,
+				height: maxY - minY
+			};
+		}
+		/** Screen → canvas-space coordinate (inverse of the surface transform). */
+		function screenToWorld(screenX, screenY, offsetX, offsetY, scale) {
+			return {
+				x: (screenX - offsetX) / scale,
+				y: (screenY - offsetY) / scale
+			};
+		}
+		//#endregion
 		//#region src/client/canvas/CanvasEdges.tsx
+		/** Edge color per operation type (reference ConnectionLines palette subset). */
+		const OPERATION_COLORS = {
+			"text-to-image": "#22c55e",
+			"image-to-image": "#3b82f6",
+			"text-to-video": "#06b6d4",
+			"image-to-video": "#8b5cf6",
+			"mkr-video": "#a855f7",
+			"style-transfer": "#f59e0b",
+			"background-replace": "#f97316",
+			expand: "#ec4899",
+			"background-remove": "#14b8a6",
+			variant: "#84cc16",
+			import: "#6b7280",
+			drawing: "#eab308",
+			storyboard: "#f59e0b",
+			"character-sheet": "#3b82f6",
+			"scene-concept": "#10b981",
+			"video-clip": "#06b6d4",
+			"video-composite": "#a855f7"
+		};
+		/** Chinese edge label per operation type. */
+		const OPERATION_LABELS$1 = {
+			"text-to-image": "文生图",
+			"image-to-image": "图生图",
+			"text-to-video": "文生视频",
+			"image-to-video": "图生视频",
+			"mkr-video": "MKR多关键帧",
+			"style-transfer": "风格迁移",
+			"background-replace": "背景替换",
+			expand: "图片扩展",
+			"background-remove": "智能抠图",
+			variant: "图片变体",
+			import: "导入",
+			drawing: "绘图",
+			storyboard: "分镜",
+			"character-sheet": "定妆照",
+			"scene-concept": "概念图",
+			"video-clip": "视频片段",
+			"video-composite": "视频合成"
+		};
+		/** Source-role labels for multi-source operations (index-aligned). */
+		const SOURCE_ROLE_LABELS = { "mkr-video": [
+			"首帧",
+			"中间帧",
+			"尾帧"
+		] };
+		/** Marker id suffix must stay URL-safe; operation types are already safe. */
+		function markerId(operation) {
+			return `cs-arrow-${operation}`;
+		}
 		/**
 		* Bloodline edges: every node draws a bezier from each of its `sourceIds`
-		* sources. There is no separate edge table — edges are derived from the node
-		* graph at render time (plan §7.3). Coordinates are canvas-space; the parent
-		* layer applies the pan/zoom transform, so this SVG only needs overflow-visible.
+		* sources to its own left edge, colored by the target node's operationType
+		* with an arrow marker and a Chinese operation chip at the midpoint (the
+		* reference ConnectionLines rendering, adapted to canvas-space coordinates —
+		* this SVG sits inside the transformed layer, so no manual offset/scale).
+		* There is no separate edge table — edges are derived from the node graph at
+		* render time (plan §7.3).
 		*/
 		function CanvasEdges(props) {
-			const { nodes } = props;
+			const { nodes, selectedNodeIds } = props;
 			const byId = new Map(nodes.map((node) => [node.id, node]));
+			const selected = new Set(selectedNodeIds);
+			const operationTypes = new Set(nodes.map((node) => node.operationType).filter(Boolean));
 			const paths = [];
-			for (const node of nodes) for (const sourceId of node.sourceIds) {
-				const source = byId.get(sourceId);
-				if (source === void 0) continue;
-				const sx = source.x + source.width / 2;
-				const sy = source.y + source.height;
-				const tx = node.x + node.width / 2;
-				const ty = node.y;
-				const midY = (sy + ty) / 2;
-				const d = `M ${sx} ${sy} C ${sx} ${midY}, ${tx} ${midY}, ${tx} ${ty}`;
-				paths.push(/* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
-					className: "csEdge",
-					d
-				}, `${sourceId}->${node.id}`));
+			for (const node of nodes) {
+				if (node.sourceIds.length === 0) continue;
+				const operation = node.operationType ?? "import";
+				const color = OPERATION_COLORS[operation] ?? "#6b7280";
+				const label = OPERATION_LABELS$1[operation] ?? "操作";
+				const roles = SOURCE_ROLE_LABELS[operation];
+				const toX = node.x;
+				const toY = node.y + node.height / 2;
+				node.sourceIds.forEach((sourceId, index) => {
+					const source = byId.get(sourceId);
+					if (source === void 0) return;
+					const fromX = source.x + source.width;
+					const fromY = source.y + source.height / 2;
+					const control = Math.abs(toX - fromX) * .5;
+					const d = `M ${fromX} ${fromY} C ${fromX + control} ${fromY}, ${toX - control} ${toY}, ${toX} ${toY}`;
+					const highlighted = selected.has(node.id) || selected.has(source.id);
+					const midX = (fromX + toX) / 2;
+					const midY = (fromY + toY) / 2;
+					const chipLabel = roles?.[index] ?? label;
+					const chipWidth = Math.max(chipLabel.length * 8 + 16, 50);
+					paths.push(/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("g", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+						className: "csEdge",
+						d,
+						stroke: color,
+						strokeWidth: highlighted ? 3 : 2,
+						opacity: highlighted ? 1 : .5,
+						markerEnd: `url(#${markerId(operation)})`
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("g", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
+						x: midX - chipWidth / 2,
+						y: midY - 10,
+						width: chipWidth,
+						height: 20,
+						rx: 4,
+						fill: "#1f2937",
+						stroke: color,
+						strokeWidth: 1,
+						opacity: .9
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("text", {
+						x: midX,
+						y: midY + 4,
+						fill: color,
+						fontSize: 10,
+						textAnchor: "middle",
+						className: "csEdgeChipText",
+						children: chipLabel
+					})] })] }, `${sourceId}->${node.id}`));
+				});
 			}
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
 				className: "csEdges",
 				width: 1,
 				height: 1,
-				children: paths
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("defs", { children: [[...operationTypes].map((operation) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("marker", {
+					id: markerId(operation),
+					viewBox: "0 0 10 10",
+					refX: "9",
+					refY: "5",
+					markerWidth: "6",
+					markerHeight: "6",
+					orient: "auto-start-reverse",
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+						d: "M 0 0 L 10 5 L 0 10 z",
+						fill: OPERATION_COLORS[operation] ?? "#6b7280"
+					})
+				}, markerId(operation))), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("marker", {
+					id: "cs-arrow-import",
+					viewBox: "0 0 10 10",
+					refX: "9",
+					refY: "5",
+					markerWidth: "6",
+					markerHeight: "6",
+					orient: "auto-start-reverse",
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+						d: "M 0 0 L 10 5 L 0 10 z",
+						fill: "#6b7280"
+					})
+				})] }), paths]
 			});
 		}
 		//#endregion
@@ -985,38 +2583,140 @@ window.__ModuleLoader__.load({
 			video: "视频",
 			sticky: "便签",
 			text: "文本",
-			prompt: "提示"
+			prompt: "提示",
+			group: "分组"
 		};
+		/** Human-readable operation labels (edge chip + detail panel). */
+		const OPERATION_LABELS = {
+			"text-to-image": "文生图",
+			"image-to-image": "图生图",
+			"text-to-video": "文生视频",
+			"image-to-video": "图生视频",
+			"mkr-video": "MKR 多关键帧",
+			"style-transfer": "风格迁移",
+			"background-replace": "背景替换",
+			expand: "图片扩展",
+			"background-remove": "智能抠图",
+			variant: "图片变体",
+			import: "导入",
+			drawing: "绘图",
+			storyboard: "分镜",
+			"character-sheet": "定妆照",
+			"scene-concept": "概念图",
+			"video-clip": "视频片段",
+			"video-composite": "视频合成"
+		};
+		/** Tool names for the transient (loading) node titles. */
+		const TOOL_TITLES = {
+			image_generate: "生成图片中…",
+			video_generate: "生成视频中…",
+			video_composite: "合成视频中…"
+		};
+		/** Resize corners (grid of 9, center omitted). */
+		const RESIZE_CORNERS = [
+			"nw",
+			"n",
+			"ne",
+			"e",
+			"se",
+			"s",
+			"sw",
+			"w"
+		];
+		/** True when a pointer-down target is an interactive element (no drag). */
+		function isInteractiveTarget(target) {
+			if (!(target instanceof HTMLElement)) return false;
+			return target.closest("textarea, input, button, select, a, [contenteditable=\"true\"]") !== null;
+		}
 		/**
-		* One canvas node: an image/video media box or a text annotation box, placed
-		* at its canvas-space coordinates. The surface owns pan/zoom/drag; this
-		* component is purely presentational and reports pointer-down so the surface
-		* can begin a node drag.
+		* One canvas node: media box or text annotation, placed at its canvas-space
+		* coordinates. The surface owns pan/zoom/drag/resize gestures; this component
+		* is presentational and reports pointer-downs with the intended gesture.
+		* Visual state follows the reference LayerData semantics: locked (no drag),
+		* loading overlay, error badge, opacity, flipX/flipY (media only), hidden
+		* nodes are filtered by the surface.
 		*/
 		function CanvasNode(props) {
-			const { node, selected, onPointerDown } = props;
+			const { node, selected, onNodePointerDown, onResizePointerDown, onLinkPointerDown, onRenameSubmit, onContextMenu } = props;
+			const [editingTitle, setEditingTitle] = (0, react.useState)(false);
+			const [titleInput, setTitleInput] = (0, react.useState)("");
+			const isMedia = node.kind === "image" || node.kind === "video";
+			const isGroup = node.kind === "group";
+			const opacity = node.opacity ?? 1;
+			const flipTransform = (node.flipX ? "scaleX(-1) " : "") + (node.flipY ? "scaleY(-1)" : "");
+			const handleNodePointerDown = (event) => {
+				if (event.button !== 0 || event.shiftKey) return;
+				event.stopPropagation();
+				if (isInteractiveTarget(event.target)) return;
+				onNodePointerDown(event, node);
+			};
+			const handleResizePointerDown = (event, corner) => {
+				if (event.button !== 0) return;
+				event.stopPropagation();
+				if (node.locked) return;
+				onResizePointerDown(event, node, corner);
+			};
+			const handleLinkPointerDown = (event) => {
+				if (event.button !== 0) return;
+				event.stopPropagation();
+				onLinkPointerDown(event, node);
+			};
+			const handleDoubleClick = (event) => {
+				event.stopPropagation();
+				if (node.locked) return;
+				setTitleInput(node.title ?? "");
+				setEditingTitle(true);
+			};
+			const handleRenameSubmit = () => {
+				setEditingTitle(false);
+				if (titleInput.trim().length > 0) onRenameSubmit(node.id, titleInput.trim());
+			};
+			const handleContextMenu = (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				onContextMenu(node, event.clientX, event.clientY);
+			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: selected ? "csNode csNodeSelected" : "csNode",
+				className: [
+					"csNode",
+					selected ? "csNodeSelected" : "",
+					node.locked ? "csNodeLocked" : "",
+					node.error !== void 0 ? "csNodeError" : "",
+					node.isLoading ? "csNodeLoading" : ""
+				].filter(Boolean).join(" "),
 				style: {
 					left: node.x,
 					top: node.y,
 					width: node.width,
-					height: node.height
+					height: node.height,
+					opacity
 				},
-				onPointerDown,
+				onPointerDown: handleNodePointerDown,
+				onDoubleClick: handleDoubleClick,
+				onContextMenu: handleContextMenu,
 				"data-node-id": node.id,
 				children: [
-					node.kind === "image" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
-						className: "csNodeMedia",
-						src: node.url,
-						alt: node.title ?? "image",
-						draggable: false
+					isGroup ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csNodeGroup",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csNodeKind",
+							children: node.title ?? "分组"
+						})
 					}) : null,
-					node.kind === "video" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
-						className: "csNodeMedia",
-						src: node.url,
-						controls: true,
-						preload: "metadata"
+					isMedia && node.url !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csNodeMediaBox",
+						style: flipTransform ? { transform: flipTransform } : void 0,
+						children: node.kind === "image" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+							className: "csNodeMedia",
+							src: node.url,
+							alt: node.title ?? "image",
+							draggable: false
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
+							className: "csNodeMedia",
+							src: node.url,
+							controls: true,
+							preload: "metadata"
+						})
 					}) : null,
 					node.kind === "sticky" || node.kind === "text" || node.kind === "prompt" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: "csNodeText",
@@ -1028,40 +2728,218 @@ window.__ModuleLoader__.load({
 							children: node.text ?? node.title ?? ""
 						})]
 					}) : null,
-					selected && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { className: "csNodeRing" })
+					selected && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { className: "csNodeRing" }),
+					node.isLoading && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csNodeOverlay",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csNodeOverlayLabel",
+							children: TOOL_TITLES[node.toolName ?? ""] ?? "生成中…"
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csNodeProgress",
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: "csNodeProgressBar" })
+						})]
+					}),
+					node.error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+						className: "csNodeBadge csNodeBadgeError",
+						title: node.error,
+						children: ["生成失败：", node.error]
+					}),
+					node.locked && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: "csNodeBadge csNodeBadgeLock",
+						children: "🔒"
+					}),
+					editingTitle && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						className: "csNodeRename",
+						value: titleInput,
+						autoFocus: true,
+						onChange: (event) => {
+							setTitleInput(event.target.value);
+						},
+						onBlur: handleRenameSubmit,
+						onKeyDown: (event) => {
+							if (event.key === "Enter") handleRenameSubmit();
+							if (event.key === "Escape") setEditingTitle(false);
+						}
+					}),
+					!node.locked && isMedia && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [RESIZE_CORNERS.map((corner) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: `csNodeResize csNodeResize${corner.toUpperCase()}`,
+						onPointerDown: (event) => {
+							handleResizePointerDown(event, corner);
+						}
+					}, corner)), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csNodeLinkHandle",
+						title: "拖到其它节点建立血缘连线",
+						onPointerDown: handleLinkPointerDown
+					})] })
 				]
 			});
 		}
 		//#endregion
-		//#region src/client/canvas/CanvasSurface.tsx
-		/** Clamp a zoom scale to a sane range. */
-		function clampScale(value) {
-			return Math.min(3, Math.max(.2, value));
+		//#region src/client/canvas/Minimap.tsx
+		/** Minimap size in screen pixels. */
+		const MINIMAP_WIDTH = 200;
+		const MINIMAP_HEIGHT = 150;
+		const PADDING = 20;
+		/** Node color per kind (reference Minimap palette). */
+		const NODE_COLORS = {
+			image: "#f59e0b",
+			video: "#8b5cf6",
+			sticky: "#fbbf24",
+			text: "#fafaf9",
+			prompt: "#3b82f6",
+			group: "rgba(99, 102, 241, 0.5)"
+		};
+		/**
+		* Content-fit minimap: every node as a colored rect, the current viewport as
+		* a draggable frame. Click/drag jumps the canvas so the viewport centers on
+		* the minimap position (reference Minimap behavior).
+		*/
+		function Minimap(props) {
+			const { nodes, offset, scale, onSetOffset } = props;
+			const containerRef = (0, react.useRef)(null);
+			const [isDragging, setIsDragging] = (0, react.useState)(false);
+			const contentBounds = (0, react.useMemo)(() => {
+				let minX = Infinity;
+				let minY = Infinity;
+				let maxX = -Infinity;
+				let maxY = -Infinity;
+				for (const node of nodes) {
+					minX = Math.min(minX, node.x);
+					minY = Math.min(minY, node.y);
+					maxX = Math.max(maxX, node.x + node.width);
+					maxY = Math.max(maxY, node.y + node.height);
+				}
+				if (minX === Infinity) return {
+					x: 0,
+					y: 0,
+					width: 1e3,
+					height: 1e3
+				};
+				return {
+					x: minX - PADDING,
+					y: minY - PADDING,
+					width: Math.max(maxX - minX + PADDING * 2, 1e3),
+					height: Math.max(maxY - minY + PADDING * 2, 1e3)
+				};
+			}, [nodes]);
+			const fitScale = (0, react.useMemo)(() => {
+				return Math.min(MINIMAP_WIDTH / contentBounds.width, MINIMAP_HEIGHT / contentBounds.height);
+			}, [contentBounds]);
+			const jumpTo = (0, react.useCallback)((clientX, clientY) => {
+				const rect = containerRef.current?.getBoundingClientRect();
+				if (rect === void 0 || rect === null) return;
+				const minimapX = clientX - rect.left;
+				const minimapY = clientY - rect.top;
+				const worldX = minimapX / fitScale + contentBounds.x;
+				const worldY = minimapY / fitScale + contentBounds.y;
+				onSetOffset({
+					x: window.innerWidth / 2 - worldX * scale,
+					y: window.innerHeight / 2 - worldY * scale
+				});
+			}, [
+				fitScale,
+				contentBounds,
+				scale,
+				onSetOffset
+			]);
+			(0, react.useEffect)(() => {
+				if (!isDragging) return;
+				const handleMove = (event) => jumpTo(event.clientX, event.clientY);
+				const handleUp = () => setIsDragging(false);
+				window.addEventListener("mousemove", handleMove);
+				window.addEventListener("mouseup", handleUp);
+				return () => {
+					window.removeEventListener("mousemove", handleMove);
+					window.removeEventListener("mouseup", handleUp);
+				};
+			}, [isDragging, jumpTo]);
+			const viewport = {
+				x: -offset.x / scale,
+				y: -offset.y / scale,
+				width: window.innerWidth / scale,
+				height: window.innerHeight / scale
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				ref: containerRef,
+				className: "csMinimap",
+				onMouseDown: () => {
+					setIsDragging(true);
+				},
+				onMouseUp: () => {
+					setIsDragging(false);
+				},
+				onMouseLeave: () => {
+					setIsDragging(false);
+				},
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
+					width: MINIMAP_WIDTH,
+					height: MINIMAP_HEIGHT,
+					children: [nodes.map((node) => {
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
+							x: (node.x - contentBounds.x) * fitScale,
+							y: (node.y - contentBounds.y) * fitScale,
+							width: Math.max(node.width * fitScale, 2),
+							height: Math.max(node.height * fitScale, 2),
+							fill: NODE_COLORS[node.kind],
+							opacity: .8
+						}, node.id);
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
+						x: (viewport.x - contentBounds.x) * fitScale,
+						y: (viewport.y - contentBounds.y) * fitScale,
+						width: viewport.width * fitScale,
+						height: viewport.height * fitScale,
+						fill: "transparent",
+						stroke: "rgba(255, 255, 255, 0.6)",
+						strokeWidth: 1,
+						style: { cursor: isDragging ? "grabbing" : "grab" }
+					})]
+				})
+			});
 		}
+		//#endregion
+		//#region src/client/canvas/CanvasSurface.tsx
+		/** Zoom clamp range (reference design doc §9.6: 0.1x – 5x). */
+		const MIN_SCALE = .1;
+		const MAX_SCALE = 5;
+		const ZOOM_STEP = 1.2;
+		const MIN_NODE_SIZE = 50;
 		/**
 		* The infinite canvas: a grid background that pans/zooms with content, node
-		* boxes placed at their canvas-space coordinates, and the bloodline edge
-		* overlay. Background pointer-down pans; node pointer-down begins a node drag;
-		* wheel zooms around the cursor. Node coordinates are transformed by the layer
-		* so edges and nodes share one coordinate system.
+		* boxes placed at their canvas-space coordinates, the bloodline edge overlay,
+		* snap alignment guides, a minimap, and corner zoom controls.
+		*
+		* Interactions follow the reference canvas controls: background pointer-down
+		* pans (middle button or Shift+left also pan), wheel without modifiers pans,
+		* Ctrl/Cmd+wheel zooms around the cursor, node pointer-down begins a node drag
+		* (snap alignment + guides), the node's resize handles begin a resize, and the
+		* link handle begins a manual connection drag. Keyboard: Delete removes the
+		* selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
+		* undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
 		*/
 		function CanvasSurface(props) {
-			const { nodes, selectedNodeId, onSelectNode, onMoveNode, onPersist, focusNodeId } = props;
+			const { nodes, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId } = props;
 			const [offset, setOffset] = (0, react.useState)({
 				x: 0,
 				y: 0
 			});
 			const [scale, setScale] = (0, react.useState)(1);
+			const [guides, setGuides] = (0, react.useState)({
+				vertical: [],
+				horizontal: []
+			});
+			const [linkLine, setLinkLine] = (0, react.useState)(null);
 			const containerRef = (0, react.useRef)(null);
 			const offsetRef = (0, react.useRef)(offset);
 			const scaleRef = (0, react.useRef)(scale);
 			offsetRef.current = offset;
 			scaleRef.current = scale;
-			const drag = (0, react.useRef)({
+			const gesture = (0, react.useRef)({
 				mode: "pan",
-				sx: 0,
-				sy: 0
+				startX: 0,
+				startY: 0
 			});
+			const nodesRef = (0, react.useRef)(nodes);
+			nodesRef.current = nodes;
 			(0, react.useEffect)(() => {
 				if (focusNodeId === void 0 || focusNodeId === null) return;
 				const node = nodes.find((candidate) => candidate.id === focusNodeId);
@@ -1076,99 +2954,381 @@ window.__ModuleLoader__.load({
 					y: vh / 2 - cy * scaleRef.current
 				});
 			}, [focusNodeId, nodes]);
+			const panBy = (0, react.useCallback)((deltaX, deltaY) => {
+				setOffset((previous) => ({
+					x: previous.x + deltaX,
+					y: previous.y + deltaY
+				}));
+			}, []);
+			const zoomAround = (0, react.useCallback)((pointX, pointY, factor) => {
+				const el = containerRef.current;
+				if (el === null) return;
+				const rect = el.getBoundingClientRect();
+				const px = pointX - rect.left;
+				const py = pointY - rect.top;
+				const newScale = clamp(scaleRef.current * factor, MIN_SCALE, MAX_SCALE);
+				const wx = (px - offsetRef.current.x) / scaleRef.current;
+				const wy = (py - offsetRef.current.y) / scaleRef.current;
+				setOffset({
+					x: px - wx * newScale,
+					y: py - wy * newScale
+				});
+				setScale(newScale);
+			}, []);
 			(0, react.useEffect)(() => {
 				const el = containerRef.current;
 				if (el === null) return;
 				const onWheel = (event) => {
 					event.preventDefault();
-					const rect = el.getBoundingClientRect();
-					const px = event.clientX - rect.left;
-					const py = event.clientY - rect.top;
-					const factor = event.deltaY < 0 ? 1.1 : 1 / 1.1;
-					const newScale = clampScale(scaleRef.current * factor);
-					const wx = (px - offsetRef.current.x) / scaleRef.current;
-					const wy = (py - offsetRef.current.y) / scaleRef.current;
-					setOffset({
-						x: px - wx * newScale,
-						y: py - wy * newScale
-					});
-					setScale(newScale);
+					if (event.ctrlKey || event.metaKey) zoomAround(event.clientX, event.clientY, event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+					else panBy(-event.deltaX, -event.deltaY);
 				};
 				el.addEventListener("wheel", onWheel, { passive: false });
 				return () => {
 					el.removeEventListener("wheel", onWheel);
 				};
+			}, [zoomAround, panBy]);
+			(0, react.useEffect)(() => {
+				const onKeyDown = (event) => {
+					const target = event.target;
+					if (target !== null && target.closest("input, textarea, select, [contenteditable=\"true\"]") !== null) return;
+					const modifier = event.ctrlKey || event.metaKey;
+					if (modifier && event.key.toLowerCase() === "z") {
+						event.preventDefault();
+						if (event.shiftKey) onRedo();
+						else onUndo();
+						return;
+					}
+					if (modifier && event.key.toLowerCase() === "y") {
+						event.preventDefault();
+						onRedo();
+						return;
+					}
+					if (modifier && event.key.toLowerCase() === "c") {
+						event.preventDefault();
+						onCopy();
+						return;
+					}
+					if (modifier && event.key.toLowerCase() === "v") {
+						event.preventDefault();
+						onPaste();
+						return;
+					}
+					if (modifier && event.key.toLowerCase() === "a") {
+						event.preventDefault();
+						onSelectAllNodes();
+						return;
+					}
+					if (event.key === "Delete" || event.key === "Backspace") {
+						if (selectedNodeIds.length > 0) onRemoveNodes([...selectedNodeIds]);
+						return;
+					}
+					if (event.key === "Escape") {
+						onSelectNode(null);
+						return;
+					}
+				};
+				window.addEventListener("keydown", onKeyDown);
+				return () => {
+					window.removeEventListener("keydown", onKeyDown);
+				};
+			}, [
+				selectedNodeIds,
+				onSelectNode,
+				onSelectAllNodes,
+				onRemoveNodes,
+				onCopy,
+				onPaste,
+				onUndo,
+				onRedo
+			]);
+			const fitToContent = (0, react.useCallback)(() => {
+				const el = containerRef.current;
+				if (el === null) return;
+				const bounds = contentBounds(nodesRef.current);
+				const vw = el.clientWidth;
+				const vh = el.clientHeight;
+				if (bounds === null) {
+					setScale(1);
+					setOffset({
+						x: 0,
+						y: 0
+					});
+					return;
+				}
+				const padding = 60;
+				const scaleX = (vw - padding * 2) / bounds.width;
+				const scaleY = (vh - padding * 2) / bounds.height;
+				const newScale = clamp(Math.min(scaleX, scaleY), MIN_SCALE, MAX_SCALE);
+				const centerX = bounds.x + bounds.width / 2;
+				const centerY = bounds.y + bounds.height / 2;
+				setScale(newScale);
+				setOffset({
+					x: vw / 2 - centerX * newScale,
+					y: vh / 2 - centerY * newScale
+				});
+			}, []);
+			const zoomBy = (0, react.useCallback)((factor) => {
+				const el = containerRef.current;
+				if (el === null) return;
+				zoomAround(el.clientWidth / 2, el.clientHeight / 2, factor);
+			}, [zoomAround]);
+			const resetZoom = (0, react.useCallback)(() => {
+				setScale(1);
+				setOffset({
+					x: 0,
+					y: 0
+				});
 			}, []);
 			const onSurfacePointerDown = (event) => {
-				drag.current = {
+				if (event.button === 1 || event.button === 0 && event.shiftKey) {
+					gesture.current = {
+						mode: "pan",
+						startX: event.clientX,
+						startY: event.clientY
+					};
+					event.preventDefault();
+					return;
+				}
+				if (event.button !== 0) return;
+				gesture.current = {
 					mode: "pan",
-					sx: event.clientX,
-					sy: event.clientY
+					startX: event.clientX,
+					startY: event.clientY
 				};
-				onSelectNode(null);
+				if (!event.shiftKey) onSelectNode(null);
 			};
 			const onNodePointerDown = (event, node) => {
-				event.stopPropagation();
-				drag.current = {
+				onSelectNode(node.id, event.ctrlKey || event.metaKey);
+				if (node.locked) return;
+				onBeginEdit();
+				gesture.current = {
 					mode: "node",
-					sx: event.clientX,
-					sy: event.clientY,
+					startX: event.clientX,
+					startY: event.clientY,
 					nodeId: node.id,
-					ox: node.x,
-					oy: node.y
+					originX: node.x,
+					originY: node.y
 				};
+			};
+			const onResizePointerDown = (event, node, corner) => {
 				onSelectNode(node.id);
+				onBeginEdit();
+				gesture.current = {
+					mode: "resize",
+					startX: event.clientX,
+					startY: event.clientY,
+					nodeId: node.id,
+					originX: node.x,
+					originY: node.y,
+					originWidth: node.width,
+					originHeight: node.height,
+					corner
+				};
+			};
+			const onLinkPointerDown = (event, node) => {
+				const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+				gesture.current = {
+					mode: "link",
+					startX: event.clientX,
+					startY: event.clientY,
+					sourceId: node.id,
+					fromWorldX: world.x,
+					fromWorldY: world.y
+				};
+				setLinkLine({
+					fromX: world.x,
+					fromY: world.y,
+					toX: world.x,
+					toY: world.y
+				});
 			};
 			const onPointerMove = (event) => {
-				const current = drag.current;
+				const current = gesture.current;
+				if (containerRef.current === null) return;
 				if (current.mode === "pan") {
 					setOffset((previous) => ({
-						x: previous.x + (event.clientX - current.sx),
-						y: previous.y + (event.clientY - current.sy)
+						x: previous.x + (event.clientX - current.startX),
+						y: previous.y + (event.clientY - current.startY)
 					}));
-					current.sx = event.clientX;
-					current.sy = event.clientY;
-				} else if (current.mode === "node" && current.nodeId !== void 0 && current.ox !== void 0 && current.oy !== void 0) {
-					const dx = (event.clientX - current.sx) / scaleRef.current;
-					const dy = (event.clientY - current.sy) / scaleRef.current;
-					onMoveNode(current.nodeId, current.ox + dx, current.oy + dy);
+					current.startX = event.clientX;
+					current.startY = event.clientY;
+					return;
+				}
+				if (current.mode === "node" && current.nodeId !== void 0 && current.originX !== void 0 && current.originY !== void 0) {
+					const dx = (event.clientX - current.startX) / scaleRef.current;
+					const dy = (event.clientY - current.startY) / scaleRef.current;
+					const targetX = current.originX + dx;
+					const targetY = current.originY + dy;
+					const dragged = nodesRef.current.find((candidate) => candidate.id === current.nodeId);
+					if (dragged === void 0) return;
+					const snapped = calculateSnap(nodesRef.current, dragged, targetX, targetY);
+					onMoveNode(current.nodeId, snapped.x, snapped.y);
+					setGuides({
+						vertical: snapped.guides.filter((guide) => guide.type === "vertical").map((guide) => guide.position),
+						horizontal: snapped.guides.filter((guide) => guide.type === "horizontal").map((guide) => guide.position)
+					});
+					return;
+				}
+				if (current.mode === "resize" && current.nodeId !== void 0 && current.originX !== void 0 && current.originY !== void 0 && current.originWidth !== void 0 && current.originHeight !== void 0 && current.corner !== void 0) {
+					const dx = (event.clientX - current.startX) / scaleRef.current;
+					const dy = (event.clientY - current.startY) / scaleRef.current;
+					const corner = current.corner;
+					let x = current.originX;
+					let y = current.originY;
+					let width = current.originWidth;
+					let height = current.originHeight;
+					if (corner.includes("e")) width = Math.max(MIN_NODE_SIZE, current.originWidth + dx);
+					if (corner.includes("s")) height = Math.max(MIN_NODE_SIZE, current.originHeight + dy);
+					if (corner.includes("w")) {
+						width = Math.max(MIN_NODE_SIZE, current.originWidth - dx);
+						x = current.originX + current.originWidth - width;
+					}
+					if (corner.includes("n")) {
+						height = Math.max(MIN_NODE_SIZE, current.originHeight - dy);
+						y = current.originY + current.originHeight - height;
+					}
+					onUpdateNode(current.nodeId, {
+						x,
+						y,
+						width,
+						height
+					});
+					return;
+				}
+				if (current.mode === "link" && current.fromWorldX !== void 0 && current.fromWorldY !== void 0) {
+					const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+					setLinkLine({
+						fromX: current.fromWorldX,
+						fromY: current.fromWorldY,
+						toX: world.x,
+						toY: world.y
+					});
 				}
 			};
 			const onPointerUp = (event) => {
-				if (drag.current.mode === "node") onPersist();
-				drag.current = {
+				const current = gesture.current;
+				if (current.mode === "link" && current.sourceId !== void 0) {
+					const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+					const target = nodesRef.current.find((candidate) => candidate.id !== current.sourceId && candidate.visible !== false && world.x >= candidate.x && world.x <= candidate.x + candidate.width && world.y >= candidate.y && world.y <= candidate.y + candidate.height);
+					if (target !== void 0) onLinkLayers([current.sourceId], target.id);
+					setLinkLine(null);
+					onPersist();
+				}
+				if (current.mode === "node" || current.mode === "resize") onPersist();
+				setGuides({
+					vertical: [],
+					horizontal: []
+				});
+				gesture.current = {
 					mode: "pan",
-					sx: 0,
-					sy: 0
+					startX: 0,
+					startY: 0
 				};
 			};
+			const visibleNodes = nodes.filter((node) => node.visible !== false);
+			const ordered = [...visibleNodes].sort(compareNodes);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csCanvasSurface",
 				ref: containerRef,
 				onPointerDown: onSurfacePointerDown,
 				onPointerMove,
 				onPointerUp,
+				onPointerLeave: () => {
+					if (gesture.current.mode !== "pan") onPointerUp(new MouseEvent("pointerup"));
+				},
 				style: {
 					backgroundPosition: `${offset.x}px ${offset.y}px`,
 					backgroundSize: `${40 * scale}px ${40 * scale}px`
 				},
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: "csCanvasLayer",
-					style: {
-						transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
-						transformOrigin: "0 0"
-					},
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasEdges, { nodes }), nodes.map((node) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasNode, {
-						node,
-						selected: node.id === selectedNodeId,
-						onPointerDown: (event) => {
-							onNodePointerDown(event, node);
-						}
-					}, node.id))]
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: "csCanvasZoom",
-					children: [Math.round(scale * 100), "%"]
-				})]
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csCanvasLayer",
+						style: {
+							transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+							transformOrigin: "0 0"
+						},
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasEdges, {
+								nodes: visibleNodes,
+								selectedNodeIds
+							}),
+							guides.vertical.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: "csGuide csGuideVertical",
+								style: { left: position }
+							}, `gv-${position}`)),
+							guides.horizontal.map((position) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: "csGuide csGuideHorizontal",
+								style: { top: position }
+							}, `gh-${position}`)),
+							ordered.map((node) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasNode, {
+								node,
+								selected: selectedNodeIds.includes(node.id),
+								onNodePointerDown,
+								onResizePointerDown,
+								onLinkPointerDown,
+								onRenameSubmit: onRename,
+								onContextMenu
+							}, node.id)),
+							linkLine !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
+								className: "csEdges",
+								width: 1,
+								height: 1,
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
+									className: "csEdge csEdgeDraft",
+									d: `M ${linkLine.fromX} ${linkLine.fromY} L ${linkLine.toX} ${linkLine.toY}`
+								})
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csCanvasZoomCluster",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: "csCanvasZoom",
+								children: [Math.round(scale * 100), "%"]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csCanvasZoomButton",
+								title: "缩小",
+								onClick: () => {
+									zoomBy(1 / ZOOM_STEP);
+								},
+								children: "−"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csCanvasZoomButton",
+								title: "放大",
+								onClick: () => {
+									zoomBy(ZOOM_STEP);
+								},
+								children: "+"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csCanvasZoomButton",
+								title: "适配内容",
+								onClick: fitToContent,
+								children: "⤢"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csCanvasZoomButton",
+								title: "重置缩放",
+								onClick: resetZoom,
+								children: "1:1"
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Minimap, {
+						nodes: visibleNodes,
+						offset,
+						scale,
+						onSetOffset: setOffset
+					})
+				]
 			});
 		}
 		//#endregion
@@ -1179,7 +3339,8 @@ window.__ModuleLoader__.load({
 			video: "视频",
 			sticky: "便签",
 			text: "文本",
-			prompt: "提示"
+			prompt: "提示",
+			group: "分组"
 		};
 		/** Short HH:MM:SS label for a node timestamp. */
 		function timeLabel(createdAt) {
@@ -1235,61 +3396,672 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
+		//#region src/client/canvas/LayerPanel.tsx
+		/** Human-readable kind labels for the layer rows. */
+		const KIND_LABELS$1 = {
+			image: "图片",
+			video: "视频",
+			sticky: "便签",
+			text: "文本",
+			prompt: "提示",
+			group: "分组"
+		};
+		/**
+		* The layer list: every node as a row with thumbnail/kind, lock and visibility
+		* toggles, z-order buttons, and delete. Click selects (ctrl/cmd multi-select);
+		* group members indent under their group row. Reference LayerPanel semantics,
+		* rendered with the DSH theme tokens.
+		*/
+		function LayerPanel(props) {
+			const { nodes, selectedNodeIds, onSelect, onDelete, onToggleLock, onToggleVisibility, onReorder } = props;
+			const [query, setQuery] = (0, react.useState)("");
+			const selected = new Set(selectedNodeIds);
+			const ordered = [...nodes].sort((left, right) => (left.zIndex ?? 0) - (right.zIndex ?? 0));
+			const filtered = query.trim().length > 0 ? ordered.filter((node) => (node.title ?? "").toLowerCase().includes(query.trim().toLowerCase())) : ordered;
+			const grouped = filtered.filter((node) => node.parentId === void 0);
+			const membersByGroup = /* @__PURE__ */ new Map();
+			for (const node of filtered) {
+				if (node.parentId === void 0) continue;
+				const list = membersByGroup.get(node.parentId) ?? [];
+				list.push(node);
+				membersByGroup.set(node.parentId, list);
+			}
+			const renderRow = (node, depth) => {
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: `csLayerRow${selected.has(node.id) ? " csLayerRowActive" : ""}`,
+					style: { paddingLeft: `${depth * 14 + 6}px` },
+					onClick: (event) => {
+						onSelect(node.id, event.ctrlKey || event.metaKey);
+					},
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csLayerThumb",
+							children: node.kind === "image" && node.url !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+								src: node.url,
+								alt: "",
+								draggable: false
+							}) : node.kind === "video" && node.url !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
+								src: node.url,
+								muted: true,
+								preload: "metadata"
+							}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: "csLayerThumbKind",
+								children: KIND_LABELS$1[node.kind]
+							})
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: "csLayerTitle",
+							children: node.title ?? KIND_LABELS$1[node.kind]
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							className: "csLayerActions",
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: node.locked ? "csLayerAction csLayerActionActive" : "csLayerAction",
+									title: node.locked ? "解锁" : "锁定",
+									onClick: (event) => {
+										event.stopPropagation();
+										onToggleLock(node.id);
+									},
+									children: node.locked ? "🔒" : "🔓"
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: node.visible === false ? "csLayerAction" : "csLayerAction csLayerActionActive",
+									title: node.visible === false ? "显示" : "隐藏",
+									onClick: (event) => {
+										event.stopPropagation();
+										onToggleVisibility(node.id);
+									},
+									children: node.visible === false ? "👁️‍🗨️" : "👁️"
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: "csLayerAction",
+									title: "置顶",
+									onClick: (event) => {
+										event.stopPropagation();
+										onReorder(node.id, "front");
+									},
+									children: "↑↑"
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: "csLayerAction",
+									title: "置底",
+									onClick: (event) => {
+										event.stopPropagation();
+										onReorder(node.id, "back");
+									},
+									children: "↓↓"
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									className: "csLayerAction csLayerActionDanger",
+									title: "删除",
+									onClick: (event) => {
+										event.stopPropagation();
+										onDelete([node.id]);
+									},
+									children: "×"
+								})
+							]
+						})
+					]
+				}), (membersByGroup.get(node.id) ?? []).map((member) => renderRow(member, depth + 1))] }, node.id);
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
+				className: "csLayerPanel",
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+					className: "csLayerPanelHeader",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "图层" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						className: "csLayerSearch",
+						placeholder: "搜索图层…",
+						value: query,
+						onChange: (event) => {
+							setQuery(event.target.value);
+						}
+					})]
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: "csLayerList",
+					children: grouped.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csLayerEmpty",
+						children: "暂无图层"
+					}) : grouped.map((node) => renderRow(node, 0))
+				})]
+			});
+		}
+		//#endregion
+		//#region src/client/canvas/LayerDetailPanel.tsx
+		/** Human-readable kind labels for the detail panel. */
+		const KIND_LABELS = {
+			image: "图片",
+			video: "视频",
+			sticky: "便签",
+			text: "文本",
+			prompt: "提示",
+			group: "分组"
+		};
+		/**
+		* The layer detail panel: edit the selected node's title, opacity, flip,
+		* lock/visibility, z-order, and run node-level generation actions (retry /
+		* steer / cancel). Reference LayerDetailPanel semantics, DSH tokens.
+		*/
+		function LayerDetailPanel(props) {
+			const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel } = props;
+			const [editingTitle, setEditingTitle] = (0, react.useState)(false);
+			const [titleInput, setTitleInput] = (0, react.useState)(node.title ?? "");
+			const [steering, setSteering] = (0, react.useState)(false);
+			const [steerInput, setSteerInput] = (0, react.useState)("");
+			const isAgent = node.origin === "agent" && node.toolName !== void 0;
+			const operation = node.operationType !== void 0 ? OPERATION_LABELS[node.operationType] ?? node.operationType : null;
+			const generationPrompt = node.generationPrompt !== void 0 ? node.generationPrompt : null;
+			const submitTitle = () => {
+				setEditingTitle(false);
+				if (titleInput.trim().length > 0) onRename(node.id, titleInput.trim());
+			};
+			const submitSteer = () => {
+				setSteering(false);
+				if (steerInput.trim().length > 0) onSteer(node.id, steerInput.trim());
+			};
+			const formatTime = (value) => {
+				const date = new Date(value);
+				return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
+				className: "csDetailPanel",
+				onClick: (event) => {
+					event.stopPropagation();
+				},
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+						className: "csDetailPanelHeader",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "节点属性" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							className: "csDetailPanelClose",
+							onClick: onClose,
+							children: "×"
+						})]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csDetailPanelBody",
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "标题"
+								}), editingTitle ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+									className: "csDetailInput",
+									value: titleInput,
+									autoFocus: true,
+									onChange: (event) => {
+										setTitleInput(event.target.value);
+									},
+									onBlur: submitTitle,
+									onKeyDown: (event) => {
+										if (event.key === "Enter") submitTitle();
+										if (event.key === "Escape") setEditingTitle(false);
+									}
+								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailValue csDetailValueClickable",
+									onClick: () => {
+										setTitleInput(node.title ?? "");
+										setEditingTitle(true);
+									},
+									children: node.title ?? KIND_LABELS[node.kind]
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "类型"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									className: "csDetailValue",
+									children: [KIND_LABELS[node.kind], operation !== null ? ` · ${operation}` : ""]
+								})]
+							}),
+							node.toolName !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "工具"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailValue",
+									children: node.toolName
+								})]
+							}),
+							node.duration !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "时长"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									className: "csDetailValue",
+									children: [node.duration, "s"]
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "创建时间"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailValue",
+									children: formatTime(node.createdAt)
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csDetailLabel",
+										children: "透明度"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+										className: "csDetailRange",
+										type: "range",
+										min: 0,
+										max: 100,
+										value: Math.round((node.opacity ?? 1) * 100),
+										onChange: (event) => {
+											onSetOpacity(node.id, Number(event.target.value) / 100);
+										}
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+										className: "csDetailValue",
+										children: [Math.round((node.opacity ?? 1) * 100), "%"]
+									})
+								]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csDetailLabel",
+										children: "镜像"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: node.flipX ? "csDetailButton csDetailButtonActive" : "csDetailButton",
+										onClick: () => {
+											onToggleFlip(node.id, "flipX");
+										},
+										children: "水平"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: node.flipY ? "csDetailButton csDetailButtonActive" : "csDetailButton",
+										onClick: () => {
+											onToggleFlip(node.id, "flipY");
+										},
+										children: "垂直"
+									})
+								]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csDetailLabel",
+										children: "锁定 / 可见"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: node.locked ? "csDetailButton csDetailButtonActive" : "csDetailButton",
+										onClick: () => {
+											onToggleLock(node.id);
+										},
+										children: node.locked ? "已锁定" : "锁定"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: node.visible === false ? "csDetailButton" : "csDetailButton csDetailButtonActive",
+										onClick: () => {
+											onToggleVisibility(node.id, node.visible === false);
+										},
+										children: node.visible === false ? "已隐藏" : "可见"
+									})
+								]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csDetailLabel",
+										children: "层级"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: "csDetailButton",
+										onClick: () => {
+											onReorder(node.id, "front");
+										},
+										children: "置顶"
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+										type: "button",
+										className: "csDetailButton",
+										onClick: () => {
+											onReorder(node.id, "back");
+										},
+										children: "置底"
+									})
+								]
+							}),
+							generationPrompt !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "生成参数"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+									className: "csDetailPrompt",
+									children: generationPrompt
+								})]
+							}),
+							node.error !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "错误"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailError",
+									children: node.error
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "操作"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: "csDetailActions",
+									children: [
+										node.isLoading ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csDetailButton",
+											onClick: () => {
+												onCancel(node.id);
+											},
+											children: "打断"
+										}) : null,
+										isAgent && generationPrompt !== null && !node.isLoading ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csDetailButton",
+											onClick: () => {
+												onRetry(node.id);
+											},
+											children: "重试"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csDetailButton",
+											onClick: () => {
+												setSteerInput("");
+												setSteering(true);
+											},
+											children: "修改提示词"
+										})] }) : null,
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csDetailButton csDetailButtonDanger",
+											onClick: () => {
+												onDelete(node.id);
+											},
+											children: "删除"
+										})
+									]
+								})]
+							})
+						]
+					}),
+					steering && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: "csDetailSteer",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+							className: "csDetailInput",
+							placeholder: "新的提示词…（沿用原参考图重新生成）",
+							value: steerInput,
+							autoFocus: true,
+							onChange: (event) => {
+								setSteerInput(event.target.value);
+							},
+							onKeyDown: (event) => {
+								if (event.key === "Enter") submitSteer();
+								if (event.key === "Escape") setSteering(false);
+							}
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: "csDetailActions",
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csDetailButton",
+								onClick: submitSteer,
+								children: "提交"
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csDetailButton",
+								onClick: () => {
+									setSteering(false);
+								},
+								children: "取消"
+							})]
+						})]
+					})
+				]
+			});
+		}
+		//#endregion
+		//#region src/client/canvas/CanvasContextMenu.tsx
+		/**
+		* The node context menu: edit/order/state actions plus generation actions.
+		* Positioned at the cursor; closes on any action or blur.
+		*/
+		function CanvasContextMenu(props) {
+			const { node, x, y, onClose, onRename, onCopy, onDelete, onReorder, onToggleLock, onToggleVisibility, onRetry, onSteer, onCancel, onUngroup } = props;
+			const isAgent = node.origin === "agent" && node.toolName !== void 0;
+			const hasPrompt = node.generationPrompt !== void 0;
+			const item = (label, action, danger = false) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+				type: "button",
+				className: `csMenuAction${danger ? " csMenuActionDanger" : ""}`,
+				disabled: action === null,
+				onClick: () => {
+					onClose();
+					if (action !== null) action();
+				},
+				children: label
+			}, label);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: "csContextMenu",
+				style: {
+					left: x,
+					top: y
+				},
+				onContextMenu: (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+				},
+				children: [
+					item("重命名", () => {
+						onRename(node.id);
+					}),
+					item("复制", () => {
+						onCopy(node.id);
+					}),
+					item(node.locked ? "解锁" : "锁定", () => {
+						onToggleLock(node.id);
+					}),
+					item(node.visible === false ? "显示" : "隐藏", () => {
+						onToggleVisibility(node.id);
+					}),
+					item("置顶", () => {
+						onReorder(node.id, "front");
+					}),
+					item("置底", () => {
+						onReorder(node.id, "back");
+					}),
+					item("上移一层", () => {
+						onReorder(node.id, "forward");
+					}),
+					item("下移一层", () => {
+						onReorder(node.id, "backward");
+					}),
+					node.kind === "group" && item("解组", () => {
+						onUngroup(node.id);
+					}),
+					node.isLoading && item("打断", () => {
+						onCancel(node.id);
+					}),
+					isAgent && hasPrompt && !node.isLoading && item("重试（同参数重新生成）", () => {
+						onRetry(node.id);
+					}),
+					isAgent && !node.isLoading && item("修改提示词", () => {
+						onSteer(node.id);
+					}),
+					item("删除", () => {
+						onDelete(node.id);
+					}, true)
+				]
+			});
+		}
+		//#endregion
 		//#region src/client/StudioFrame.tsx
 		/**
-		* Three-column studio frame: project list, canvas surface + review timeline,
-		* and the official conversation seat on the right. The sidebar and details
-		* seats stay declared (upstream registrants keep their paths) but are not
-		* rendered. The canvas shows every captured node of the selected project
-		* (image/video/sticky/text/prompt) with bloodline edges; the timeline lets the
-		* user review and jump to any node.
+		* Three-region studio frame: project list + layer list on the left, the canvas
+		* surface (toolbar on top, review timeline at the bottom) in the center, and
+		* the official conversation seat on the right. The sidebar and details seats
+		* stay declared (upstream registrants keep their paths) but are not rendered.
+		* A single selected node opens the detail panel; a context menu offers node
+		* ordering / lock / generation actions. The canvas shows every captured node
+		* of the selected project (image/video/sticky/text/prompt/group) with
+		* bloodline edges; the timeline lets the user review and jump to any node.
 		*/
 		function StudioFrame(props) {
-			const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, selectNode, moveNode, removeNode } = props;
+			const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, retryNode, steerNode, cancelCurrentTurn, actions } = props;
 			const projects = useStudio((store) => store.projects);
 			const selectedProjectId = useStudio((store) => store.selectedProjectId);
 			const selectedNodeId = useStudio((store) => store.selectedNodeId);
+			const selectedNodeIds = useStudio((store) => store.selectedNodeIds);
 			const nodes = useStudio((store) => nodesOf(store, store.selectedProjectId));
 			const selectedNode = useStudio((store) => selectedNodeOf(store));
 			const phase = useStudio((store) => store.phase);
 			const error = useStudio((store) => store.error);
 			const creating = useStudio((store) => store.creating);
+			const historyIndex = useStudio((store) => store.historyIndex);
+			const historyLength = useStudio((store) => store.history.length);
 			const [focusNodeId, setFocusNodeId] = (0, react.useState)(null);
+			const [detailOpen, setDetailOpen] = (0, react.useState)(false);
+			const [menu, setMenu] = (0, react.useState)(null);
 			(0, react.useEffect)(() => {
 				refreshProjects();
 			}, [refreshProjects]);
-			const handleMove = (id, x, y) => {
-				if (selectedProjectId === null) return;
-				moveNode(selectedProjectId, id, x, y);
+			(0, react.useEffect)(() => {
+				if (menu === null) return;
+				const close = () => {
+					setMenu(null);
+				};
+				window.addEventListener("mousedown", close);
+				return () => {
+					window.removeEventListener("mousedown", close);
+				};
+			}, [menu]);
+			const projectId = selectedProjectId;
+			const beginEdit = () => {
+				if (projectId !== null) actions.pushHistory(projectId);
 			};
-			const handlePersist = () => {
-				if (selectedProjectId === null) return;
-				persistCanvas(selectedProjectId);
+			const persist = () => {
+				if (projectId !== null) persistCanvas(projectId).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "画布保存失败");
+				});
 			};
-			const handleDelete = () => {
-				if (selectedProjectId === null || selectedNodeId === null) return;
-				removeNode(selectedProjectId, selectedNodeId);
-				handlePersist();
+			const persistAfter = (mutate) => {
+				mutate();
+				persist();
+			};
+			const handleDelete = (ids) => {
+				if (projectId === null || ids.length === 0) return;
+				persistAfter(() => actions.removeNodes(projectId, ids));
+				setDetailOpen(false);
+			};
+			const handleToggleVisibility = (id) => {
+				if (projectId === null) return;
+				const node = nodes.find((candidate) => candidate.id === id);
+				if (node === void 0) return;
+				actions.setVisibility(projectId, id, node.visible === false);
+			};
+			const handleReorder = (id, direction) => {
+				if (projectId === null) return;
+				persistAfter(() => actions.reorderNode(projectId, id, direction));
+			};
+			const handleUndo = () => {
+				persistAfter(() => actions.undo());
+			};
+			const handleRedo = () => {
+				persistAfter(() => actions.redo());
+			};
+			const handleRename = (id, title) => {
+				if (projectId === null) return;
+				persistAfter(() => actions.renameNode(projectId, id, title));
+			};
+			const handleRetry = (id) => {
+				if (projectId === null) return;
+				retryNode(projectId, id).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "重试失败");
+				});
+			};
+			const handleSteer = (id, prompt) => {
+				if (projectId === null) return;
+				steerNode(projectId, id, prompt).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "重新生成失败");
+				});
 			};
 			const handleTimelineSelect = (id) => {
-				selectNode(id);
+				actions.selectNode(id);
 				setFocusNodeId(id);
+				setDetailOpen(false);
 			};
 			const canvasBody = (() => {
-				if (selectedProjectId === null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				if (projectId === null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: "csCanvasEmpty",
 					children: "打开或新建一个项目，开始创作"
-				});
-				if (nodes.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					className: "csCanvasEmpty",
-					children: "尚未生成画布内容 —— 在右侧对话让 agent 生成图片或视频"
 				});
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
 					nodes,
 					selectedNodeId,
-					onSelectNode: selectNode,
-					onMoveNode: handleMove,
-					onPersist: handlePersist,
+					selectedNodeIds,
+					onSelectNode: (id, multi) => {
+						actions.selectNode(id, multi);
+					},
+					onSelectAllNodes: () => {
+						actions.selectAllNodes();
+					},
+					onMoveNode: (id, x, y) => {
+						actions.moveNode(projectId, id, x, y);
+					},
+					onUpdateNode: (id, updates) => {
+						actions.updateNode(projectId, id, updates);
+					},
+					onBeginEdit: beginEdit,
+					onPersist: persist,
+					onRemoveNodes: handleDelete,
+					onCopy: () => {
+						actions.copySelected(projectId);
+					},
+					onPaste: () => {
+						persistAfter(() => actions.pasteNodes(projectId));
+					},
+					onUndo: handleUndo,
+					onRedo: handleRedo,
+					onLinkLayers: (sourceIds, targetId) => {
+						persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
+					},
+					onRename: handleRename,
+					onContextMenu: (node, x, y) => {
+						setMenu({
+							node,
+							x,
+							y
+						});
+					},
 					focusNodeId
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasTimeline, {
 					nodes,
@@ -1324,26 +4096,119 @@ window.__ModuleLoader__.load({
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
 						className: "csCanvas",
-						children: [selectedNode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							className: "csCanvasToolbar",
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								className: "csCanvasToolbarInfo",
-								children: [
-									"已选中：",
-									selectedNode.kind,
-									selectedNode.title ? ` · ${selectedNode.title}` : ""
-								]
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csCanvasToolbarDelete",
-								onClick: handleDelete,
-								children: "删除节点"
-							})]
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasToolbar, {
+							canUndo: historyIndex >= 0,
+							canRedo: historyIndex + 1 < historyLength,
+							selectedCount: selectedNodeIds.length,
+							hasSelection: selectedNodeIds.length > 0,
+							onUndo: handleUndo,
+							onRedo: handleRedo,
+							onDelete: () => {
+								handleDelete(selectedNodeIds);
+							},
+							onGroup: () => {
+								if (projectId !== null) persistAfter(() => actions.groupSelected(projectId));
+							},
+							onUngroup: () => {
+								if (selectedNode !== null && selectedNode.kind === "group" && projectId !== null) persistAfter(() => actions.ungroup(projectId, selectedNode.id));
+							},
+							onAlign: (alignment) => {
+								if (projectId !== null) persistAfter(() => actions.alignNodes(projectId, selectedNodeIds, alignment));
+							},
+							onDistribute: (direction) => {
+								if (projectId !== null) persistAfter(() => actions.distributeNodes(projectId, selectedNodeIds, direction));
+							},
+							onAutoArrange: () => {
+								if (projectId !== null) persistAfter(() => actions.autoArrange(projectId));
+							},
+							onAddNode: (kind) => {
+								if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
+							}
 						}), canvasBody]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
-						className: "csConversation",
-						children: renderSlot("conversation", {})
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
+						className: "csSide",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
+							nodes,
+							selectedNodeIds,
+							onSelect: (id, multi) => {
+								actions.selectNode(id, multi);
+							},
+							onDelete: handleDelete,
+							onToggleLock: (id) => {
+								if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+							},
+							onToggleVisibility: handleToggleVisibility,
+							onReorder: handleReorder
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("section", {
+							className: "csConversation",
+							children: renderSlot("conversation", {})
+						})]
+					}),
+					selectedNode !== null && projectId !== null && detailOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerDetailPanel, {
+						node: selectedNode,
+						onClose: () => {
+							setDetailOpen(false);
+						},
+						onRename: handleRename,
+						onSetOpacity: (id, opacity) => {
+							if (projectId !== null) persistAfter(() => actions.setOpacity(projectId, id, opacity));
+						},
+						onToggleFlip: (id, axis) => {
+							if (projectId !== null) {
+								const node = nodes.find((candidate) => candidate.id === id);
+								if (node === void 0) return;
+								persistAfter(() => actions.updateNode(projectId, id, { [axis]: !node[axis] }));
+							}
+						},
+						onToggleLock: (id) => {
+							if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+						},
+						onToggleVisibility: handleToggleVisibility,
+						onReorder: handleReorder,
+						onDelete: (id) => {
+							handleDelete([id]);
+						},
+						onRetry: handleRetry,
+						onSteer: handleSteer,
+						onCancel: () => {
+							cancelCurrentTurn();
+						}
+					}),
+					menu !== null && projectId !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasContextMenu, {
+						node: menu.node,
+						x: menu.x,
+						y: menu.y,
+						onClose: () => {
+							setMenu(null);
+						},
+						onRename: (id) => {
+							actions.selectNode(id);
+							setDetailOpen(true);
+						},
+						onCopy: (id) => {
+							actions.selectNode(id);
+							actions.copySelected(projectId);
+						},
+						onDelete: (id) => {
+							handleDelete([id]);
+						},
+						onReorder: handleReorder,
+						onToggleLock: (id) => {
+							if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+						},
+						onToggleVisibility: handleToggleVisibility,
+						onRetry: handleRetry,
+						onSteer: (id) => {
+							actions.selectNode(id);
+							setDetailOpen(true);
+						},
+						onCancel: () => {
+							cancelCurrentTurn();
+						},
+						onUngroup: (id) => {
+							if (projectId !== null) persistAfter(() => actions.ungroup(projectId, id));
+						}
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: "csOverlay",
@@ -1361,16 +4226,28 @@ window.__ModuleLoader__.load({
 		* 注意：`tools` 是 Host 专属服务，客户端没有该服务。媒体生成工具已在 Host
 		* 侧（`src/host-tools.ts`）注册，客户端只负责 UI、项目/工作区绑定，以及
 		* 通过 `conversationEvents` 捕获工具产物到画布 store（P4），并把画布节点
-		* 持久化到 Host（P4+ 重启恢复）。
+		* 持久化到 Host（P4+ 重启恢复）。`sessions` 用于打断当前会话的生成回合。
 		*/
 		const inject = [
 			"slots",
 			"workspaces",
-			"conversationEvents"
+			"conversationEvents",
+			"sessions"
 		];
 		/** Dev-only seed sample media so the canvas is verifiable without a backend. */
 		const SEED_IMAGE = `data:image/svg+xml;charset=utf-8,${encodeURIComponent("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"260\" height=\"180\"><rect width=\"100%\" height=\"100%\" fill=\"#4285f4\"/><text x=\"50%\" y=\"50%\" fill=\"white\" font-size=\"18\" text-anchor=\"middle\" dominant-baseline=\"middle\">种子示例图</text></svg>")}`;
 		const SEED_VIDEO = "https://example.invalid/canvas-studio-seed/sample.mp4";
+		/** Pending-node placeholder box size per kind. */
+		const NODE_SIZE_PENDING = {
+			image: {
+				width: 260,
+				height: 180
+			},
+			video: {
+				width: 260,
+				height: 180
+			}
+		};
 		/**
 		* Build dev-seed nodes for a project: an image, a video derived from it
 		* (bloodline edge), and a sticky note — enough to exercise every node kind,
@@ -1467,18 +4344,62 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => {
 				const reloadCanvas = async (projectId) => {
 					try {
-						storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId));
+						const loaded = await loadStudioCanvas(projectId);
+						storeInstance.actions.setNodes(projectId, loaded);
 					} catch {}
 				};
 				return ctx.conversationEvents.register(createAssetCaptureDefinition({
 					reloadCanvas,
-					getSelectedProjectId: () => resolveActiveProjectId()
+					getSelectedProjectId: () => resolveActiveProjectId(),
+					onToolCall: (projectId, info) => {
+						if (storeInstance.getSnapshot().projects.find((entry) => entry.id === projectId) === void 0) return;
+						const index = (storeInstance.getSnapshot().nodes[projectId] ?? []).length;
+						const size = NODE_SIZE_PENDING[info.kind];
+						storeInstance.actions.setPendingNode(projectId, {
+							id: `pending-${info.runId}`,
+							runId: info.runId,
+							kind: info.kind,
+							x: 40 + index % 4 * 300,
+							y: 40 + Math.floor(index / 4) * 240,
+							width: size.width,
+							height: size.height,
+							createdAt: Date.now(),
+							origin: "agent",
+							sourceIds: [],
+							toolName: info.toolName,
+							...info.arguments !== void 0 ? { generationPrompt: info.arguments } : {},
+							isLoading: true,
+							progress: 0
+						});
+					},
+					onToolError: (projectId, runId, message) => {
+						storeInstance.actions.markPendingError(projectId, runId, message);
+					}
 				}));
 			}, "canvas-studio: reload canvas on generated assets");
 			ctx.effect(() => {
 				syncActiveProject();
 				return ctx.workspaces.list.subscribe(syncActiveProject);
 			}, "canvas-studio: sync canvas to active workspace");
+			const cancelCurrentTurn = async () => {
+				const current = ctx.sessions.list.getSnapshot().current;
+				if (current === void 0) return;
+				const binding = ctx.sessions.binding(current);
+				if (binding === void 0) return;
+				await binding.session.cancel();
+			};
+			const rerunNode = async (projectId, nodeId, overrides) => {
+				const node = storeInstance.getSnapshot().nodes[projectId]?.find((entry) => entry.id === nodeId);
+				if (node === void 0) return;
+				try {
+					await retryStudioNode(projectId, node, overrides);
+					storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId));
+				} catch (cause) {
+					storeInstance.actions.markPendingError(projectId, node.runId ?? nodeId, cause instanceof Error ? cause.message : "重试失败");
+				}
+			};
+			const retryNode = (projectId, nodeId) => rerunNode(projectId, nodeId);
+			const steerNode = (projectId, nodeId, prompt) => rerunNode(projectId, nodeId, { prompt });
 			ctx.effect(() => {
 				const disposeService = ctx.reflect.provide("layout", layout);
 				const disposeRegistration = ctx.slots.register({
@@ -1557,14 +4478,15 @@ window.__ModuleLoader__.load({
 						};
 						return {
 							layout,
+							actions: storeInstance.actions,
 							refreshProjects,
 							createProject,
 							openProject,
 							deleteProject,
 							persistCanvas,
-							selectNode: storeInstance.actions.selectNode,
-							moveNode: storeInstance.actions.moveNode,
-							removeNode: storeInstance.actions.removeNode,
+							retryNode,
+							steerNode,
+							cancelCurrentTurn,
 							hooks: { studio: storeInstance }
 						};
 					}

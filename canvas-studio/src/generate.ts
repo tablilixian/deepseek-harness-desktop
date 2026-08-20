@@ -14,7 +14,7 @@ import {
   sizeForAspectRatio,
 } from './config.js'
 import type { ProjectRegistry } from './projects.js'
-import type { StudioCanvasNode } from './contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasOperationType } from './contracts/canvas.js'
 
 /** 一次生成的请求参数（来自客户端工具）。 */
 export interface GenerateParams {
@@ -24,6 +24,11 @@ export interface GenerateParams {
   imageUrls?: string[]
   negativePrompt?: string
   duration?: number
+  /**
+   * 节点级重试锚点：设置时把结果写回该已有节点（保留 id/位置/血缘），
+   * 而不是追加新节点 —— 重试不产生新边（plan §7.8 标准 2）。
+   */
+  retryOf?: string
 }
 
 /** 一次生成的产物描述（返回给模型）。 */
@@ -79,6 +84,20 @@ async function callDrama(
   const imageUrl = data.data?.[0]?.url
   if (imageUrl) return imageUrl
   throw new Error('生成响应中未找到产物 URL')
+}
+
+/** 生成工具名 → 画布操作类型（边颜色/标签的语义来源）。 */
+export function operationTypeOf(tool: string, params: GenerateParams): StudioCanvasOperationType {
+  if (tool === 'image_generate') return params.imageUrl !== undefined ? 'image-to-image' : 'text-to-image'
+  if (tool === 'video_generate') return 'image-to-video'
+  if (tool === 'video_composite') return 'mkr-video'
+  return 'import'
+}
+
+/** 把生成参数序列化为 generationPrompt（节点重试时原样重放；retryOf 不入档）。 */
+export function generationPromptOf(params: GenerateParams): string {
+  const { retryOf: _retryOf, ...rest } = params
+  return JSON.stringify(rest)
 }
 
 /**
@@ -194,21 +213,47 @@ export async function generateAsset(
     const source = prior.find((node) => node.url === params.imageUrl)
     if (source !== undefined) sourceIds.push(source.id)
   }
-  const node: StudioCanvasNode = {
-    id: assetId,
-    kind: isVideo ? 'video' : 'image',
-    url,
-    x: 0,
-    y: 0,
-    width: size.width,
-    height: size.height,
-    createdAt: Date.now(),
-    toolName: tool,
-    runId: assetId,
-    origin: 'agent',
-    sourceIds,
+
+  // 节点级重试（params.retryOf）：原地更新已有节点，保留 id/位置/血缘/编组，
+  // 边不增加（plan §7.8 标准 2）。普通生成则追加新节点。
+  if (params.retryOf !== undefined) {
+    const existing = await registry.readCanvas(projectId)
+    const target = existing.find((node) => node.id === params.retryOf)
+    if (target === undefined) {
+      throw new Error(`重试目标节点不存在: ${params.retryOf}`)
+    }
+    const { error: _staleError, ...targetRest } = target
+    const updated: StudioCanvasNode = {
+      ...targetRest,
+      url,
+      width: size.width,
+      height: size.height,
+      operationType: operationTypeOf(tool, params),
+      toolName: tool,
+      generationPrompt: generationPromptOf(params),
+      ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+    }
+    await registry.writeCanvas(projectId, existing.map((node) => (node.id === target.id ? updated : node)))
+  } else {
+    const node: StudioCanvasNode = {
+      id: assetId,
+      kind: isVideo ? 'video' : 'image',
+      url,
+      x: 0,
+      y: 0,
+      width: size.width,
+      height: size.height,
+      createdAt: Date.now(),
+      toolName: tool,
+      runId: assetId,
+      origin: 'agent',
+      sourceIds,
+      operationType: operationTypeOf(tool, params),
+      generationPrompt: generationPromptOf(params),
+      ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+    }
+    await registry.appendCanvasNode(projectId, node)
   }
-  await registry.appendCanvasNode(projectId, node)
 
   const result: GenerateResult = { url, width: size.width, height: size.height }
   if (isVideo) result.duration = params.duration ?? (tool === 'video_composite' ? 12 : 5)

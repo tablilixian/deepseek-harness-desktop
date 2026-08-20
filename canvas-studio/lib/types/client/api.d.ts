@@ -4,6 +4,7 @@
  */
 import type { StudioProject } from '../contracts/project.js';
 import type { StudioCanvasNode } from '../contracts/canvas.js';
+import type { GenerateParams } from '../generate.js';
 /** HTTP facts used to localize safe Client-facing Studio failures. */
 export declare class StudioApiError extends Error {
     readonly status: number;
@@ -20,3 +21,10 @@ export declare function deleteStudioProject(id: string, signal?: AbortSignal): P
 export declare function loadStudioCanvas(projectId: string, signal?: AbortSignal): Promise<readonly StudioCanvasNode[]>;
 /** Persist a project's full canvas node list. */
 export declare function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], signal?: AbortSignal): Promise<void>;
+/**
+ * 节点级重试 / 修改提示词：按原参数（可带 overrides）重新请求 Host 生成，
+ * 并把结果写回原节点（retryOf，不产生新边）。成功后返回新的产物 URL。
+ */
+export declare function retryStudioNode(projectId: string, node: StudioCanvasNode, overrides?: Partial<GenerateParams>, signal?: AbortSignal): Promise<{
+    url: string;
+}>;

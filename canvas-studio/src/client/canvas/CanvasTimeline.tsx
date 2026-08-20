@@ -7,6 +7,7 @@ const KIND_LABEL: Readonly<Record<StudioCanvasNodeKind, string>> = {
   sticky: '便签',
   text: '文本',
   prompt: '提示',
+  group: '分组',
 }
 
 /** Props for the bottom review/timeline strip. */

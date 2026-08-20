@@ -5,7 +5,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
  * 注意：`tools` 是 Host 专属服务，客户端没有该服务。媒体生成工具已在 Host
  * 侧（`src/host-tools.ts`）注册，客户端只负责 UI、项目/工作区绑定，以及
  * 通过 `conversationEvents` 捕获工具产物到画布 store（P4），并把画布节点
- * 持久化到 Host（P4+ 重启恢复）。
+ * 持久化到 Host（P4+ 重启恢复）。`sessions` 用于打断当前会话的生成回合。
  */
 export declare const inject: string[];
 /**

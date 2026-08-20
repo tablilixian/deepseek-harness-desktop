@@ -55,6 +55,21 @@ async function callDrama(endpoint, body, signal) {
         return imageUrl;
     throw new Error('生成响应中未找到产物 URL');
 }
+/** 生成工具名 → 画布操作类型（边颜色/标签的语义来源）。 */
+export function operationTypeOf(tool, params) {
+    if (tool === 'image_generate')
+        return params.imageUrl !== undefined ? 'image-to-image' : 'text-to-image';
+    if (tool === 'video_generate')
+        return 'image-to-video';
+    if (tool === 'video_composite')
+        return 'mkr-video';
+    return 'import';
+}
+/** 把生成参数序列化为 generationPrompt（节点重试时原样重放；retryOf 不入档）。 */
+export function generationPromptOf(params) {
+    const { retryOf: _retryOf, ...rest } = params;
+    return JSON.stringify(rest);
+}
 /**
  * 执行一次生成并落盘。
  * @param registry - 项目注册表（提供 assetsDir）。
@@ -149,21 +164,47 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
         if (source !== undefined)
             sourceIds.push(source.id);
     }
-    const node = {
-        id: assetId,
-        kind: isVideo ? 'video' : 'image',
-        url,
-        x: 0,
-        y: 0,
-        width: size.width,
-        height: size.height,
-        createdAt: Date.now(),
-        toolName: tool,
-        runId: assetId,
-        origin: 'agent',
-        sourceIds,
-    };
-    await registry.appendCanvasNode(projectId, node);
+    // 节点级重试（params.retryOf）：原地更新已有节点，保留 id/位置/血缘/编组，
+    // 边不增加（plan §7.8 标准 2）。普通生成则追加新节点。
+    if (params.retryOf !== undefined) {
+        const existing = await registry.readCanvas(projectId);
+        const target = existing.find((node) => node.id === params.retryOf);
+        if (target === undefined) {
+            throw new Error(`重试目标节点不存在: ${params.retryOf}`);
+        }
+        const { error: _staleError, ...targetRest } = target;
+        const updated = {
+            ...targetRest,
+            url,
+            width: size.width,
+            height: size.height,
+            operationType: operationTypeOf(tool, params),
+            toolName: tool,
+            generationPrompt: generationPromptOf(params),
+            ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+        };
+        await registry.writeCanvas(projectId, existing.map((node) => (node.id === target.id ? updated : node)));
+    }
+    else {
+        const node = {
+            id: assetId,
+            kind: isVideo ? 'video' : 'image',
+            url,
+            x: 0,
+            y: 0,
+            width: size.width,
+            height: size.height,
+            createdAt: Date.now(),
+            toolName: tool,
+            runId: assetId,
+            origin: 'agent',
+            sourceIds,
+            operationType: operationTypeOf(tool, params),
+            generationPrompt: generationPromptOf(params),
+            ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+        };
+        await registry.appendCanvasNode(projectId, node);
+    }
     const result = { url, width: size.width, height: size.height };
     if (isVideo)
         result.duration = params.duration ?? (tool === 'video_composite' ? 12 : 5);

@@ -66,6 +66,18 @@ export interface StudioCaptureAsset {
   createdAt: number
 }
 
+/** 一次工具调用的身份与参数（用于画布占位节点）。 */
+export interface StudioToolCallInfo {
+  /** 工具名（image_generate / video_generate / video_composite）。 */
+  toolName: string
+  /** 对应 tool/call 事件 id。 */
+  runId: string
+  /** 产物类型。 */
+  kind: 'image' | 'video'
+  /** 工具参数（原始 JSON 字符串，节点 generationPrompt 的来源）。 */
+  arguments?: string
+}
+
 /** definition 与目标项目画布之间的接线点（React 之外调用）。 */
 export interface AssetCaptureHooks {
   /**
@@ -76,6 +88,13 @@ export interface AssetCaptureHooks {
   reloadCanvas(projectId: string): void
   /** 当前画布绑定的项目 id；未绑定任何项目时返回 null。 */
   getSelectedProjectId(): string | null
+  /**
+   * 工具调用开始：在画布上放置一个「生成中」占位节点（client 侧瞬态，
+   * 不持久化；产物落盘后由重载替换，失败时标记错误）。
+   */
+  onToolCall?(projectId: string, info: StudioToolCallInfo): void
+  /** 工具调用失败：占位节点标记错误（tool/result 的 data.error）。 */
+  onToolError?(projectId: string, runId: string, message: string): void
 }
 
 /** definition 自身维护的节点状态：记录发起调用的工具名与参考图 URL。 */
@@ -83,6 +102,8 @@ export interface AssetCaptureState {
   toolName: string
   /** 参考图 URL；空串表示无参考图（image_generate）。 */
   sourceUrl: string
+  /** 产物类型。 */
+  kind: 'image' | 'video'
 }
 
 /**
@@ -145,6 +166,8 @@ function sourceUrlFromArguments(value: unknown): string | undefined {
  * @returns 节点 definition，供 `ctx.conversationEvents.register` 注册。
  */
 export function createAssetCaptureDefinition(hooks: AssetCaptureHooks): StudioCaptureDefinition {
+  const onToolCall = hooks.onToolCall ?? (() => {})
+  const onToolError = hooks.onToolError ?? (() => {})
   const match = (event: StudioCaptureEvent): StudioCaptureMatchResult | null => {
     if (event.type === 'tool/call') {
       const data = event.data as { callId: unknown; name: string }
@@ -165,20 +188,44 @@ export function createAssetCaptureDefinition(hooks: AssetCaptureHooks): StudioCa
     target: 'chat',
     match,
     start: (_context, startMatch) => {
-      const data = startMatch.event.data as { name: string; arguments?: unknown }
+      const data = startMatch.event.data as { callId: unknown; name: string; arguments?: unknown }
+      const toolName = data.name
+      const rawArguments = typeof data.arguments === 'string' ? data.arguments : ''
+      const projectId = hooks.getSelectedProjectId()
+      if (projectId !== null) {
+        onToolCall(projectId, {
+          toolName,
+          runId: String(data.callId),
+          kind: STUDIO_TOOL_KINDS[toolName]!,
+          arguments: rawArguments,
+        })
+      }
       return {
-        toolName: data.name,
+        toolName,
         sourceUrl: sourceUrlFromArguments(data.arguments) ?? '',
+        kind: STUDIO_TOOL_KINDS[toolName]!,
       }
     },
     update: (context, updateMatch) => {
       const state = context.state as AssetCaptureState
-      if (updateMatch.event.type === 'tool/result') {
-        // 生成产物的节点由 Host 在落盘时写入 canvas.json；这里只触发画布重载，
-        // 让客户端从单一真相源拿到最新节点（含血缘 sourceIds），不再依赖
-        // 解析事件渲染文本里的 URL —— 那在后端异常 / 渲染差异时并不可靠。
-        const projectId = hooks.getSelectedProjectId()
-        if (projectId !== null) hooks.reloadCanvas(projectId)
+      const projectId = hooks.getSelectedProjectId()
+      if (updateMatch.event.type === 'tool/result' && projectId !== null) {
+        const data = updateMatch.event.data as { error?: unknown; message: { source: { callId: unknown } } }
+        if (data.error !== undefined) {
+          // 工具失败（含用户打断）：占位节点标记错误，保留在画布上供重试。
+          const error = data.error
+          const message = typeof error === 'string'
+            ? error
+            : error !== null && typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string'
+              ? (error as { message: string }).message
+              : '生成失败'
+          onToolError(projectId, String(data.message.source.callId), message)
+        } else {
+          // 生成产物的节点由 Host 在落盘时写入 canvas.json；这里只触发画布重载，
+          // 让客户端从单一真相源拿到最新节点（含血缘 sourceIds），不再依赖
+          // 解析事件渲染文本里的 URL —— 那在后端异常 / 渲染差异时并不可靠。
+          hooks.reloadCanvas(projectId)
+        }
       }
       return state
     },

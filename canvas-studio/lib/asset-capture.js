@@ -49,6 +49,8 @@ function sourceUrlFromArguments(value) {
  * @returns 节点 definition，供 `ctx.conversationEvents.register` 注册。
  */
 export function createAssetCaptureDefinition(hooks) {
+    const onToolCall = hooks.onToolCall ?? (() => { });
+    const onToolError = hooks.onToolError ?? (() => { });
     const match = (event) => {
         if (event.type === 'tool/call') {
             const data = event.data;
@@ -71,20 +73,44 @@ export function createAssetCaptureDefinition(hooks) {
         match,
         start: (_context, startMatch) => {
             const data = startMatch.event.data;
+            const toolName = data.name;
+            const rawArguments = typeof data.arguments === 'string' ? data.arguments : '';
+            const projectId = hooks.getSelectedProjectId();
+            if (projectId !== null) {
+                onToolCall(projectId, {
+                    toolName,
+                    runId: String(data.callId),
+                    kind: STUDIO_TOOL_KINDS[toolName],
+                    arguments: rawArguments,
+                });
+            }
             return {
-                toolName: data.name,
+                toolName,
                 sourceUrl: sourceUrlFromArguments(data.arguments) ?? '',
+                kind: STUDIO_TOOL_KINDS[toolName],
             };
         },
         update: (context, updateMatch) => {
             const state = context.state;
-            if (updateMatch.event.type === 'tool/result') {
-                // 生成产物的节点由 Host 在落盘时写入 canvas.json；这里只触发画布重载，
-                // 让客户端从单一真相源拿到最新节点（含血缘 sourceIds），不再依赖
-                // 解析事件渲染文本里的 URL —— 那在后端异常 / 渲染差异时并不可靠。
-                const projectId = hooks.getSelectedProjectId();
-                if (projectId !== null)
+            const projectId = hooks.getSelectedProjectId();
+            if (updateMatch.event.type === 'tool/result' && projectId !== null) {
+                const data = updateMatch.event.data;
+                if (data.error !== undefined) {
+                    // 工具失败（含用户打断）：占位节点标记错误，保留在画布上供重试。
+                    const error = data.error;
+                    const message = typeof error === 'string'
+                        ? error
+                        : error !== null && typeof error === 'object' && typeof error.message === 'string'
+                            ? error.message
+                            : '生成失败';
+                    onToolError(projectId, String(data.message.source.callId), message);
+                }
+                else {
+                    // 生成产物的节点由 Host 在落盘时写入 canvas.json；这里只触发画布重载，
+                    // 让客户端从单一真相源拿到最新节点（含血缘 sourceIds），不再依赖
+                    // 解析事件渲染文本里的 URL —— 那在后端异常 / 渲染差异时并不可靠。
                     hooks.reloadCanvas(projectId);
+                }
             }
             return state;
         },

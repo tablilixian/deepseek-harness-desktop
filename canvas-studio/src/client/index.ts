@@ -4,7 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type { StudioCanvasNode } from '../contracts/canvas.js'
 import type { StudioProject } from '../contracts/project.js'
 import { createAssetCaptureDefinition } from '../asset-capture.js'
-import { createStudioProject, deleteStudioProject, listStudioProjects, loadStudioCanvas, saveStudioCanvas } from './api.js'
+import { createStudioProject, deleteStudioProject, listStudioProjects, loadStudioCanvas, retryStudioNode, saveStudioCanvas } from './api.js'
 import { StudioLayoutController } from './layout-controller.js'
 import { createProjectStore } from './project-store.js'
 import { installStudioStyles } from './styles.js'
@@ -16,9 +16,9 @@ import { StudioFrame } from './StudioFrame.js'
  * 注意：`tools` 是 Host 专属服务，客户端没有该服务。媒体生成工具已在 Host
  * 侧（`src/host-tools.ts`）注册，客户端只负责 UI、项目/工作区绑定，以及
  * 通过 `conversationEvents` 捕获工具产物到画布 store（P4），并把画布节点
- * 持久化到 Host（P4+ 重启恢复）。
+ * 持久化到 Host（P4+ 重启恢复）。`sessions` 用于打断当前会话的生成回合。
  */
-export const inject = ['slots', 'workspaces', 'conversationEvents']
+export const inject = ['slots', 'workspaces', 'conversationEvents', 'sessions']
 
 /** Dev-only seed sample media so the canvas is verifiable without a backend. */
 const SEED_IMAGE = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
@@ -28,6 +28,12 @@ const SEED_IMAGE = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
   + '</svg>',
 )}`
 const SEED_VIDEO = 'https://example.invalid/canvas-studio-seed/sample.mp4'
+
+/** Pending-node placeholder box size per kind. */
+const NODE_SIZE_PENDING: Readonly<Record<'image' | 'video', { width: number; height: number }>> = {
+  image: { width: 260, height: 180 },
+  video: { width: 260, height: 180 },
+}
 
 /**
  * Build dev-seed nodes for a project: an image, a video derived from it
@@ -145,10 +151,12 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
     // P4+：捕获画布工具产物。生成的节点由 Host 在落盘时写入 canvas.json（单一
     // 真相源）；这里只在该项目被选中时触发画布重载，不再依赖解析事件渲染文本
-    // 里的 URL（后端异常 / 渲染差异时不可靠）。
+    // 里的 URL（后端异常 / 渲染差异时不可靠）。工具调用开始先放一个「生成中」
+    // 占位节点，失败时经 tool/result 的 data.error 标记错误。
     const reloadCanvas = async (projectId: string): Promise<void> => {
       try {
-        storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId))
+        const loaded = await loadStudioCanvas(projectId)
+        storeInstance.actions.setNodes(projectId, loaded)
       } catch {
         /* 重载失败静默：下一次打开项目仍会载入 */
       }
@@ -156,15 +164,71 @@ export function apply(ctx: ClientContext): void {
     const disposeCapture = ctx.conversationEvents.register(createAssetCaptureDefinition({
       reloadCanvas,
       getSelectedProjectId: () => resolveActiveProjectId(),
+      onToolCall: (projectId, info) => {
+        const project = storeInstance.getSnapshot().projects.find((entry) => entry.id === projectId)
+        if (project === undefined) return
+        const projectNodes = storeInstance.getSnapshot().nodes[projectId] ?? []
+        const index = projectNodes.length
+        const size = NODE_SIZE_PENDING[info.kind]
+        storeInstance.actions.setPendingNode(projectId, {
+          id: `pending-${info.runId}`,
+          runId: info.runId,
+          kind: info.kind,
+          x: 40 + (index % 4) * 300,
+          y: 40 + Math.floor(index / 4) * 240,
+          width: size.width,
+          height: size.height,
+          createdAt: Date.now(),
+          origin: 'agent',
+          sourceIds: [],
+          toolName: info.toolName,
+          ...(info.arguments !== undefined ? { generationPrompt: info.arguments } : {}),
+          isLoading: true,
+          progress: 0,
+        })
+      },
+      onToolError: (projectId, runId, message) => {
+        storeInstance.actions.markPendingError(projectId, runId, message)
+      },
     }))
     return disposeCapture
   }, 'canvas-studio: reload canvas on generated assets')
   // 会话级归属：当前 workspace 变化（含应用启动恢复会话）时，把画布选中态对齐到
   // 该 workspace 绑定的项目并载入其画布，避免「产物已写盘却显示空态」。
+  // 会话级项目归属：当前 workspace 变化（含应用启动恢复会话）时，把画布选中态对齐到
+  // 该 workspace 绑定的项目并载入其画布，避免「产物已写盘却显示空态」。
   ctx.effect(() => {
     syncActiveProject()
     return ctx.workspaces.list.subscribe(syncActiveProject)
   }, 'canvas-studio: sync canvas to active workspace')
+
+  // 打断当前会话的运行中回合（工具生成时把 Host 侧请求取消）。
+  const cancelCurrentTurn = async (): Promise<void> => {
+    const current = ctx.sessions.list.getSnapshot().current
+    if (current === undefined) return
+    const binding = ctx.sessions.binding(current)
+    if (binding === undefined) return
+    await binding.session.cancel()
+  }
+
+  // 节点级重试 / 修改提示词：走 Host 生成路由，结果写回原节点（retryOf）。
+  const rerunNode = async (projectId: string, nodeId: string, overrides?: { prompt?: string }): Promise<void> => {
+    const node = storeInstance.getSnapshot().nodes[projectId]?.find((entry) => entry.id === nodeId)
+    if (node === undefined) return
+    try {
+      await retryStudioNode(projectId, node, overrides)
+      storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId))
+    } catch (cause) {
+      storeInstance.actions.markPendingError(
+        projectId,
+        node.runId ?? nodeId,
+        cause instanceof Error ? cause.message : '重试失败',
+      )
+    }
+  }
+  const retryNode = (projectId: string, nodeId: string): Promise<void> => rerunNode(projectId, nodeId)
+  const steerNode = (projectId: string, nodeId: string, prompt: string): Promise<void> => rerunNode(projectId, nodeId, { prompt })
+
   ctx.effect(() => {
     const disposeService = ctx.reflect.provide('layout', layout)
     const disposeRegistration = ctx.slots.register({
@@ -238,14 +302,15 @@ export function apply(ctx: ClientContext): void {
         }
         return {
           layout,
+          actions: storeInstance.actions,
           refreshProjects,
           createProject,
           openProject,
           deleteProject,
           persistCanvas,
-          selectNode: storeInstance.actions.selectNode,
-          moveNode: storeInstance.actions.moveNode,
-          removeNode: storeInstance.actions.removeNode,
+          retryNode,
+          steerNode,
+          cancelCurrentTurn,
           // 组件经 useStudio 读取同一个实例（hooks 舱绑定为 use<Name>）。
           hooks: { studio: storeInstance },
         }

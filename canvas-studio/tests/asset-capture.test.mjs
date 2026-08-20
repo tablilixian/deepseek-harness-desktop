@@ -19,12 +19,10 @@ function toolCallEvent(name, callId, args = '{}') {
 }
 
 /** 合成 tool/result 事件。 */
-function toolResultEvent(callId, content, surfaceOp = 'append') {
-  return {
-    type: 'tool/result',
-    surfaceOp,
-    data: { message: { source: { callId }, content } },
-  }
+function toolResultEvent(callId, content, surfaceOp = 'append', error) {
+  const data = { message: { source: { callId }, content } }
+  if (error !== undefined) data.error = error
+  return { type: 'tool/result', surfaceOp, data }
 }
 
 /** renderResult 产出的真实文本块形态。 */
@@ -133,4 +131,88 @@ test('update：返回原 state（不吞状态）', () => {
   const state = def.start(undefined, matchOf(toolCallEvent('image_generate', 'c1')))
   const next = def.update({ state }, matchOf(toolResultEvent('c1', renderText(IMAGE_URL, '1024x1024'))))
   assert.equal(next, state)
+})
+
+test('start：选中项目时经 onToolCall 放置占位节点（kind/runId/arguments）', () => {
+  const calls = []
+  const def = createAssetCaptureDefinition({
+    reloadCanvas: () => {},
+    getSelectedProjectId: () => 'p1',
+    onToolCall: (projectId, info) => calls.push({ projectId, info }),
+  })
+  const args = JSON.stringify({ prompt: '小船', imageUrl: IMAGE_URL, duration: 5 })
+  def.start(undefined, matchOf(toolCallEvent('video_generate', 'c9', args)))
+  assert.deepEqual(calls, [{
+    projectId: 'p1',
+    info: { toolName: 'video_generate', runId: 'c9', kind: 'video', arguments: args },
+  }])
+  // 无参考图参数时 arguments 保留原样（供 generationPrompt 重放）
+  const calls2 = []
+  const def2 = createAssetCaptureDefinition({
+    reloadCanvas: () => {},
+    getSelectedProjectId: () => 'p1',
+    onToolCall: (projectId, info) => calls2.push(info),
+  })
+  def2.start(undefined, matchOf(toolCallEvent('image_generate', 'c10')))
+  assert.deepEqual(calls2, [{ toolName: 'image_generate', runId: 'c10', kind: 'image', arguments: '{}' }])
+})
+
+test('start：未选中项目时不调用 onToolCall', () => {
+  const calls = []
+  const def = createAssetCaptureDefinition({
+    reloadCanvas: () => {},
+    getSelectedProjectId: () => null,
+    onToolCall: (projectId, info) => calls.push({ projectId, info }),
+  })
+  def.start(undefined, matchOf(toolCallEvent('image_generate', 'c11')))
+  assert.equal(calls.length, 0)
+})
+
+test('update：tool/result 携带 data.error 时经 onToolError 标记占位节点错误', () => {
+  const errors = []
+  const def = createAssetCaptureDefinition({
+    reloadCanvas: () => {},
+    getSelectedProjectId: () => 'p1',
+    onToolError: (projectId, runId, message) => errors.push({ projectId, runId, message }),
+  })
+  const state = def.start(undefined, matchOf(toolCallEvent('image_generate', 'c12')))
+  // 字符串错误
+  def.update({ state }, matchOf(toolResultEvent('c12', [{ type: 'text', text: '失败' }], 'append', '生成失败: HTTP 500')))
+  // 对象错误（{ message }）
+  def.update({ state }, matchOf(toolResultEvent('c12', [{ type: 'text', text: '失败' }], 'append', { message: '超时' })))
+  // 非对象错误兜底文案
+  def.update({ state }, matchOf(toolResultEvent('c12', [{ type: 'text', text: '失败' }], 'append', 42)))
+  assert.deepEqual(errors, [
+    { projectId: 'p1', runId: 'c12', message: '生成失败: HTTP 500' },
+    { projectId: 'p1', runId: 'c12', message: '超时' },
+    { projectId: 'p1', runId: 'c12', message: '生成失败' },
+  ])
+})
+
+test('update：tool/result 携带 data.error 时不再触发画布重载', () => {
+  const reloaded = []
+  const errors = []
+  const def = createAssetCaptureDefinition({
+    reloadCanvas: (projectId) => reloaded.push(projectId),
+    getSelectedProjectId: () => 'p1',
+    onToolError: (projectId, runId) => errors.push({ projectId, runId }),
+  })
+  const state = def.start(undefined, matchOf(toolCallEvent('image_generate', 'c13')))
+  def.update({ state }, matchOf(toolResultEvent('c13', [{ type: 'text', text: '失败' }], 'append', '网络错误')))
+  assert.equal(reloaded.length, 0)
+  assert.deepEqual(errors, [{ projectId: 'p1', runId: 'c13' }])
+})
+
+test('update：data.error 且未选中项目时不触发任何 hook', () => {
+  const reloaded = []
+  const errors = []
+  const def = createAssetCaptureDefinition({
+    reloadCanvas: (projectId) => reloaded.push(projectId),
+    getSelectedProjectId: () => null,
+    onToolError: (projectId, runId) => errors.push({ projectId, runId }),
+  })
+  const state = def.start(undefined, matchOf(toolCallEvent('image_generate', 'c14')))
+  def.update({ state }, matchOf(toolResultEvent('c14', [{ type: 'text', text: '失败' }], 'append', '网络错误')))
+  assert.equal(reloaded.length, 0)
+  assert.equal(errors.length, 0)
 })

@@ -46,6 +46,17 @@ export interface StudioCaptureAsset {
     /** 创建时间（epoch millis）。 */
     createdAt: number;
 }
+/** 一次工具调用的身份与参数（用于画布占位节点）。 */
+export interface StudioToolCallInfo {
+    /** 工具名（image_generate / video_generate / video_composite）。 */
+    toolName: string;
+    /** 对应 tool/call 事件 id。 */
+    runId: string;
+    /** 产物类型。 */
+    kind: 'image' | 'video';
+    /** 工具参数（原始 JSON 字符串，节点 generationPrompt 的来源）。 */
+    arguments?: string;
+}
 /** definition 与目标项目画布之间的接线点（React 之外调用）。 */
 export interface AssetCaptureHooks {
     /**
@@ -56,12 +67,21 @@ export interface AssetCaptureHooks {
     reloadCanvas(projectId: string): void;
     /** 当前画布绑定的项目 id；未绑定任何项目时返回 null。 */
     getSelectedProjectId(): string | null;
+    /**
+     * 工具调用开始：在画布上放置一个「生成中」占位节点（client 侧瞬态，
+     * 不持久化；产物落盘后由重载替换，失败时标记错误）。
+     */
+    onToolCall?(projectId: string, info: StudioToolCallInfo): void;
+    /** 工具调用失败：占位节点标记错误（tool/result 的 data.error）。 */
+    onToolError?(projectId: string, runId: string, message: string): void;
 }
 /** definition 自身维护的节点状态：记录发起调用的工具名与参考图 URL。 */
 export interface AssetCaptureState {
     toolName: string;
     /** 参考图 URL；空串表示无参考图（image_generate）。 */
     sourceUrl: string;
+    /** 产物类型。 */
+    kind: 'image' | 'video';
 }
 /**
  * conversationEvents 契约的本地结构投影（注册时由结构类型兼容自动匹配
