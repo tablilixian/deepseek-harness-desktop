@@ -444,3 +444,14 @@ agent 回复「小猪已保存到 `assets/cf53b4f7-....png`」，文件确实落
 - **需重启桌面生效**：构建产物已更新，但运行中的 Electron 渲染进程仍是旧 bundle；`corepack yarn dev` 重启后，会话自动恢复的 workspace 会被订阅映射为画布项目，猪（及其余历史产物）直接可见，无需手动点击。
 - 上一轮「生成即写画布」的修复保证了数据层（节点必落盘），本轮补齐展示层（选中态跟随会话）——两者缺一不可。
 - 仍未提交，遵守仓库纪律（验收通过后排除 dirty 子模块、只 stage `canvas-studio` 与 `docs`）。
+
+## 20. 参考画布集成完成记录（2026-08-20,S1–S7）
+
+> 用户提供的 `reference/`（WL-AI-Director Canvas 模块,CC BY-NC-SA）按 [`docs/plans/canvas-studio-reference-integration.md`](./canvas-studio-reference-integration.md) 分阶段概念级集成完成,**全部提交并推送到 fork(`9a314b6e88`)**。
+
+- **范围**：S1 模型 v2 + 迁移 → S2 连线渲染(操作着色/箭头/胶囊/多源角色) → S3 交互(吸附/多选/缩放/重命名/快捷键/undo-redo) → S4 生成态视觉(占位/进度/错误角标) → S5 面板(工具栏/图层/属性/Minimap) → S6 编组/对齐/分布/自动布局/手动连线 → S7 节点级重试/修改提示词/打断(确定性方案:Host 路由 + `retryOf` 原地更新,不产生新边)。
+- **许可证**：只做概念/算法/结构级借鉴,按 DSH 纪律重写,不逐字移植;`reference/` 已入 `.gitignore` 不进 MIT 仓库;每个借鉴点带来源标注(见集成计划 §8)。
+- **验证**：`corepack yarn workspace canvas-studio check` 全绿;`test:smoke` **16/16**(asset-capture 13 + generate 3 新增 retryOf 用例)。
+- **上游事实(S7 依据)**：无 `tool/error` 事件,错误在 `tool/result` 的 `data.error`;`ctx.sessions` 是合法 client inject,`session.cancel()` 打断。
+- **注意**：根级 `corepack yarn check` 仍因缺失 `dsh-community-fabric`/`dsh-community-market` 包失败(既有仓库状态,与插件无关);验证以 workspace 级 check + smoke 为准。
+- 详细状态见 [`canvas-studio-handoff.md`](./canvas-studio-handoff.md)(重写版:当前状态/S1–S7 摘要/已验证机制/命令/下一步)。

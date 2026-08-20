@@ -2,7 +2,7 @@
 
 > 本文档是对 `reference/`（WL-AI-Director Canvas 模块，95 个文件）的评估结论与集成安排。
 > 目标：把适合当前项目（Canvas Studio 插件，P4+ 完整版画布）的机制分阶段落地。
-> 本文档只做**安排与决策依据**，不承诺执行顺序 —— 最终执行范围由用户确认（见 §7）。
+> **执行状态（2026-08-20）：S1–S7 全部落地完成并提交推送（`9a314b6e88`）。** 每阶段完成情况见各阶段标题标注；`check` 全绿、`test:smoke` 16/16 通过。本插件改动与根级 `yarn check` 的 dsh-community-* 缺失阻塞无关。
 
 ## 1. 输入盘点
 
@@ -63,6 +63,8 @@
 
 ## 3. 现状差距（当前实现 vs 目标形态）
 
+> 下表为集成前差距快照（历史记录）。集成完成后各差距项均已闭合：节点模型 v2（operationType/generationPrompt/locked/visible/opacity/zIndex/parentId/flipX/flipY/loading/progress/error/duration）、连线着色+箭头+标签+角色+高亮、吸附/多选/resize/重命名/锁定/右键菜单、中键平移/Ctrl 滚轮/fit/快捷键、快照 undo/redo(cap 20)、工具栏/图层面板/属性面板、minimap、手动连线、group/ungroup/align/distribute/autoArrange。
+
 | 能力 | 当前（P4+） | 参考目标 | 差距 |
 | --- | --- | --- | --- |
 | 节点模型 | 13 字段（无视觉状态） | 29 字段 | 缺 operationType/generationPrompt/thumbnail/duration/locked/visible/opacity/zIndex/parentId/flipX/flipY/isLoading/progress/error |
@@ -94,7 +96,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 
 阶段顺序按「数据层 → 渲染 → 交互 → 面板 → 高级编排」推进，每阶段可独立验收、独立提交。
 
-### S1 节点模型补齐 + 文档迁移（基础层）
+### S1 节点模型补齐 + 文档迁移（基础层）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：`contracts/canvas.ts` 扩为 v2（`CANVAS_DOCUMENT_VERSION = 2` + `NODE_DEFAULTS`）；`projects.ts` `normalizeCanvasDocument` 做 v1→v2 迁移；`generate.ts` `operationTypeOf`/`generationPromptOf`。验证：旧 `canvas.json` 迁移不丢节点；typecheck 全绿；`test:smoke` 覆盖。
 
 | 项 | 内容 |
 | --- | --- |
@@ -104,7 +108,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | Host `writeCanvas` 做 version 迁移（旧节点补默认值：visible=true、opacity=1、zIndex=按 createdAt 递增、locked=false）；`addAsset` 落盘时填 operationType/generationPrompt（从工具参数取） |
 | 验证 | 旧 `canvas.json` 打开不丢节点；新字段在 `lib/` 产物可见；`test:smoke` 加迁移用例 |
 
-### S2 连线渲染升级（血缘可视化）
+### S2 连线渲染升级（血缘可视化）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：`CanvasEdges.tsx` 重写 —— 按操作类型着色 + 水平控制偏移贝塞尔 + 箭头 marker + 边中点中文胶囊 + 多源角色标签 + 选中高亮；props 改 `selectedNodeIds`。验证：typecheck 全绿；dev-seed 下可见带色/箭头/标签的血缘边。
 
 | 项 | 内容 |
 | --- | --- |
@@ -114,7 +120,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | 无状态组件，props 只增（nodes + selectedNodeId + 可选 onEdgeSelect）；SVG overflow-visible 保持 |
 | 验证 | `?cs-dev-seed=1` 下血缘边带颜色/箭头/标签；typecheck 全绿 |
 
-### S3 画布交互补强（节点级 + 视口级）
+### S3 画布交互补强（节点级 + 视口级）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：`project-store.ts` 全量重写（多选、快照历史 cap 20、剪贴板、z 序、编组/解组、对齐/分布、autoArrange、linkLayers、pending 三件套 + selectors）；`canvas-math.ts`（clamp/calculateSnap 六类对齐线 + 网格吸附/contentBounds/screen↔world）；`CanvasNode.tsx`（8 向缩放把手、内联重命名、连线手柄、锁定/加载/错误角标）；`CanvasSurface.tsx`（中键/Shift 平移、Ctrl+滚轮绕光标缩放 0.1–5、fitToContent、窗口快捷键、拖拽吸附 + 引导线、resize/link 手势、缩放簇）。吸附计算为纯函数、快照历史在 store 工厂内，符合 §4 纪律。
 
 | 项 | 内容 |
 | --- | --- |
@@ -124,7 +132,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | 吸附计算为纯函数（不依赖 store），组件内 useRef 持有；历史快照进 store 工厂（layers 数组浅拷贝 + 时间戳，快照 push 时机=动作 commit 前） |
 | 验证 | CDP/桌面：多选拖拽、对齐线出现、缩放平移与 fit 均正常；`test:smoke` 加 store 历史/吸附用例 |
 
-### S4 节点状态视觉（生成态/视觉属性渲染）
+### S4 节点状态视觉（生成态/视觉属性渲染）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：`asset-capture.ts` 新增可选 `onToolCall`（kind/runId/arguments → 放置 loading 占位节点 + 不定进度条）与 `onToolError`（`tool/result` 的 `data.error` 字符串/`{message}` → 红边错误角标 + 兜底文案）；成功结果触发现有 reloadCanvas 重载（Host 单一真相源）。前置事实：**上游无 `tool/error` 事件**，错误以 `tool/result` 的 `data.error` 呈现（`session-checkpoint-policy/tests/crash-recovery.e2e.ts` 佐证）。
 
 | 项 | 内容 |
 | --- | --- |
@@ -134,7 +144,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | Host `addAsset` 已写 isLoading 生命周期（tool/call → result），S1 字段落地后此处接渲染；删除节点时边自动消失（血缘即边无需清理） |
 | 验证 | dev-seed 注入 locked/hidden/opacity/flip 示例节点验证渲染；真实生成走 tool/error 链路看红标 |
 
-### S5 工具栏 + 图层面板 + 属性面板 + Minimap（面板层）
+### S5 工具栏 + 图层面板 + 属性面板 + Minimap（面板层）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：新增 `CanvasToolbar.tsx`（undo/redo、删除、编组/解组、6 对齐、2 分布、整理布局、+便签/文本/提示）、`LayerPanel.tsx`（搜索、缩略图、锁定/可见/置顶/置底/删除、ctrl 多选、组缩进）、`LayerDetailPanel.tsx`（标题、元信息、透明度/镜像/锁定/可见/层级、重试/修改提示词/打断/删除、steer 输入）、`Minimap.tsx`（内容边界拟合 + 视口框拖拽导航 + 按 kind 着色）；全部并入 `StudioFrame` 布局（280px | 1fr | 380px），样式在 `styles.ts` 走 `--dsw-alias-*` token。
 
 | 项 | 内容 |
 | --- | --- |
@@ -144,7 +156,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | 全部走 store actions（S3 已扩）；面板挂 `StudioFrame` 左/中栏（不占对话区）；Tailwind → CSS 类；props 四份额 |
 | 验证 | 桌面人工：面板操作与画布实时联动；minimap 拖拽导航；暗/亮主题下 token 正确 |
 
-### S6 手动连线 + 分组 + 对齐 + 自动布局（高级编排）
+### S6 手动连线 + 分组 + 对齐 + 自动布局（高级编排）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：store `linkLayers(sourceIds, targetId)` + `CanvasSurface` 连线手柄（拖出临时边落到目标节点建血缘）；`group/ungroup`（parentId + `'group'` kind 节点，`StudioCanvasNodeKind` 已含）；`alignLayers`/`distributeLayers`；`autoArrange`（按血缘深度排序布局）；删除节点时边自动消失（血缘即边）。autoLayout 为 store action 内纯计算，结果合并写持久化。
 
 | 项 | 内容 |
 | --- | --- |
@@ -154,7 +168,9 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 适配 | autoLayout 为纯函数（输入 nodes 输出新坐标），store action 调用后合并写持久化；手柄拖线为 CanvasSurface 本地 state |
 | 验证 | dev-seed 乱序节点 → 一键整理；手动连线 → 边即时出现且持久化后恢复 |
 
-### S7 P5 交互联动（cancel/steer/retry 与节点状态）
+### S7 P5 交互联动（cancel/steer/retry 与节点状态）—— ✅ 已完成（commit `9a314b6e88`）
+
+> 落地：`generate.ts` 支持 `params.retryOf` —— 同节点原地更新（保留 id/位置/血缘/编组、清 error、不产生新边），`generationPrompt` 存可重放参数（`generationPromptOf` 剥离 `retryOf` 锚点）；`api.ts` `retryStudioNode` 解析重放 + overrides；客户端注入面加 `'sessions'`，`cancelCurrentTurn` 走 `ctx.sessions.binding(current).session.cancel()`（`SessionFace.cancel()`，源码核实：`sessions` 为合法 client inject）；「修改提示词」= steer + 同节点重执行；重试/修改提示词/打断入口在右键菜单与属性面板。
 
 | 项 | 内容 |
 | --- | --- |
@@ -164,15 +180,16 @@ WL-AI-Director 为 CC BY-NC-SA 4.0（非商业），DSH Desktop 为 MIT：**逐�
 | 前置 | S1/S4 字段与视觉就绪 |
 | 验证 | 对话中途打断 → 节点中断态；单节点重试 → 同节点更新、边数不变 |
 
-## 7. 决策清单（待用户确认）
+## 7. 决策清单（已确认）
 
-| 决策点 | 选项 |
+| 决策点 | 结论 |
 | --- | --- |
-| 执行范围 | A. 全部 S1–S7 依次落地；B. 先 S1–S4（交互与视觉，无新 UI 面）；C. 先 S1–S3 最小集；D. 只做 S1（模型打底） |
-| 阶段粒度 | 每阶段独立提交，或 S1–S4 合并一次提交 |
-| S5 面板布局 | 工具栏/面板放画布内浮层（贴近参考），或并入 `StudioFrame` 左栏扩展 |
-| S6 手动连线优先级 | 与 S5 并行或后置（S5 完成后再定） |
-| handoff 同步 | 每阶段落地后同步更新 `canvas-studio-handoff.md`（含今日 store/工具修复） |
+| 执行范围 | **A. 全部 S1–S7 依次落地**（用户确认「全做」）|
+| 阶段粒度 | 每阶段独立提交 + 最后统一提交本次集成（`9a314b6e88` 含 S2–S7 与新增测试；S1 并入）|
+| S5 面板布局 | 工具栏/面板并入 `StudioFrame` 帧布局（左 280px 图层面板 / 中画布 / 右 380px 属性面板）|
+| S6 手动连线优先级 | 与 S3 store actions 一并落地（连接手柄在 CanvasSurface）|
+| handoff 同步 | `canvas-studio-handoff.md` 已按 2026-08-20 现状重写（见该文档 §2 集成摘要）|
+| 剩余事项 | 桌面可视化验收（建议）、主计划 `canvas-studio.md` P4+ 章节修订、store 单测补强（可选）|
 
 ## 8. 参考文件地图（来源标注用）
 
