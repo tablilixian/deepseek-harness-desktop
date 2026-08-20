@@ -18,12 +18,11 @@ export const inject = ['webServer', 'tools']
 /** Host plugin body: the project registry, its routes, and the media tools. */
 export function apply(ctx: Context): void {
   const registry = new ProjectRegistry()
-  const port = ctx.webServer.port
   ctx.effect(() => registerStudioRoutes(ctx, registry), 'canvas-studio: project routes')
   // Media generation tools register on the Host (the `tools` service is
   // Host-only); each tool resolves its project from the session workspace.
   ctx.effect(() => {
-    const disposers = createStudioTools(registry, port).map((definition) => ctx.tools.register(definition))
+    const disposers = createStudioTools(registry).map((definition) => ctx.tools.register(definition))
     return () => { for (const dispose of disposers) dispose() }
   }, 'canvas-studio: media generation tools')
 }

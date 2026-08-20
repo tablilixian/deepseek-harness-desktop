@@ -5,8 +5,8 @@
  * so a crash never leaves a half-written registry behind.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, rm } from 'node:fs/promises';
+import { join, sep } from 'node:path';
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write';
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths';
 /** Registry file format version; bump with a migration when the shape changes. */
@@ -54,6 +54,69 @@ export class ProjectRegistry {
     assetsDir(projectId) {
         return join(this.projectDir(projectId), 'assets');
     }
+    /** The absolute path of one project's canvas document. */
+    canvasFile(projectId) {
+        return join(this.projectDir(projectId), 'canvas.json');
+    }
+    /**
+     * Read a project's canvas nodes. Returns an empty list when the document is
+     * missing or corrupt (the canvas is disposable UI state, never fatal).
+     * @param projectId - target project id.
+     */
+    async readCanvas(projectId) {
+        let text;
+        try {
+            text = await readFile(this.canvasFile(projectId), 'utf8');
+        }
+        catch (error) {
+            if (error.code === 'ENOENT')
+                return [];
+            throw error;
+        }
+        try {
+            const document = JSON.parse(text);
+            return normalizeCanvasDocument(document);
+        }
+        catch {
+            return [];
+        }
+    }
+    /**
+     * Persist a project's canvas nodes atomically (a crash never leaves a
+     * half-written canvas document behind).
+     * @param projectId - target project id.
+     * @param nodes - the full node list for the project.
+     */
+    async writeCanvas(projectId, nodes) {
+        // Merge-protect: a client save replaces the whole document, but generated
+        // media nodes written by the Host during `generateAsset` may not be present
+        // in the client's in-memory list yet (a generation just completed). Keep any
+        // Host-authored node whose id the client did not include, so a drag-save
+        // cannot clobber a freshly generated asset.
+        const incomingIds = new Set(nodes.map((node) => node.id));
+        const existing = await this.readCanvas(projectId);
+        const preserved = existing.filter((node) => !incomingIds.has(node.id));
+        const document = { version: REGISTRY_VERSION, nodes: [...nodes, ...preserved] };
+        await writeFileAtomic(this.canvasFile(projectId), `${JSON.stringify(document, null, 2)}\n`, {
+            mode: 0o600,
+            dirMode: 0o700,
+        });
+    }
+    /**
+     * Append one generated-media node to a project's canvas document. The Host
+     * writes this the moment an asset lands on disk, so the canvas reflects a
+     * successful generation deterministically (the client reloads the document
+     * on `tool/result`), independent of how the conversation event renders the
+     * tool result text.
+     * @param projectId - target project id.
+     * @param node - the node to append (id must be unique within the project).
+     */
+    async appendCanvasNode(projectId, node) {
+        const existing = await this.readCanvas(projectId);
+        if (existing.some((candidate) => candidate.id === node.id))
+            return;
+        await this.writeCanvas(projectId, [...existing, node]);
+    }
     /**
      * List all registered projects in creation order.
      * @returns the durable project records.
@@ -75,6 +138,9 @@ export class ProjectRegistry {
         const trimmed = name.trim();
         validateProjectName(trimmed);
         const projects = [...await this.list()];
+        if (projects.some((entry) => entry.name.toLowerCase() === trimmed.toLowerCase())) {
+            throw new Error(`项目名已存在: ${trimmed}`);
+        }
         const id = randomUUID();
         const project = {
             id,
@@ -88,6 +154,25 @@ export class ProjectRegistry {
         await this.writeRegistry(projects);
         this.cached = projects;
         return project;
+    }
+    /**
+     * Delete a project: remove its on-disk directory (registry, assets, canvas)
+     * and drop the record. Refuses when the resolved directory is not safely
+     * nested under the projects directory.
+     * @param projectId - target project id.
+     */
+    async removeProject(projectId) {
+        const projects = [...await this.list()];
+        const index = projects.findIndex((entry) => entry.id === projectId);
+        if (index === -1)
+            throw new Error(`项目不存在: ${projectId}`);
+        const dir = this.projectDir(projectId);
+        if (!dir.startsWith(this.projectsDir + sep))
+            throw new Error('非法项目目录，拒绝删除');
+        await rm(dir, { recursive: true, force: true });
+        projects.splice(index, 1);
+        await this.writeRegistry(projects);
+        this.cached = projects;
     }
     async readRegistry() {
         let text;
@@ -140,4 +225,33 @@ function isProjectRecord(value) {
         && typeof record.createdAt === 'string'
         && typeof record.updatedAt === 'string'
         && typeof record.dir === 'string';
+}
+/** Accept only canvas nodes we can safely render; drop anything malformed. */
+function isCanvasNode(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return false;
+    const node = value;
+    return typeof node.id === 'string'
+        && node.id.length > 0
+        && (node.kind === 'image'
+            || node.kind === 'video'
+            || node.kind === 'sticky'
+            || node.kind === 'text'
+            || node.kind === 'prompt')
+        && typeof node.x === 'number'
+        && typeof node.y === 'number'
+        && typeof node.width === 'number'
+        && typeof node.height === 'number'
+        && typeof node.createdAt === 'number'
+        && (node.origin === 'agent' || node.origin === 'manual')
+        && Array.isArray(node.sourceIds);
+}
+/** Coerce an unknown parsed canvas document into a safe node list (lenient). */
+function normalizeCanvasDocument(value) {
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return [];
+    const document = value;
+    if (!Array.isArray(document.nodes))
+        return [];
+    return document.nodes.filter(isCanvasNode);
 }

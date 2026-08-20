@@ -5,7 +5,9 @@ import { generateAsset } from './generate.js';
 const ROUTE_PROJECTS = '/canvas-studio/projects';
 const ROUTE_GENERATE = '/canvas-studio/generate';
 const ROUTE_ASSETS = '/canvas-studio/assets';
+const ROUTE_CANVAS = '/canvas-studio/canvas';
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_CANVAS_NODES = 2000;
 const loopbackAddresses = new BlockList();
 loopbackAddresses.addSubnet('127.0.0.0', 8, 'ipv4');
 loopbackAddresses.addSubnet('::1', 128, 'ipv6');
@@ -158,6 +160,43 @@ export function registerStudioRoutes(ctx, registry) {
                     }
                     return;
                 }
+                if (req.method === 'DELETE') {
+                    if (!mutationAllowed(req, expectedPort)) {
+                        sendJson(res, 403, { error: 'canvas-studio delete requires a local same-origin DELETE' });
+                        return;
+                    }
+                    const controller = new AbortController();
+                    const stopWatching = () => {
+                        req.off('aborted', onRequestAbort);
+                        res.off('close', onResponseClose);
+                    };
+                    const onRequestAbort = () => controller.abort();
+                    const onResponseClose = () => {
+                        if (!res.writableEnded)
+                            controller.abort();
+                    };
+                    req.once('aborted', onRequestAbort);
+                    res.once('close', onResponseClose);
+                    try {
+                        const body = await readJson(req, controller.signal);
+                        if (typeof body.id !== 'string') {
+                            sendJson(res, 400, { error: '缺少 id' });
+                            return;
+                        }
+                        await registry.removeProject(body.id);
+                        if (!controller.signal.aborted && !res.destroyed)
+                            sendJson(res, 200, { ok: true });
+                    }
+                    catch (cause) {
+                        if (!controller.signal.aborted && !res.destroyed) {
+                            sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'project delete failed' });
+                        }
+                    }
+                    finally {
+                        stopWatching();
+                    }
+                    return;
+                }
                 if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
                     sendJson(res, 405, { error: 'project changes require a local same-origin POST' });
                     return;
@@ -220,7 +259,7 @@ export function registerStudioRoutes(ctx, registry) {
                         return;
                     }
                     const params = (body.params ?? {});
-                    const result = await generateAsset(registry, expectedPort, body.tool, body.projectId, params, controller.signal);
+                    const result = await generateAsset(registry, body.tool, body.projectId, params, controller.signal);
                     if (!controller.signal.aborted && !res.destroyed)
                         sendJson(res, 200, result);
                 }
@@ -276,6 +315,74 @@ export function registerStudioRoutes(ctx, registry) {
                 }
                 catch {
                     sendJson(res, 404, { error: 'asset not found' });
+                }
+            } }),
+        // P4+: canvas persistence. The client saves the project's node list so the
+        // canvas survives a restart (plan §7.7). Reads require loopback authority;
+        // writes add the same-origin check used by the project routes.
+        ctx.webServer.register({ kind: 'exact', path: ROUTE_CANVAS, handler: async (req, res) => {
+                if (!requestAllowed(req, expectedPort)) {
+                    sendJson(res, 403, { error: 'canvas-studio request authority rejected' });
+                    return;
+                }
+                if (req.method === 'GET') {
+                    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${expectedPort}`);
+                    const projectId = requestUrl.searchParams.get('projectId');
+                    if (!projectId) {
+                        sendJson(res, 400, { error: '缺少 projectId' });
+                        return;
+                    }
+                    try {
+                        const nodes = await registry.readCanvas(projectId);
+                        if (!res.destroyed)
+                            sendJson(res, 200, { nodes });
+                    }
+                    catch (cause) {
+                        if (!res.destroyed)
+                            sendJson(res, 500, {
+                                error: cause instanceof Error ? cause.message : 'canvas load unavailable',
+                            });
+                    }
+                    return;
+                }
+                if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+                    sendJson(res, 405, { error: 'canvas changes require a local same-origin POST' });
+                    return;
+                }
+                const controller = new AbortController();
+                const stopWatching = () => {
+                    req.off('aborted', onRequestAbort);
+                    res.off('close', onResponseClose);
+                };
+                const onRequestAbort = () => controller.abort();
+                const onResponseClose = () => {
+                    if (!res.writableEnded)
+                        controller.abort();
+                };
+                req.once('aborted', onRequestAbort);
+                res.once('close', onResponseClose);
+                try {
+                    const body = await readJson(req, controller.signal);
+                    if (typeof body.projectId !== 'string' || !Array.isArray(body.nodes)) {
+                        sendJson(res, 400, { error: '缺少 projectId 或 nodes' });
+                        return;
+                    }
+                    const nodes = body.nodes;
+                    if (nodes.length > MAX_CANVAS_NODES) {
+                        sendJson(res, 413, { error: 'canvas node count exceeded' });
+                        return;
+                    }
+                    await registry.writeCanvas(body.projectId, nodes);
+                    if (!controller.signal.aborted && !res.destroyed)
+                        sendJson(res, 200, { ok: true });
+                }
+                catch (cause) {
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'canvas save failed' });
+                    }
+                }
+                finally {
+                    stopWatching();
                 }
             } }),
     ];

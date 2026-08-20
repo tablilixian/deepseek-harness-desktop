@@ -18,10 +18,9 @@ export interface GenerateResult {
 /**
  * 执行一次生成并落盘。
  * @param registry - 项目注册表（提供 assetsDir）。
- * @param port - webServer 监听端口，用于拼装产物 URL。
  * @param tool - 工具名（image_generate / video_generate / video_composite）。
  * @param projectId - 目标项目 id。
  * @param params - 生成参数。
  * @param signal - 取消信号。
  */
-export declare function generateAsset(registry: ProjectRegistry, port: number, tool: string, projectId: string, params: GenerateParams, signal?: AbortSignal): Promise<GenerateResult>;
+export declare function generateAsset(registry: ProjectRegistry, tool: string, projectId: string, params: GenerateParams, signal?: AbortSignal): Promise<GenerateResult>;

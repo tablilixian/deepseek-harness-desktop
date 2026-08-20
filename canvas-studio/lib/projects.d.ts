@@ -1,4 +1,5 @@
 import type { StudioProject } from './contracts/project.js';
+import type { StudioCanvasNode } from './contracts/canvas.js';
 /**
  * Reject names that cannot round-trip through the registry or the filesystem.
  * @param name - trimmed candidate project name.
@@ -22,6 +23,31 @@ export declare class ProjectRegistry {
     projectDir(projectId: string): string;
     /** The absolute path of one project's asset directory. */
     assetsDir(projectId: string): string;
+    /** The absolute path of one project's canvas document. */
+    canvasFile(projectId: string): string;
+    /**
+     * Read a project's canvas nodes. Returns an empty list when the document is
+     * missing or corrupt (the canvas is disposable UI state, never fatal).
+     * @param projectId - target project id.
+     */
+    readCanvas(projectId: string): Promise<StudioCanvasNode[]>;
+    /**
+     * Persist a project's canvas nodes atomically (a crash never leaves a
+     * half-written canvas document behind).
+     * @param projectId - target project id.
+     * @param nodes - the full node list for the project.
+     */
+    writeCanvas(projectId: string, nodes: readonly StudioCanvasNode[]): Promise<void>;
+    /**
+     * Append one generated-media node to a project's canvas document. The Host
+     * writes this the moment an asset lands on disk, so the canvas reflects a
+     * successful generation deterministically (the client reloads the document
+     * on `tool/result`), independent of how the conversation event renders the
+     * tool result text.
+     * @param projectId - target project id.
+     * @param node - the node to append (id must be unique within the project).
+     */
+    appendCanvasNode(projectId: string, node: StudioCanvasNode): Promise<void>;
     /**
      * List all registered projects in creation order.
      * @returns the durable project records.
@@ -35,6 +61,13 @@ export declare class ProjectRegistry {
      * @returns the created project record.
      */
     create(name: string): Promise<StudioProject>;
+    /**
+     * Delete a project: remove its on-disk directory (registry, assets, canvas)
+     * and drop the record. Refuses when the resolved directory is not safely
+     * nested under the projects directory.
+     * @param projectId - target project id.
+     */
+    removeProject(projectId: string): Promise<void>;
     private readRegistry;
     private writeRegistry;
 }

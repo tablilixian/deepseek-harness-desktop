@@ -1,8 +1,9 @@
 /**
  * Canvas Studio browser API: same-origin fetch helpers over the project
- * registry routes (the community-market client fetch pattern).
+ * registry and canvas routes (the community-market client fetch pattern).
  */
 import type { StudioProject } from '../contracts/project.js'
+import type { StudioCanvasNode } from '../contracts/canvas.js'
 
 /** HTTP facts used to localize safe Client-facing Studio failures. */
 export class StudioApiError extends Error {
@@ -46,4 +47,48 @@ export async function createStudioProject(name: string, signal?: AbortSignal): P
     ...(signal === undefined ? {} : { signal }),
   }))
   return response.project
+}
+
+/** Delete a project by id (removes its directory and registry record). */
+export async function deleteStudioProject(id: string, signal?: AbortSignal): Promise<void> {
+  await readJson<{ ok: boolean }>(await fetch('/canvas-studio/projects', {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+}
+
+/**
+ * 把历史节点里写死的 `http://127.0.0.1:<port>/canvas-studio/...` 绝对 URL 归一化为
+ * 同源相对路径。渲染进程与 webServer 同源，相对 URL 自动解析到当前端口，桌面重启
+ * 换端口也不会 404（早期版本把端口写死在 URL 里，换端口后已有产物会失效）。
+ */
+function normalizeCanvasNodes(nodes: readonly StudioCanvasNode[]): StudioCanvasNode[] {
+  return nodes.map((node) => {
+    if (typeof node.url !== 'string') return node
+    const rewritten = node.url.replace(/^https?:\/\/127\.0\.0\.1:\d+(\/canvas-studio\/.*)$/, '$1')
+    return rewritten === node.url ? node : { ...node, url: rewritten }
+  })
+}
+
+/** Load a project's persisted canvas nodes (empty list when none). */
+export async function loadStudioCanvas(projectId: string, signal?: AbortSignal): Promise<readonly StudioCanvasNode[]> {
+  const response = await readJson<{ nodes: readonly StudioCanvasNode[] }>(
+    await fetch(`/canvas-studio/canvas?projectId=${encodeURIComponent(projectId)}`, {
+      cache: 'no-store',
+      ...(signal === undefined ? {} : { signal }),
+    }),
+  )
+  return normalizeCanvasNodes(response.nodes)
+}
+
+/** Persist a project's full canvas node list. */
+export async function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], signal?: AbortSignal): Promise<void> {
+  await readJson<{ ok: boolean }>(await fetch('/canvas-studio/canvas', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ projectId, nodes }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
 }

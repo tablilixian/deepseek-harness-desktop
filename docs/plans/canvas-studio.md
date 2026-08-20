@@ -306,3 +306,141 @@ P3「工具 + 产物托管」代码落地,构建与类型检查通过（`canvas-
 - **项目解析改为 Host 侧**:不再依赖客户端 `activeProjectId` 闭包,改由 `resolveProjectId(registry, exec.agent?.session.header.cwd)` 按会话工作区目录匹配 `project.dir`(精确匹配优先,否则最长前缀匹配)。因为客户端打开项目时 `ctx.workspaces.create({ path: project.dir })`,会话 `header.cwd` 即落在项目目录下,Host 据此反查项目 id。
 
 **验证**:重建后 `lib/client.js` 不再含 `require("@deepseek-ai/dsh-tools")` / `ctx.tools.register`(仅剩 `ctx.slots.register`);`lib/host-tools.js` 正确 `import { defineTool } from '@deepseek-ai/dsh-tools'` 并定义三工具;桌面 profile 的 `node_modules/canvas-studio` 是指向本工作区的 **symlink**,故重建 `lib/` 后下次启动即生效,无需重新打包 app。
+
+## 16. P4 最小版实现记录（2026-08-20）：生成即上画布
+
+### 目标
+agent 调用画布三工具成功后，把产物（图片/视频）**实时渲染到中间画布**（`csCanvas`），替换 P1 的静态占位「画布将在后续阶段提供」。
+
+### 架构决策（源码级核实）
+1. **事件入口 = `conversationEvents` 节点 definition（客户端）**。`tool/result` 是会话 **surface 事件**；客户端用 `ctx.conversationEvents.register(definition)` 接入（上游 `dsh-client-ui-conversation` 渲染工具结果同款机制）。契约要点：`kind` 全局唯一（多个 definition 可共存、不与内置 `tool-call` 冲突）；`target` 与 `buildViewNode` 必须成对声明。
+2. **副作用型节点**：`createAssetCaptureDefinition(hooks)` 返回 `kind:'canvas-studio-asset'`、`target:'chat'`、`buildViewNode→null` 的节点 —— match 三工具的 `tool/call`（start）与 `tool/result`（update），update 时从内容块抽取托管 URL 写入 store；对话里的工具卡片渲染仍由内置 `tool-call` 节点负责，不产生重复节点。`tool/result` 仅处理 `surfaceOp==='append'` 的追加事件，忽略 compaction 重放 / 崩溃合成的 closer（防重复写入）。
+3. **React 之外读写 store**：`apply` 里 `createProjectStore()` 得到 handle 后 `storeInstance = handle.create()`（root 作用域；框架按 handle×scopeKey 缓存实例，与 slots 框架共享同一实例），slots 注册改为 `store: () => storeHandle`。捕获节点经 `storeInstance.actions.pushAsset` 写入、`storeInstance.getSnapshot().selectedProjectId` 读当前选中项目。
+4. **项目归属（最小版取舍）**：按「当前选中项目」（`selectedProjectId`）归属，不做会话 cwd 反查（definition 回调拿不到 sessionId）；多项目并行生成时会归属到当前选中的项目。
+5. **asset-capture.ts 放 src/ 顶层**：Host tsc 产出 `lib/asset-capture.js` 供 Node 测试直连。只含 dsh-llm 的 **type-only** 导入 —— 不引 `dsh-client-runtime` 类型（那会把客户端运行时类型图拖进 Host tsc，触发上游 .d.ts 的 `sessions: ISessions vs SessionStore` 模块合并冲突，client 侧靠 `skipLibCheck` 掩盖、Host 侧没有）。definition 用**本地结构类型**描述，注册处由结构兼容自动匹配 `ConversationNodeDefinition`（`update` 的 context 参数放宽为 `{state: unknown}`、内部收窄，保证逆变兼容）。
+
+### 新增 / 修改文件
+- `src/asset-capture.ts`（新增，顶层）：`STUDIO_TOOL_KINDS`（工具名→kind）、`isStudioTool`、`extractAssetUrl`（正则从 renderResult 文本块抽 URL）、`createAssetCaptureDefinition(hooks)`（definition 工厂）。
+- `src/client/project-store.ts`（改）：state 加 `assets: Record<projectId, AssetItem[]>`；action 加 `pushAsset`（按 URL 去重）；新增 `lastAssetOf(state, projectId)` 派生。
+- `src/client/index.ts`（改）：`inject` 加 `'conversationEvents'`；共享 store 实例（`store: () => storeHandle`）；新增 `ctx.effect` 注册捕获节点。
+- `src/client/StudioFrame.tsx`（改）：中间栏读 `lastAssetOf(store, selectedProjectId)`，image→`<img>`、video→`<video controls>`，空态文案更新。
+- `src/client/styles.ts`（改）：新增 `.csCanvasMedia`（绝对定位铺满 + `object-fit: contain`）。
+- `tests/asset-capture.test.mjs`（新增）+ `package.json` 加 `test:smoke`（`node --test "tests/*.test.mjs"`）：8 个用例覆盖 `isStudioTool` / `extractAssetUrl` / `match`（含非 append surface 忽略）/ 生命周期（kind 映射、无 URL 不写、无选中项目不写、state 稳定）。
+
+### 验证
+- `corepack yarn workspace canvas-studio check`（build + verify:loader + typecheck）全绿；client bundle ≈23 kB。
+- `corepack yarn workspace canvas-studio test:smoke` **8/8 通过**。
+- 手动验收：`corepack yarn dev` → 打开/新建项目 → 对话让 agent 生成小猫 → 中间画布即时显示图片；再 `video_generate` → 画布显示可播放视频；切换项目 → 画布显示该项目最新产物。
+
+### 已知限制（最小版）
+- 只渲染「最新一张/帧」，无网格 / 时间线 / 历史回看（完整版再扩）。
+- 产物按当前选中项目归属，未按会话绑定项目反查。
+- 画布为内存态，重启不保留（产物文件在磁盘；列表 / 回看属后续增强）。
+
+### 下一步
+1. 桌面人工验收「生成即上画布」。
+2. 验收通过后提交 P4（排除 dirty 子模块）→ 推 fork。
+3. 完整版画布：网格 / 时间线 / 回看 / 按项目聚合、会话级项目归属、重启恢复。
+
+## 17. P4+ 完整版画布实现记录（2026-08-20）
+
+### 背景
+P4 最小版（生成即上画布）原定桌面人工验收，但彼时 Drama Backend 两端均不可用（本地 docker `wl-ai-director-app` 未起、远程 `117.50.108.73:8082` 不可达），且环境 `http_proxy`(Privoxy) 拦截所有出站含 localhost → Host 的 `fetch` 取不到产物。验收被卡。按"调整开发顺序、先把画布做到可验证 + 可持久化"的决策，直接落地**完整版画布（P4+）**，并把验收所需的可视化能力做成**后端无关**。
+
+### 数据模型升级（节点列表取代单一最新产物）
+- 新增 `src/contracts/canvas.ts`：`StudioCanvasNode`（`id/kind/url/x/y/width/height/createdAt/toolName/runId/origin/sourceIds`）+ `StudioCanvasDocument`（version + nodes）。Host/Client 双半 type-only 引用。
+- `src/client/project-store.ts`：`assets: Record<projectId, AssetItem[]>` 替换为 `nodes: Record<projectId, StudioCanvasNode[]>`；新增 action `setNodes`(载入)/`addAsset`(捕获→自动布局+血缘链接)/`moveNode`/`selectNode`/`removeNode`/`clearProject`；派生 `nodesOf`/`lastNodeOf`/`selectedNodeOf`。`addAsset` 自动网格布局新节点，并按 `sourceUrl` 反查已有节点写入 `sourceIds`（血缘即边，plan §7.3）。
+
+### 持久化（重启恢复）
+- `src/projects.ts`：新增 `canvasFile`/`readCanvas`(损坏/缺失→空列表)/`writeCanvas`(原子写，权限对齐 assets)。
+- `src/routes.ts`：新增 `GET/POST /canvas-studio/canvas`（`?projectId=` 取 / 同名 POST 存），信任模型对齐 assets 路由（loopback + 同源），body 上限 2000 节点。
+- `src/client/api.ts`：新增 `loadStudioCanvas`/`saveStudioCanvas`（同源 fetch）。
+- `src/client/index.ts`：`openProject` 在 `startSession` 后 `loadStudioCanvas` 载入；捕获 `addAsset` 后即时 `saveStudioCanvas`；拖拽结束 / 删除节点后持久化。
+
+### 画布组件（网格 + 平移/缩放/拖拽/选中 + 血缘 + 时间线/回看）
+- `src/client/canvas/CanvasSurface.tsx`：无限画布。CSS 网格背景随 `offset/scale` 平移缩放；背景 pointer-down 平移、节点 pointer-down 拖拽（canvas 坐标）、滚轮以光标为锚缩放（原生非 passive 监听以便 `preventDefault`）；`focusNodeId` 变化时把目标节点居中（时间线跳转）。
+- `src/client/canvas/CanvasNode.tsx`：节点盒。image→`<img>`、video→`<video controls>`、sticky/text/prompt→文本块；选中描边。
+- `src/client/canvas/CanvasEdges.tsx`：由 `sourceIds` 推导贝塞尔血缘边（无独立边表）。
+- `src/client/canvas/CanvasTimeline.tsx`：底部按 `createdAt` 排序的缩略图条，点击选中并居中（回看入口）。
+- `src/client/StudioFrame.tsx`：中间栏改为 `CanvasSurface` + `CanvasTimeline`；无项目/无产物空态；选中节点时显示工具条（删除节点）。所有颜色沿用 `--dsw-alias-*` token，跟随明暗主题。
+
+### Dev 种子（后端无关可视化验收）
+- `src/client/index.ts`：`?cs-dev-seed=1` 时，打开/新建项目若画布为空则注入示例（SVG 图 + 占位视频 + 便签，且视频 `sourceIds=['seed-image']` 演示血缘），并持久化。无需 Drama Backend 即可在桌面 GUI 看到 image/video/便签渲染、血缘连线、时间线回看、平移缩放拖拽、切换项目、空态。
+
+### 验证
+- `corepack yarn workspace canvas-studio check`（build + verify:loader + typecheck）全绿；client bundle ≈47 kB。
+- `corepack yarn workspace canvas-studio test:smoke` **10/10 通过**（isStudioTool/extractAssetUrl/match/生命周期/血缘 sourceUrl 捕获/无 URL 不写/无项目不写/状态稳定）。
+- 可视化验收待桌面人工（开项目 → `?cs-dev-seed=1` 看完整画布；后端恢复后去掉参数走真实 agent 生成）。
+
+### 已知限制（完整版）
+- 会话级项目归属仍按 `selectedProjectId`（每项目一 workspace，选中即会话项目，等价于会话级）。若要严格按 `sessionId` 反查，需 capture 回调能拿到 sessionId（当前拿不到，见 plan §16 架构决策 4）。
+- 节点位置为自动网格布局，未做自由碰撞/对齐辅助线；血缘边为纯贝塞尔，未做箭头/备注（plan §7.3 暂缓项）。
+- 单人单项目生成时归属正确；多项目并行生成仍归属当前选中项目（与最小版一致）。
+
+### 下一步
+1. 桌面人工验收「完整版画布」：`corepack yarn dev` → 打开/新建项目并加 `?cs-dev-seed=1` 看渲染/缩放/拖拽/时间线/血缘 → 去掉参数、后端恢复后走真实 agent 生成验收。
+2. 验收通过后提交 P4+（先 `git -C deepseek-harness checkout -- pnpm-lock.yaml` 还原子模块 → 只 stage `canvas-studio` 与 `docs` → commit → `push origin canvas-studio`）。
+3. （可选）严格会话级归属、节点对齐辅助线、网格/缩略图 LOD、undo/redo。
+
+## 18. 验收阻塞修复：项目列表 + 画布产物可见性（2026-08-20）
+
+### 问题
+桌面人工验收时发现两类问题：
+1. **项目列表**：打开时不自动加载（需手动点刷新）；可创建同名项目；无删除功能。
+2. **画布不显示已生成图片**：agent 调用 `image_generate` 后，即使产物文件已落盘，画布也不出现；agent 侧还报 "URL came back as undefined"。
+
+### 根因
+- 问题 1 是接线 / 功能缺口：列表仅在刷新按钮触发 `refreshProjects`，挂载时不调用；`create` 未做同名校验；缺删除链路（Host 路由 / registry / 客户端 API / UI）。
+- 问题 2 的关键矛盾：`image_generate` 全仓**仅 canvas-studio 的 Host 工具这一处定义**（`host-tools.ts` → `generateAsset` 必然返回带 `http://127.0.0.1:port/...` 的 `GenerateResult`，`renderResult` 不可能输出 undefined）。agent 看到 undefined 说明那次生成**实际抛错（后端仍不通）→ execute 异常 → agent 把错误误解为 undefined**；而"项目目录里的图"更可能来自别处 / 另一次成功写入。但用户核心诉求「生成成功（文件落盘）时画布必须显示」值得根治。原 capture 依赖 `tool/result` 事件里带 URL 的渲染文本 + `surfaceOp==='append'`，这条链路脆弱——一旦事件内容缺 URL 或被代理/渲染差异影响，画布就拿不到节点。
+
+### 修复（让 Host 成为画布节点的单一真相源）
+- **生成即写画布**：`src/generate.ts` 在产物落盘后调用 `registry.appendCanvasNode(projectId, node)`（节点 id = 资产 uuid，并把 `params.imageUrl` 反查已有节点写入 `sourceIds` 血缘）。文件落盘 = 画布必有节点，与事件渲染文本无关。
+- **capture 改为重载**：`src/asset-capture.ts` 的 `update` 在选中项目时改为调用 `hooks.reloadCanvas(projectId)`（从 Host `canvas.json` 重载），去掉脆弱的 URL 文本解析；放宽 `surfaceOp` 限制（重载幂等，重复无害）。`src/client/index.ts` 接线 `reloadCanvas` → `loadStudioCanvas` + `setNodes`。
+- **写画布 merge 保护**：`src/projects.ts` 的 `writeCanvas` 改为合并写——保留客户端整写未包含的 Host 侧节点，避免拖拽保存时误删刚生成的资产。
+- **项目列表自动加载**：`src/client/StudioFrame.tsx` 挂载时 `useEffect` 调用 `refreshProjects`，无需手动刷新。
+- **同名去重**：`src/projects.ts` `create` 增加大小写不敏感同名校验，重复则抛 `项目名已存在: <name>`；客户端 `createProject` 捕获后以错误条呈现。
+- **删除项目**：`src/projects.ts` 新增 `removeProject`（删目录 + 移除 registry 记录，校验目录嵌套安全）；`src/routes.ts` projects 路由新增 `DELETE`（读 body.id，同源校验）；`src/client/api.ts` 新增 `deleteStudioProject`；`src/client/index.ts` 新增 `deleteProject`（删后刷新列表、若删的是当前项目则清空选中 + 画布）；`src/client/ProjectList.tsx` 每行加删除按钮（`window.confirm` 二次确认）；`src/client/styles.ts` 加 `.csProjectDelete` 等样式（行变 flex 行布局，× 位于右端）。
+
+### 验证
+- `corepack yarn workspace canvas-studio check`（build + verify:loader + typecheck）全绿。
+- `corepack yarn workspace canvas-studio test:smoke` **8/8 通过**（capture 改为 reload 模型：match 放行任意 surfaceOp 的 studio 工具 tool/result；update 触发 reload；未选中项目不触发；start 解析 toolName/参考图；extractAssetUrl 单测保留）。
+- 即时缓解：即便 capture 事件未触发，重开项目也会通过 `loadStudioCanvas` 显示已生成节点。
+
+### 注意事项
+- agent 报 "undefined" 多因后端不通导致 `generateAsset` 抛错；后端恢复（drama-api 可达 + 启动桌面设 `NO_PROXY=localhost,127.0.0.1` 绕过 Privoxy）后，产物落盘即上画布。
+- 本次仍未提交，遵守仓库纪律（验收通过后排除 dirty 子模块、只 stage `canvas-studio` 与 `docs`）。
+
+### 下一步
+1. 桌面人工验收：开项目→列表自动出现；新建同名项目→报错拦截；删除→二次确认后消失且目录回收；生成图片（后端通）→ 画布即时显示并可重开验证。
+2. 通过后提交 P4+（还原子模块 → stage canvas-studio + docs → commit → push）。
+
+---
+
+## §19 「产物已写盘但画布空白」根治（会话级归属 + 相对 URL）
+
+### 现象
+agent 回复「小猪已保存到 `assets/cf53b4f7-....png`」，文件确实落盘，`canvas.json` 也确实写入节点（id/kind/url/x/y/origin/sourceIds 全对），但中间画布仍是空态。
+
+### 根因（诊断过程）
+逐层排查排除了数据层 / 路由 / 资源 / 构建 / 样式：
+- **数据层正确**：`~/.dsh/canvas-studio/projects/<id>/canvas.json` 有 3 个 image 节点（含猪）；`GET /canvas-studio/canvas?projectId=<id>` 返回 3 节点；`GET /canvas-studio/assets/...` 返回 **200**。
+- **构建新鲜**：`lib/client.js` 时间戳（11:53）早于猪节点写入（11:54），运行中的桌面加载的就是含 CanvasSurface / reload 的新代码。
+- **CSS 正确**：`.csNode` 有 `position:absolute`，节点在 (0,0) 必然可见。
+- **结论——选中态脱节**：Host 写入产物时用「会话 cwd（workspace 目录）」解析 projectId（见 `host-tools.ts resolveProjectId`），**与客户端 `selectedProjectId` 无关**。而客户端画布显示完全依赖 `selectedProjectId`——它只在用户**手动点击项目行**（`openProject`→`select`）时设置，是内存态。应用重启后会话自动恢复到某 workspace（如 画布1），Host 把猪写进 画布1 的 canvas.json，但客户端 `selectedProjectId` 仍是 `null` → 画布空态。这正是计划中标注过的「会话级项目归属」缺陷。
+
+### 修复
+- **会话级归属（核心）**：`src/client/index.ts` 新增 `resolveActiveProjectId()` / `syncActiveProject()`：
+  - 优先取手动 `selectedProjectId`；为空时从 `ctx.workspaces.list.getSnapshot()` 读 `recentWorkspaceId`（由当前会话推导），在 `items` 里找到该 workspace，用 `view.path === project.dir` 映射回项目。
+  - 新增 `ctx.effect` 订阅 `ctx.workspaces.list`（启动恢复会话时即触发），`select` 对齐 + `loadStudioCanvas` 载入画布；`refreshProjects` 列表就绪后也调用一次。
+  - capture 的 `getSelectedProjectId` 改用 `resolveActiveProjectId()`，保证「生成完成重载」同样跟随会话 workspace。
+- **相对 URL（防端口漂移）**：`src/generate.ts` 产物 URL 由写死的 `http://127.0.0.1:${port}/canvas-studio/assets/...` 改为同源相对 `/canvas-studio/assets/...`（渲染进程与 webServer 同源，自动解析当前端口）；顺带删除 `port` 参数链路（`generateAsset` / `runGeneration` / `createStudioTools` / `index.ts` / `routes.ts` 调用点）。`src/client/api.ts` 的 `loadStudioCanvas` 把历史节点里的旧绝对 URL 归一化为相对路径，桌面重启换端口也不 404。
+
+### 验证
+- `corepack yarn workspace canvas-studio check` 全绿（build + verify:loader + typecheck；`item.workspaceId`/`item.path` 经 `IWorkspaces.list: ObservableSnapshot<WorkspaceListState>` 类型通过）。
+- `corepack yarn workspace canvas-studio test:smoke` **8/8 通过**（capture reload 模型测试无回归）。
+- 产物确认：`lib/generate.js` 产物 URL 为相对路径；`lib/client.js` 含 `recentWorkspaceId`/`baselinesReady`/URL 归一化逻辑。
+
+### 注意事项
+- **需重启桌面生效**：构建产物已更新，但运行中的 Electron 渲染进程仍是旧 bundle；`corepack yarn dev` 重启后，会话自动恢复的 workspace 会被订阅映射为画布项目，猪（及其余历史产物）直接可见，无需手动点击。
+- 上一轮「生成即写画布」的修复保证了数据层（节点必落盘），本轮补齐展示层（选中态跟随会话）——两者缺一不可。
+- 仍未提交，遵守仓库纪律（验收通过后排除 dirty 子模块、只 stage `canvas-studio` 与 `docs`）。

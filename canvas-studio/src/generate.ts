@@ -14,6 +14,7 @@ import {
   sizeForAspectRatio,
 } from './config.js'
 import type { ProjectRegistry } from './projects.js'
+import type { StudioCanvasNode } from './contracts/canvas.js'
 
 /** 一次生成的请求参数（来自客户端工具）。 */
 export interface GenerateParams {
@@ -83,7 +84,6 @@ async function callDrama(
 /**
  * 执行一次生成并落盘。
  * @param registry - 项目注册表（提供 assetsDir）。
- * @param port - webServer 监听端口，用于拼装产物 URL。
  * @param tool - 工具名（image_generate / video_generate / video_composite）。
  * @param projectId - 目标项目 id。
  * @param params - 生成参数。
@@ -91,7 +91,6 @@ async function callDrama(
  */
 export async function generateAsset(
   registry: ProjectRegistry,
-  port: number,
   tool: string,
   projectId: string,
   params: GenerateParams,
@@ -174,13 +173,43 @@ export async function generateAsset(
   if (!download.ok) throw new Error(`产物下载失败: ${download.status}`)
   const bytes = Buffer.from(await download.arrayBuffer())
 
+  const assetId = newAssetId()
   const extension = isVideo ? 'mp4' : 'png'
-  const filename = `${newAssetId()}.${extension}`
+  const filename = `${assetId}.${extension}`
   const directory = registry.assetsDir(projectId)
   await mkdir(directory, { recursive: true })
   await writeFile(join(directory, filename), bytes)
 
-  const url = `http://127.0.0.1:${port}/canvas-studio/assets/${projectId}/${filename}`
+  // 同源相对路径：渲染进程与 webServer 同源，相对 URL 自动解析到当前端口，
+  // 桌面重启换端口也不失效（此前写死 127.0.0.1:<port> 在端口变化后会 404）。
+  const url = `/canvas-studio/assets/${projectId}/${filename}`
+
+  // Persist a canvas node the moment the asset lands on disk (Host is the
+  // source of truth). The client reloads the canvas document on tool/result,
+  // so a successful generation shows on the canvas even if the conversation
+  // event's rendered text carries no usable URL.
+  const sourceIds: string[] = []
+  if (params.imageUrl !== undefined) {
+    const prior = await registry.readCanvas(projectId)
+    const source = prior.find((node) => node.url === params.imageUrl)
+    if (source !== undefined) sourceIds.push(source.id)
+  }
+  const node: StudioCanvasNode = {
+    id: assetId,
+    kind: isVideo ? 'video' : 'image',
+    url,
+    x: 0,
+    y: 0,
+    width: size.width,
+    height: size.height,
+    createdAt: Date.now(),
+    toolName: tool,
+    runId: assetId,
+    origin: 'agent',
+    sourceIds,
+  }
+  await registry.appendCanvasNode(projectId, node)
+
   const result: GenerateResult = { url, width: size.width, height: size.height }
   if (isVideo) result.duration = params.duration ?? (tool === 'video_composite' ? 12 : 5)
   return result

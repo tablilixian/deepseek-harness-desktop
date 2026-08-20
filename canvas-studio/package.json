@@ -42,6 +42,7 @@
     "build": "node scripts/clean.mjs && tsdown && tsc -p tsconfig.json && tsc -p tsconfig.client.json --emitDeclarationOnly",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "verify:loader": "node scripts/verify-client-loader.mjs",
+    "test:smoke": "node --test \"tests/*.test.mjs\"",
     "check": "yarn run build && yarn run verify:loader && yarn run typecheck",
     "dev:install": "node scripts/dev-install.mjs"
   },

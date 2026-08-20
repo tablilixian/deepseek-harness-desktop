@@ -54,16 +54,15 @@ async function resolveProjectId(registry, cwd) {
     return match;
 }
 /** 解析项目后调用 Host 的 generateAsset 执行一次生成。 */
-function runGeneration(registry, port, tool, params, signal, cwd) {
-    return resolveProjectId(registry, cwd).then((projectId) => generateAsset(registry, port, tool, projectId, params, signal));
+function runGeneration(registry, tool, params, signal, cwd) {
+    return resolveProjectId(registry, cwd).then((projectId) => generateAsset(registry, tool, projectId, params, signal));
 }
 /**
  * 创建 P3 媒体生成工具集（供 Host 的 `ctx.tools.register` 逐条注册）。
  * @param registry - 项目注册表。
- * @param port - webServer 监听端口，用于拼装产物 URL。
  * @returns 三个 `defineTool` 定义。
  */
-export function createStudioTools(registry, port) {
+export function createStudioTools(registry) {
     return [
         defineTool({
             name: 'image_generate',
@@ -77,7 +76,7 @@ export function createStudioTools(registry, port) {
             output: { schema: resultSchema, render: renderResult },
             async execute(args, exec) {
                 const a = args;
-                return runGeneration(registry, port, 'image_generate', {
+                return runGeneration(registry, 'image_generate', {
                     prompt: a.prompt,
                     ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
                     ...(a.imageUrl !== undefined ? { imageUrl: a.imageUrl } : {}),
@@ -97,7 +96,7 @@ export function createStudioTools(registry, port) {
             output: { schema: resultSchema, render: renderResult },
             async execute(args, exec) {
                 const a = args;
-                return runGeneration(registry, port, 'video_generate', {
+                return runGeneration(registry, 'video_generate', {
                     prompt: a.prompt,
                     imageUrl: a.imageUrl,
                     ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
@@ -117,7 +116,7 @@ export function createStudioTools(registry, port) {
             output: { schema: resultSchema, render: renderResult },
             async execute(args, exec) {
                 const a = args;
-                return runGeneration(registry, port, 'video_composite', {
+                return runGeneration(registry, 'video_composite', {
                     prompt: a.prompt,
                     ...(a.imageUrls !== undefined ? { imageUrls: a.imageUrls } : {}),
                     ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),

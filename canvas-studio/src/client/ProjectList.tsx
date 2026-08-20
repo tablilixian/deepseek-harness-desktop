@@ -11,6 +11,7 @@ export interface ProjectListProps {
   onRefresh(): void
   onCreate(name: string): Promise<void>
   onOpen(project: StudioProject): void
+  onDelete(projectId: string): void
 }
 
 /** Relative-day label for the project creation date. */
@@ -23,9 +24,10 @@ function createdLabel(project: StudioProject): string {
 /**
  * The studio project list: an inline create form plus one row per project.
  * Clicking a row opens the project (session binding happens in the callback).
+ * Each row also carries a delete affordance (confirmed before firing).
  */
 function ProjectListInner(props: ProjectListProps) {
-  const { projects: rawProjects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen } = props
+  const { projects: rawProjects, selectedProjectId, phase, error, creating, onRefresh, onCreate, onOpen, onDelete } = props
   const projects = Array.isArray(rawProjects) ? rawProjects : []
   const [formOpen, setFormOpen] = useState(false)
   const [draftName, setDraftName] = useState('')
@@ -83,15 +85,30 @@ function ProjectListInner(props: ProjectListProps) {
         </div>
       )}
       {projects.map(project => (
-        <button
-          type="button"
+        <div
           key={project.id}
           className={project.id === selectedProjectId ? 'csProjectItem csProjectItemActive' : 'csProjectItem'}
           onClick={() => onOpen(project)}
         >
-          <span className="csProjectName">{project.name}</span>
-          <span className="csProjectDate">{createdLabel(project)}</span>
-        </button>
+          <span className="csProjectMeta">
+            <span className="csProjectName">{project.name}</span>
+            <span className="csProjectDate">{createdLabel(project)}</span>
+          </span>
+          <button
+            type="button"
+            className="csProjectDelete"
+            title="删除项目"
+            disabled={creating}
+            onClick={(event) => {
+              event.stopPropagation()
+              if (window.confirm(`确定删除项目「${project.name}」？该操作会同时删除其目录与画布，不可恢复。`)) {
+                void onDelete(project.id)
+              }
+            }}
+          >
+            ×
+          </button>
+        </div>
       ))}
     </div>
   )

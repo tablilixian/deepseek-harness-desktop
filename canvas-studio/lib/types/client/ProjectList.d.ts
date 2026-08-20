@@ -9,6 +9,7 @@ export interface ProjectListProps {
     onRefresh(): void;
     onCreate(name: string): Promise<void>;
     onOpen(project: StudioProject): void;
+    onDelete(projectId: string): void;
 }
 /**
  * The studio project list: an inline create form plus one row per project.
