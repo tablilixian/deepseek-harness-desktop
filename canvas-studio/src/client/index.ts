@@ -1,12 +1,12 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import type { StudioCanvasNode } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
 import type { StudioProject } from '../contracts/project.js'
 import { createAssetCaptureDefinition } from '../asset-capture.js'
 import { createStudioProject, deleteStudioProject, listStudioProjects, loadStudioCanvas, retryStudioNode, saveStudioCanvas } from './api.js'
 import { StudioLayoutController } from './layout-controller.js'
-import { createProjectStore } from './project-store.js'
+import { createProjectStore, viewOf } from './project-store.js'
 import { installStudioStyles } from './styles.js'
 import { StudioFrame } from './StudioFrame.js'
 
@@ -116,6 +116,16 @@ export function apply(ctx: ClientContext): void {
   // 两个实例互不可见，导致「选中了项目但画布永远空态」。
   const storeInstance = createProjectStore().create()
 
+  // 载入结果（节点 + 视图）统一进 store：视图缺失（v3 之前的文档）时保持
+  // 默认视口并标记 saved=false，帧层会对内容适配一次视野。
+  const applyLoadedCanvas = (
+    projectId: string,
+    loaded: { nodes: readonly StudioCanvasNode[]; view: StudioCanvasView | null },
+  ): void => {
+    storeInstance.actions.setNodes(projectId, loaded.nodes)
+    storeInstance.actions.setView(projectId, loaded.view ?? {}, loaded.view !== undefined)
+  }
+
   // 会话级项目归属：画布应跟随「当前会话绑定的 workspace」，而非仅用户手动点击
   // 的项目行。Host 写入产物时用的是会话 cwd（workspace 目录）解析出的 projectId；
   // 应用重启后会话会自动恢复到某 workspace，但 selectedProjectId 是内存态会丢失，
@@ -140,7 +150,7 @@ export function apply(ctx: ClientContext): void {
     storeInstance.actions.select(id)
     void (async () => {
       try {
-        storeInstance.actions.setNodes(id, await loadStudioCanvas(id))
+        applyLoadedCanvas(id, await loadStudioCanvas(id))
       } catch {
         /* 载入失败静默：下一次切换 / 重载仍会尝试 */
       }
@@ -155,8 +165,7 @@ export function apply(ctx: ClientContext): void {
     // 占位节点，失败时经 tool/result 的 data.error 标记错误。
     const reloadCanvas = async (projectId: string): Promise<void> => {
       try {
-        const loaded = await loadStudioCanvas(projectId)
-        storeInstance.actions.setNodes(projectId, loaded)
+        applyLoadedCanvas(projectId, await loadStudioCanvas(projectId))
       } catch {
         /* 重载失败静默：下一次打开项目仍会载入 */
       }
@@ -217,7 +226,7 @@ export function apply(ctx: ClientContext): void {
     if (node === undefined) return
     try {
       await retryStudioNode(projectId, node, overrides)
-      storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId))
+      applyLoadedCanvas(projectId, await loadStudioCanvas(projectId))
     } catch (cause) {
       storeInstance.actions.markPendingError(
         projectId,
@@ -251,7 +260,8 @@ export function apply(ctx: ClientContext): void {
           }
         }
         const persistCanvas = async (projectId: string): Promise<void> => {
-          await saveStudioCanvas(projectId, storeInstance.getSnapshot().nodes[projectId] ?? [])
+          const snapshot = storeInstance.getSnapshot()
+          await saveStudioCanvas(projectId, snapshot.nodes[projectId] ?? [], viewOf(snapshot, projectId).view)
         }
         const openProject = async (project: StudioProject): Promise<void> => {
           storeInstance.actions.select(project.id)
@@ -264,13 +274,13 @@ export function apply(ctx: ClientContext): void {
             // so the conversation header matches the project list.
             await ctx.workspaces.rename(workspace.workspaceId, project.name)
             ctx.workspaces.startSession(workspace.workspaceId)
-            // P4+：载入持久化画布；dev 模式下若项目为空则注入种子。
+            // P4+：载入持久化画布（含视口）；dev 模式下若项目为空则注入种子。
             const loaded = await loadStudioCanvas(project.id)
-            storeInstance.actions.setNodes(project.id, loaded)
-            if (devSeed && loaded.length === 0) {
+            applyLoadedCanvas(project.id, loaded)
+            if (devSeed && loaded.nodes.length === 0) {
               const seeded = seedNodes()
               storeInstance.actions.setNodes(project.id, seeded)
-              await saveStudioCanvas(project.id, seeded)
+              await saveStudioCanvas(project.id, seeded, viewOf(storeInstance.getSnapshot(), project.id).view)
             }
           } catch (cause) {
             storeInstance.actions.setFailed(cause instanceof Error ? cause.message : '项目会话绑定失败')

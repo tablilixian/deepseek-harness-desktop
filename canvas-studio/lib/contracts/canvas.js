@@ -11,8 +11,16 @@
  * Bloodline is derived from `sourceIds` at render time — there is no separate
  * edge table (plan §7.3: bloodline IS the edge).
  */
-/** Current canvas document version (2: S1 node-model extension). */
-export const CANVAS_DOCUMENT_VERSION = 2;
+/** Current canvas document version (3: persisted viewport/panel state). */
+export const CANVAS_DOCUMENT_VERSION = 3;
+/** Viewport defaults used when a document predates v3 or a field is invalid. */
+export const VIEW_DEFAULTS = {
+    x: 0,
+    y: 0,
+    scale: 1,
+    layersOpen: true,
+    minimapVisible: true,
+};
 /** Defaults applied when migrating nodes that predate a field. */
 export const NODE_DEFAULTS = {
     locked: false,

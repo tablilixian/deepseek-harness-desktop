@@ -455,3 +455,43 @@ agent 回复「小猪已保存到 `assets/cf53b4f7-....png`」，文件确实落
 - **上游事实(S7 依据)**：无 `tool/error` 事件,错误在 `tool/result` 的 `data.error`;`ctx.sessions` 是合法 client inject,`session.cancel()` 打断。
 - **注意**：根级 `corepack yarn check` 仍因缺失 `dsh-community-fabric`/`dsh-community-market` 包失败(既有仓库状态,与插件无关);验证以 workspace 级 check + smoke 为准。
 - 详细状态见 [`canvas-studio-handoff.md`](./canvas-studio-handoff.md)(重写版:当前状态/S1–S7 摘要/已验证机制/命令/下一步)。
+
+## 21. 九工具扩展 + 画布体验修复(2026-08-21)
+
+### 21.1 媒体工具扩展到 9 个(契约见 [`canvas-studio-tools.md`](./canvas-studio-tools.md))
+
+- 新增 `prompt_enhance` / `upload_image` / `image2vl` / `style_transfer` / `storyboard_generate` / `deduction`;`config.ts` ENDPOINTS 扩到 13 个端点;`STUDIO_TOOL_KINDS` 增 `style_transfer`/`storyboard_generate`(画布捕获)。
+- **核心规则**:所有图片输入只接受 `filename`(先 `upload_image`);`upload_image` 接受相对 URL 并按 webServer 端口补全(`createStudioTools(registry, port)` 恢复传端口,仅 Host 内部 fetch 用,产物 URL 仍相对)。
+- 已声明未接工具的端点:`txt2imageanime` / `inpaint` / `videoMkrGrid`(九宫格,后续增强)。
+
+### 21.2 视频不能播放(修复)
+
+- 根因一:`styles.ts` `.csNodeMedia` 对 img/video 统一 `pointer-events:none`,视频原生控制条收不到任何点击 → 现仅 `img.csNodeMedia` 保持 none。
+- 根因二(加固):产物路由不支持 Range → 补单段字节范围(206 + Content-Range + Accept-Ranges,非法 416),支持流式播放与拖进度条。
+
+### 21.3 视图持久化(canvas.json v3)
+
+- 契约:`StudioCanvasView {x,y,scale,layersOpen,minimapVisible}` + 文档 `view?` + `CANVAS_DOCUMENT_VERSION=3`;新增纯函数模块 `src/canvas-view.ts`(`clampViewScale`/`normalizeCanvasView`/`computeArrangeLayout`,lib 产物可被 node --test 直连)。
+- Host:`readCanvas` 返回整文档;`writeCanvas(projectId, nodes, view?)` 合并写,Host 写(generate 落盘)不传 view 时保留已存视图;路由 GET 带 view、POST 收 view(lenient 校验)。
+- Client:store 增 `views`/`setView`/`viewOf`(常量兜底防快照抖动);CanvasSurface 改**受控视图**;帧层 400ms 防抖保存;旧项目无存档视图首次载入自动适配一次视野。
+
+### 21.4 工具栏精简 + 整理布局重写
+
+- 移除六种对齐与水平/垂直分布按钮及 store 的 `alignNodes`/`distributeNodes`;只留「整理布局」。
+- 整理算法 = 无重叠网格:单元尺寸取最大节点+间距、组盒子随行且子图层保持相对偏移、按血缘深度+创建时间排序;整理后自动适配视野(fitPendingRef 等新坐标渲染后 fit)。
+
+### 21.5 画布跳动 + 悬停跟随(修复)
+
+- 跳动:时间线点击后 focusNodeId effect 依赖 nodes,拖拽帧/生成重载都重新居中 → 改为仅在 focusNodeId 变化时居中一次(lastFocusedRef,nodes 走 ref)。
+- 悬停跟随:手势空闲态原是 `'pan'`(坐标残留 0,0),悬停 pointermove 即平移 → 引入 `'none'` 空闲态 + `buttons===0` 自愈结束手势。
+
+### 21.6 验证与事故
+
+- `check` 全绿;`test:smoke` **21/16→21**(generate mock 升 v3 文档形态;新增 canvas-view 5 用例:规范化/钳制/无重叠/组随行/空表)。
+- **事故**:带类型错误构建(clean 后 tsc 失败)导致 `lib/` 残缺,桌面启动黑屏。纪律:**启动桌面前必须完整跑过 `check`**;重启前清理 Singleton 锁。
+
+### 21.7 遗留与下一步
+
+1. 桌面可视化验收(§10.1 清单)。
+2. P6 创作规范 skill:`@deepseek-ai/dsh-skill` 依赖已声明(lockfile 待更新);实现 `src/skills/creation-spec.ts` + Host inject `'skills'` + smoke 测试;上游机制见 handoff §4.24(base 服务 + preset 挂 tool-skill 才对模型可见)。
+3. P6 收尾:dev-install 完善 + 双面兼容验证;技术债与可选增强见 handoff §10。

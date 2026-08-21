@@ -12,7 +12,9 @@ window.__ModuleLoader__.load({
 		const STUDIO_TOOL_KINDS = {
 			image_generate: "image",
 			video_generate: "video",
-			video_composite: "video"
+			video_composite: "video",
+			style_transfer: "image",
+			storyboard_generate: "image"
 		};
 		/** 判断工具名是否属于画布媒体工具。 */
 		function isStudioTool(name) {
@@ -95,6 +97,114 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/contracts/canvas.ts
+		/** Viewport defaults used when a document predates v3 or a field is invalid. */
+		const VIEW_DEFAULTS = {
+			x: 0,
+			y: 0,
+			scale: 1,
+			layersOpen: true,
+			minimapVisible: true
+		};
+		//#endregion
+		//#region src/canvas-view.ts
+		/** Zoom clamp range (matches the surface wheel/zoom clamp). */
+		const MIN_VIEW_SCALE = .1;
+		/** Clamp a zoom factor into the supported range. */
+		function clampViewScale(scale) {
+			return Math.min(5, Math.max(MIN_VIEW_SCALE, scale));
+		}
+		/**
+		* Coerce an unknown parsed `view` value into a safe viewport. Returns
+		* `undefined` when the value is absent or not an object, so callers can
+		* distinguish "no saved view" (fit content instead) from a default one.
+		* Invalid individual fields fall back to their defaults; scale is clamped.
+		*/
+		function normalizeCanvasView(value) {
+			if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+			const raw = value;
+			const numberOr = (candidate, fallback) => typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
+			const boolOr = (candidate, fallback) => typeof candidate === "boolean" ? candidate : fallback;
+			return {
+				x: numberOr(raw.x, VIEW_DEFAULTS.x),
+				y: numberOr(raw.y, VIEW_DEFAULTS.y),
+				scale: clampViewScale(numberOr(raw.scale, VIEW_DEFAULTS.scale)),
+				layersOpen: boolOr(raw.layersOpen, VIEW_DEFAULTS.layersOpen),
+				minimapVisible: boolOr(raw.minimapVisible, VIEW_DEFAULTS.minimapVisible)
+			};
+		}
+		/** Arrange-grid gaps between cells (canvas-space pixels). */
+		const ARRANGE_GAP_X = 48;
+		const ARRANGE_GAP_Y = 48;
+		const ARRANGE_ORIGIN = 40;
+		/**
+		* Compute the auto-arrange layout: an overlap-free grid over top-level units
+		* (nodes without a live parent), ordered by bloodline depth then creation
+		* time. Group nodes travel with their children (relative offsets inside the
+		* group are preserved), so a group's box keeps wrapping its members and no
+		* two boxes can overlap regardless of user-resized sizes.
+		* @returns the new canvas-space position per moved node id.
+		*/
+		function computeArrangeLayout(nodes) {
+			const positions = /* @__PURE__ */ new Map();
+			if (nodes.length === 0) return positions;
+			const byId = new Map(nodes.map((node) => [node.id, node]));
+			const depthOf = (node) => {
+				let maxDepth = 0;
+				const seen = /* @__PURE__ */ new Set([node.id]);
+				const queue = [...node.sourceIds, ...node.parentId !== void 0 ? [node.parentId] : []].map((id) => ({
+					id,
+					depth: 1
+				}));
+				while (queue.length > 0) {
+					const current = queue.shift();
+					if (seen.has(current.id)) continue;
+					seen.add(current.id);
+					maxDepth = Math.max(maxDepth, current.depth);
+					const parent = byId.get(current.id);
+					if (parent === void 0) continue;
+					for (const next of [...parent.sourceIds, ...parent.parentId !== void 0 ? [parent.parentId] : []]) queue.push({
+						id: next,
+						depth: current.depth + 1
+					});
+				}
+				return maxDepth;
+			};
+			const units = [];
+			const childrenByParent = /* @__PURE__ */ new Map();
+			for (const node of nodes) if (node.parentId === void 0 || !byId.has(node.parentId)) units.push({
+				node,
+				children: [],
+				depth: depthOf(node)
+			});
+			else {
+				const siblings = childrenByParent.get(node.parentId) ?? [];
+				siblings.push(node);
+				childrenByParent.set(node.parentId, siblings);
+			}
+			for (const unit of units) unit.children = childrenByParent.get(unit.node.id) ?? [];
+			units.sort((left, right) => left.depth !== right.depth ? left.depth - right.depth : left.node.createdAt - right.node.createdAt);
+			if (units.length === 0) return positions;
+			const cellWidth = Math.max(...units.map((unit) => unit.node.width)) + ARRANGE_GAP_X;
+			const cellHeight = Math.max(...units.map((unit) => unit.node.height)) + ARRANGE_GAP_Y;
+			const columns = Math.ceil(Math.sqrt(units.length));
+			units.forEach((unit, index) => {
+				const targetX = ARRANGE_ORIGIN + index % columns * cellWidth;
+				const targetY = ARRANGE_ORIGIN + Math.floor(index / columns) * cellHeight;
+				const deltaX = targetX - unit.node.x;
+				const deltaY = targetY - unit.node.y;
+				positions.set(unit.node.id, {
+					x: targetX,
+					y: targetY
+				});
+				for (const child of unit.children) positions.set(child.id, {
+					x: child.x + deltaX,
+					y: child.y + deltaY
+				});
+			});
+			return positions;
+		}
+		//#endregion
 		//#region src/client/api.ts
 		/** HTTP facts used to localize safe Client-facing Studio failures. */
 		var StudioApiError = class extends Error {
@@ -152,21 +262,26 @@ window.__ModuleLoader__.load({
 				};
 			});
 		}
-		/** Load a project's persisted canvas nodes (empty list when none). */
+		/** Load a project's persisted canvas (nodes + viewport; view is null pre-v3). */
 		async function loadStudioCanvas(projectId, signal) {
-			return normalizeCanvasNodes((await readJson(await fetch(`/canvas-studio/canvas?projectId=${encodeURIComponent(projectId)}`, {
+			const response = await readJson(await fetch(`/canvas-studio/canvas?projectId=${encodeURIComponent(projectId)}`, {
 				cache: "no-store",
 				...signal === void 0 ? {} : { signal }
-			}))).nodes);
+			}));
+			return {
+				nodes: normalizeCanvasNodes(response.nodes),
+				view: normalizeCanvasView(response.view) ?? null
+			};
 		}
-		/** Persist a project's full canvas node list. */
-		async function saveStudioCanvas(projectId, nodes, signal) {
+		/** Persist a project's full canvas node list plus the current viewport state. */
+		async function saveStudioCanvas(projectId, nodes, view, signal) {
 			await readJson(await fetch("/canvas-studio/canvas", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
 					projectId,
-					nodes
+					nodes,
+					view
 				}),
 				...signal === void 0 ? {} : { signal }
 			}));
@@ -297,6 +412,16 @@ window.__ModuleLoader__.load({
 			if (projectId === null) return [];
 			return state.nodes[projectId] ?? [];
 		}
+		/** Shared fallback so `viewOf` never allocates (stable snapshot identity). */
+		const DEFAULT_VIEW_ENTRY = {
+			view: VIEW_DEFAULTS,
+			saved: false
+		};
+		/** 取某项目的视口条目（缺失时回退默认值，`saved: false`）。 */
+		function viewOf(state, projectId) {
+			if (projectId === null) return DEFAULT_VIEW_ENTRY;
+			return state.views[projectId] ?? DEFAULT_VIEW_ENTRY;
+		}
 		/** 取当前选中的节点。 */
 		function selectedNodeOf(state) {
 			if (state.selectedNodeId === null || state.selectedProjectId === null) return null;
@@ -329,38 +454,6 @@ window.__ModuleLoader__.load({
 				height: maxY - minY
 			};
 		}
-		/** 血缘深度（sourceIds/parentId 链长），用于自动布局分层。 */
-		function depthOf(byId, node, seen) {
-			if (seen.has(node.id)) return 0;
-			seen.add(node.id);
-			const parents = [...node.sourceIds, ...node.parentId !== void 0 ? [node.parentId] : []];
-			let maxDepth = 0;
-			for (const parentId of parents) {
-				const parent = byId.get(parentId);
-				if (parent === void 0) continue;
-				maxDepth = Math.max(maxDepth, depthOf(byId, parent, seen) + 1);
-			}
-			return maxDepth;
-		}
-		/** 简化版血缘自动布局：按深度分层，每层横向排布（reference autoLayout 的树语义降级版）。 */
-		function layoutByDepth(nodes) {
-			const byId = new Map(nodes.map((node) => [node.id, node]));
-			const depths = /* @__PURE__ */ new Map();
-			for (const node of nodes) depths.set(node.id, depthOf(byId, node, /* @__PURE__ */ new Set()));
-			const maxDepth = Math.max(0, ...depths.values());
-			const column = /* @__PURE__ */ new Map();
-			const positions = /* @__PURE__ */ new Map();
-			for (const node of [...nodes].sort(compareNodes)) {
-				const depth = depths.get(node.id) ?? 0;
-				const index = column.get(depth) ?? 0;
-				column.set(depth, index + 1);
-				positions.set(node.id, {
-					x: LAYOUT.origin + index * LAYOUT.stepX,
-					y: LAYOUT.origin + depth * (LAYOUT.stepY + 60) + (maxDepth - depth) * 0
-				});
-			}
-			return positions;
-		}
 		/** 快照当前节点列表进历史（内部实现：先截断 redo 尾部，再压入）。 */
 		function snapshotHistory(history, historyIndex, projectId, nodes) {
 			const trimmed = history.slice(0, historyIndex + 1);
@@ -388,6 +481,7 @@ window.__ModuleLoader__.load({
 					error: null,
 					creating: false,
 					nodes: {},
+					views: {},
 					history: [],
 					historyIndex: -1,
 					clipboard: []
@@ -426,6 +520,23 @@ window.__ModuleLoader__.load({
 						draft.nodes = {
 							...draft.nodes,
 							[projectId]: clean
+						};
+					},
+					setView: (draft, projectId, patch, saved) => {
+						const current = draft.views[projectId] ?? {
+							view: VIEW_DEFAULTS,
+							saved: false
+						};
+						draft.views = {
+							...draft.views,
+							[projectId]: {
+								view: {
+									...current.view,
+									...patch,
+									scale: clampViewScale(patch.scale ?? current.view.scale)
+								},
+								saved: saved ?? current.saved
+							}
 						};
 					},
 					addAsset: (draft, projectId, asset) => {
@@ -751,78 +862,13 @@ window.__ModuleLoader__.load({
 						draft.selectedNodeIds = draft.selectedNodeIds.filter((id) => id !== groupId);
 						if (draft.selectedNodeId === groupId) draft.selectedNodeId = null;
 					},
-					alignNodes: (draft, projectId, ids, alignment) => {
-						const existing = draft.nodes[projectId];
-						if (existing === void 0 || ids.length < 2) return;
-						const byId = new Map(existing.map((node) => [node.id, node]));
-						const members = ids.map((id) => byId.get(id)).filter((node) => node !== void 0);
-						const bounds = boundsOf(members);
-						if (bounds === null) return;
-						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
-						draft.history = history.history;
-						draft.historyIndex = history.historyIndex;
-						const updates = /* @__PURE__ */ new Map();
-						for (const node of members) {
-							let x = node.x;
-							let y = node.y;
-							if (alignment === "left") x = bounds.x;
-							else if (alignment === "center") x = bounds.x + (bounds.width - node.width) / 2;
-							else if (alignment === "right") x = bounds.x + bounds.width - node.width;
-							else if (alignment === "top") y = bounds.y;
-							else if (alignment === "middle") y = bounds.y + (bounds.height - node.height) / 2;
-							else if (alignment === "bottom") y = bounds.y + bounds.height - node.height;
-							updates.set(node.id, {
-								x,
-								y
-							});
-						}
-						draft.nodes = {
-							...draft.nodes,
-							[projectId]: existing.map((node) => {
-								const update = updates.get(node.id);
-								return update === void 0 ? node : {
-									...node,
-									...update
-								};
-							})
-						};
-					},
-					distributeNodes: (draft, projectId, ids, direction) => {
-						const existing = draft.nodes[projectId];
-						if (existing === void 0 || ids.length < 3) return;
-						const byId = new Map(existing.map((node) => [node.id, node]));
-						const members = ids.map((id) => byId.get(id)).filter((node) => node !== void 0);
-						const sorted = direction === "horizontal" ? [...members].sort((left, right) => left.x - right.x) : [...members].sort((left, right) => left.y - right.y);
-						if (sorted.length < 3) return;
-						const first = sorted[0];
-						const last = sorted[sorted.length - 1];
-						const gap = (direction === "horizontal" ? last.x + last.width - first.x : last.y + last.height - first.y) / (sorted.length - 1);
-						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
-						draft.history = history.history;
-						draft.historyIndex = history.historyIndex;
-						const updates = /* @__PURE__ */ new Map();
-						sorted.forEach((node, index) => {
-							const offset = direction === "horizontal" ? first.x + gap * index : first.y + gap * index;
-							updates.set(node.id, direction === "horizontal" ? { x: offset } : { y: offset });
-						});
-						draft.nodes = {
-							...draft.nodes,
-							[projectId]: existing.map((node) => {
-								const update = updates.get(node.id);
-								return update === void 0 ? node : {
-									...node,
-									...update
-								};
-							})
-						};
-					},
 					autoArrange: (draft, projectId) => {
 						const existing = draft.nodes[projectId];
 						if (existing === void 0 || existing.length === 0) return;
 						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
 						draft.history = history.history;
 						draft.historyIndex = history.historyIndex;
-						const positions = layoutByDepth(existing);
+						const positions = computeArrangeLayout(existing);
 						draft.nodes = {
 							...draft.nodes,
 							[projectId]: existing.map((node) => {
@@ -1216,6 +1262,11 @@ window.__ModuleLoader__.load({
   object-fit: cover;
   display: block;
   background: var(--dsw-alias-bg-base);
+}
+
+/* Images stay inert so node dragging owns every pointer; the video keeps
+   native controls (play/seek/volume) interactive. */
+img.csNodeMedia {
   pointer-events: none;
 }
 
@@ -2174,21 +2225,13 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/canvas/CanvasToolbar.tsx
-		const ALIGN_LABELS = {
-			left: "左对齐",
-			center: "水平居中",
-			right: "右对齐",
-			top: "顶对齐",
-			middle: "垂直居中",
-			bottom: "底对齐"
-		};
 		/**
-		* The canvas toolbar: undo/redo, selection editing (delete/group/ungroup/
-		* align/distribute), auto-arrange, and manual node creation (sticky/text/
-		* prompt). Everything is props-driven — the frame wires the store actions.
+		* The canvas toolbar: undo/redo, selection editing (delete/group/ungroup),
+		* the one-click arrange, and manual node creation (sticky/text/prompt).
+		* Everything is props-driven — the frame wires the store actions.
 		*/
 		function CanvasToolbar(props) {
-			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAlign, onDistribute, onAutoArrange, onAddNode, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
+			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csToolbar",
 				children: [
@@ -2238,46 +2281,13 @@ window.__ModuleLoader__.load({
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: "csToolbarGroup",
-						children: Object.keys(ALIGN_LABELS).map((alignment) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
 							className: "csToolbarButton",
-							disabled: selectedCount < 2,
-							title: ALIGN_LABELS[alignment],
-							onClick: () => {
-								onAlign(alignment);
-							},
-							children: ALIGN_LABELS[alignment]
-						}, alignment))
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: "csToolbarGroup",
-						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csToolbarButton",
-								disabled: selectedCount < 3,
-								onClick: () => {
-									onDistribute("horizontal");
-								},
-								children: "水平分布"
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csToolbarButton",
-								disabled: selectedCount < 3,
-								onClick: () => {
-									onDistribute("vertical");
-								},
-								children: "垂直分布"
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: "csToolbarButton",
-								title: "按血缘深度整理布局",
-								onClick: onAutoArrange,
-								children: "整理布局"
-							})
-						]
+							title: "整理布局：消除重叠并适配视野",
+							onClick: onAutoArrange,
+							children: "整理布局"
+						})
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: "csToolbarGroup",
@@ -2946,9 +2956,6 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/canvas/CanvasSurface.tsx
-		/** Zoom clamp range (reference design doc §9.6: 0.1x – 5x). */
-		const MIN_SCALE = .1;
-		const MAX_SCALE = 5;
 		const ZOOM_STEP$1 = 1.2;
 		const MIN_NODE_SIZE = 50;
 		/**
@@ -2956,57 +2963,58 @@ window.__ModuleLoader__.load({
 		* boxes placed at their canvas-space coordinates, the bloodline edge overlay,
 		* snap alignment guides, a minimap, and corner zoom controls.
 		*
-		* Interactions follow the reference canvas controls: background pointer-down
-		* pans (middle button or Shift+left also pan), wheel without modifiers pans,
-		* Ctrl/Cmd+wheel zooms around the cursor, node pointer-down begins a node drag
-		* (snap alignment + guides), the node's resize handles begin a resize, and the
-		* link handle begins a manual connection drag. Keyboard: Delete removes the
+		* The viewport (`offset`/`scale`) is controlled: it lives in the project store
+		* so it survives restarts (canvas.json v3) and project switches. Interactions
+		* follow the reference canvas controls: background pointer-down pans (middle
+		* button or Shift+left also pan), wheel without modifiers pans, Ctrl/Cmd+wheel
+		* zooms around the cursor, node pointer-down begins a node drag (snap
+		* alignment + guides), the node's resize handles begin a resize, and the link
+		* handle begins a manual connection drag. Keyboard: Delete removes the
 		* selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
 		* undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
 		*/
 		const CanvasSurface = (0, react.forwardRef)(function CanvasSurface(props, ref) {
-			const { nodes, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId, onScaleChange, minimapVisible = true } = props;
-			const [offset, setOffset] = (0, react.useState)({
-				x: 0,
-				y: 0
-			});
-			const [scale, setScale] = (0, react.useState)(1);
+			const { nodes, view, onViewChange, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId, minimapVisible = true } = props;
 			const [guides, setGuides] = (0, react.useState)({
 				vertical: [],
 				horizontal: []
 			});
 			const [linkLine, setLinkLine] = (0, react.useState)(null);
 			const containerRef = (0, react.useRef)(null);
-			const offsetRef = (0, react.useRef)(offset);
-			const scaleRef = (0, react.useRef)(scale);
-			offsetRef.current = offset;
-			scaleRef.current = scale;
+			const viewRef = (0, react.useRef)(view);
+			viewRef.current = view;
+			const onViewChangeRef = (0, react.useRef)(onViewChange);
+			onViewChangeRef.current = onViewChange;
 			const gesture = (0, react.useRef)({
-				mode: "pan",
+				mode: "none",
 				startX: 0,
 				startY: 0
 			});
 			const nodesRef = (0, react.useRef)(nodes);
 			nodesRef.current = nodes;
+			const lastFocusedRef = (0, react.useRef)(null);
 			(0, react.useEffect)(() => {
-				if (focusNodeId === void 0 || focusNodeId === null) return;
-				const node = nodes.find((candidate) => candidate.id === focusNodeId);
+				if (focusNodeId === void 0 || focusNodeId === null) {
+					lastFocusedRef.current = null;
+					return;
+				}
+				if (lastFocusedRef.current === focusNodeId) return;
+				lastFocusedRef.current = focusNodeId;
+				const node = nodesRef.current.find((candidate) => candidate.id === focusNodeId);
 				const el = containerRef.current;
 				if (node === void 0 || el === null) return;
-				const vw = el.clientWidth;
-				const vh = el.clientHeight;
 				const cx = node.x + node.width / 2;
 				const cy = node.y + node.height / 2;
-				setOffset({
-					x: vw / 2 - cx * scaleRef.current,
-					y: vh / 2 - cy * scaleRef.current
+				onViewChangeRef.current({
+					x: el.clientWidth / 2 - cx * viewRef.current.scale,
+					y: el.clientHeight / 2 - cy * viewRef.current.scale
 				});
-			}, [focusNodeId, nodes]);
+			}, [focusNodeId]);
 			const panBy = (0, react.useCallback)((deltaX, deltaY) => {
-				setOffset((previous) => ({
-					x: previous.x + deltaX,
-					y: previous.y + deltaY
-				}));
+				onViewChangeRef.current({
+					x: viewRef.current.x + deltaX,
+					y: viewRef.current.y + deltaY
+				});
 			}, []);
 			const zoomAround = (0, react.useCallback)((pointX, pointY, factor) => {
 				const el = containerRef.current;
@@ -3014,14 +3022,14 @@ window.__ModuleLoader__.load({
 				const rect = el.getBoundingClientRect();
 				const px = pointX - rect.left;
 				const py = pointY - rect.top;
-				const newScale = clamp(scaleRef.current * factor, MIN_SCALE, MAX_SCALE);
-				const wx = (px - offsetRef.current.x) / scaleRef.current;
-				const wy = (py - offsetRef.current.y) / scaleRef.current;
-				setOffset({
+				const newScale = clamp(viewRef.current.scale * factor, MIN_VIEW_SCALE, 5);
+				const wx = (px - viewRef.current.x) / viewRef.current.scale;
+				const wy = (py - viewRef.current.y) / viewRef.current.scale;
+				onViewChangeRef.current({
 					x: px - wx * newScale,
-					y: py - wy * newScale
+					y: py - wy * newScale,
+					scale: newScale
 				});
-				setScale(newScale);
 			}, []);
 			(0, react.useEffect)(() => {
 				const el = containerRef.current;
@@ -3097,23 +3105,23 @@ window.__ModuleLoader__.load({
 				const vw = el.clientWidth;
 				const vh = el.clientHeight;
 				if (bounds === null) {
-					setScale(1);
-					setOffset({
+					onViewChangeRef.current({
 						x: 0,
-						y: 0
+						y: 0,
+						scale: 1
 					});
 					return;
 				}
 				const padding = 60;
 				const scaleX = (vw - padding * 2) / bounds.width;
 				const scaleY = (vh - padding * 2) / bounds.height;
-				const newScale = clamp(Math.min(scaleX, scaleY), MIN_SCALE, MAX_SCALE);
+				const newScale = clamp(Math.min(scaleX, scaleY), MIN_VIEW_SCALE, 5);
 				const centerX = bounds.x + bounds.width / 2;
 				const centerY = bounds.y + bounds.height / 2;
-				setScale(newScale);
-				setOffset({
+				onViewChangeRef.current({
 					x: vw / 2 - centerX * newScale,
-					y: vh / 2 - centerY * newScale
+					y: vh / 2 - centerY * newScale,
+					scale: newScale
 				});
 			}, []);
 			const zoomBy = (0, react.useCallback)((factor) => {
@@ -3122,10 +3130,10 @@ window.__ModuleLoader__.load({
 				zoomAround(el.clientWidth / 2, el.clientHeight / 2, factor);
 			}, [zoomAround]);
 			const resetZoom = (0, react.useCallback)(() => {
-				setScale(1);
-				setOffset({
+				onViewChangeRef.current({
 					x: 0,
-					y: 0
+					y: 0,
+					scale: 1
 				});
 			}, []);
 			const onSurfacePointerDown = (event) => {
@@ -3175,7 +3183,7 @@ window.__ModuleLoader__.load({
 				};
 			};
 			const onLinkPointerDown = (event, node) => {
-				const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+				const world = screenToWorld(event.clientX, event.clientY, viewRef.current.x, viewRef.current.y, viewRef.current.scale);
 				gesture.current = {
 					mode: "link",
 					startX: event.clientX,
@@ -3193,19 +3201,21 @@ window.__ModuleLoader__.load({
 			};
 			const onPointerMove = (event) => {
 				const current = gesture.current;
+				if (current.mode === "none") return;
+				if (event.pointerType === "mouse" && event.buttons === 0) {
+					onPointerUp(event);
+					return;
+				}
 				if (containerRef.current === null) return;
 				if (current.mode === "pan") {
-					setOffset((previous) => ({
-						x: previous.x + (event.clientX - current.startX),
-						y: previous.y + (event.clientY - current.startY)
-					}));
+					panBy(event.clientX - current.startX, event.clientY - current.startY);
 					current.startX = event.clientX;
 					current.startY = event.clientY;
 					return;
 				}
 				if (current.mode === "node" && current.nodeId !== void 0 && current.originX !== void 0 && current.originY !== void 0) {
-					const dx = (event.clientX - current.startX) / scaleRef.current;
-					const dy = (event.clientY - current.startY) / scaleRef.current;
+					const dx = (event.clientX - current.startX) / viewRef.current.scale;
+					const dy = (event.clientY - current.startY) / viewRef.current.scale;
 					const targetX = current.originX + dx;
 					const targetY = current.originY + dy;
 					const dragged = nodesRef.current.find((candidate) => candidate.id === current.nodeId);
@@ -3219,8 +3229,8 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				if (current.mode === "resize" && current.nodeId !== void 0 && current.originX !== void 0 && current.originY !== void 0 && current.originWidth !== void 0 && current.originHeight !== void 0 && current.corner !== void 0) {
-					const dx = (event.clientX - current.startX) / scaleRef.current;
-					const dy = (event.clientY - current.startY) / scaleRef.current;
+					const dx = (event.clientX - current.startX) / viewRef.current.scale;
+					const dy = (event.clientY - current.startY) / viewRef.current.scale;
 					const corner = current.corner;
 					let x = current.originX;
 					let y = current.originY;
@@ -3245,7 +3255,7 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				if (current.mode === "link" && current.fromWorldX !== void 0 && current.fromWorldY !== void 0) {
-					const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+					const world = screenToWorld(event.clientX, event.clientY, viewRef.current.x, viewRef.current.y, viewRef.current.scale);
 					setLinkLine({
 						fromX: current.fromWorldX,
 						fromY: current.fromWorldY,
@@ -3257,7 +3267,7 @@ window.__ModuleLoader__.load({
 			const onPointerUp = (event) => {
 				const current = gesture.current;
 				if (current.mode === "link" && current.sourceId !== void 0) {
-					const world = screenToWorld(event.clientX, event.clientY, offsetRef.current.x, offsetRef.current.y, scaleRef.current);
+					const world = screenToWorld(event.clientX, event.clientY, viewRef.current.x, viewRef.current.y, viewRef.current.scale);
 					const target = nodesRef.current.find((candidate) => candidate.id !== current.sourceId && candidate.visible !== false && world.x >= candidate.x && world.x <= candidate.x + candidate.width && world.y >= candidate.y && world.y <= candidate.y + candidate.height);
 					if (target !== void 0) onLinkLayers([current.sourceId], target.id);
 					setLinkLine(null);
@@ -3269,16 +3279,13 @@ window.__ModuleLoader__.load({
 					horizontal: []
 				});
 				gesture.current = {
-					mode: "pan",
+					mode: "none",
 					startX: 0,
 					startY: 0
 				};
 			};
 			const visibleNodes = nodes.filter((node) => node.visible !== false);
 			const ordered = [...visibleNodes].sort(compareNodes);
-			(0, react.useEffect)(() => {
-				onScaleChange?.(scale);
-			}, [scale, onScaleChange]);
 			(0, react.useImperativeHandle)(ref, () => ({
 				zoomBy,
 				fitToContent,
@@ -3295,16 +3302,16 @@ window.__ModuleLoader__.load({
 				onPointerMove,
 				onPointerUp,
 				onPointerLeave: () => {
-					if (gesture.current.mode !== "pan") onPointerUp(new MouseEvent("pointerup"));
+					if (gesture.current.mode !== "none") onPointerUp(new MouseEvent("pointerup"));
 				},
 				style: {
-					backgroundPosition: `${offset.x}px ${offset.y}px`,
-					backgroundSize: `${40 * scale}px ${40 * scale}px`
+					backgroundPosition: `${view.x}px ${view.y}px`,
+					backgroundSize: `${40 * view.scale}px ${40 * view.scale}px`
 				},
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: "csCanvasLayer",
 					style: {
-						transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+						transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
 						transformOrigin: "0 0"
 					},
 					children: [
@@ -3341,9 +3348,17 @@ window.__ModuleLoader__.load({
 					]
 				}), minimapVisible && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Minimap, {
 					nodes: visibleNodes,
-					offset,
-					scale,
-					onSetOffset: setOffset
+					offset: {
+						x: view.x,
+						y: view.y
+					},
+					scale: view.scale,
+					onSetOffset: (next) => {
+						onViewChangeRef.current({
+							x: next.x,
+							y: next.y
+						});
+					}
 				})]
 			});
 		});
@@ -3942,6 +3957,8 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/StudioFrame.tsx
 		const ZOOM_STEP = 1.2;
+		/** Debounce for viewport saves (pan/zoom fire per frame; disk saves must not). */
+		const VIEW_SAVE_DEBOUNCE_MS = 400;
 		/**
 		* Three-region studio frame: project list + layer list on the left, the canvas
 		* surface (toolbar on top, review timeline at the bottom) in the center, and
@@ -3965,16 +3982,22 @@ window.__ModuleLoader__.load({
 			const creating = useStudio((store) => store.creating);
 			const historyIndex = useStudio((store) => store.historyIndex);
 			const historyLength = useStudio((store) => store.history.length);
+			const viewEntry = useStudio((store) => viewOf(store, store.selectedProjectId));
+			const view = viewEntry.view;
 			const [focusNodeId, setFocusNodeId] = (0, react.useState)(null);
 			const [detailOpen, setDetailOpen] = (0, react.useState)(false);
-			const [layersOpen, setLayersOpen] = (0, react.useState)(true);
-			const [zoomLevel, setZoomLevel] = (0, react.useState)(1);
-			const [minimapVisible, setMinimapVisible] = (0, react.useState)(true);
 			const surfaceRef = (0, react.useRef)(null);
 			const [menu, setMenu] = (0, react.useState)(null);
+			const viewSaveTimer = (0, react.useRef)(null);
+			const fitPendingRef = (0, react.useRef)(false);
+			const fittedProjectRef = (0, react.useRef)(null);
+			const [fitRequestedAt, setFitRequestedAt] = (0, react.useState)(0);
 			(0, react.useEffect)(() => {
 				refreshProjects();
 			}, [refreshProjects]);
+			(0, react.useEffect)(() => () => {
+				if (viewSaveTimer.current !== null) clearTimeout(viewSaveTimer.current);
+			}, []);
 			(0, react.useEffect)(() => {
 				if (menu === null) return;
 				const close = () => {
@@ -3986,6 +4009,22 @@ window.__ModuleLoader__.load({
 				};
 			}, [menu]);
 			const projectId = selectedProjectId;
+			(0, react.useEffect)(() => {
+				if (projectId === null || viewEntry.saved || nodes.length === 0) return;
+				if (fittedProjectRef.current === projectId) return;
+				fittedProjectRef.current = projectId;
+				surfaceRef.current?.fitToContent();
+			}, [
+				projectId,
+				viewEntry.saved,
+				nodes
+			]);
+			(0, react.useEffect)(() => {
+				if (fitRequestedAt === 0) return;
+				if (!fitPendingRef.current) return;
+				fitPendingRef.current = false;
+				surfaceRef.current?.fitToContent();
+			}, [fitRequestedAt, nodes]);
 			const beginEdit = () => {
 				if (projectId !== null) actions.pushHistory(projectId);
 			};
@@ -3997,6 +4036,15 @@ window.__ModuleLoader__.load({
 			const persistAfter = (mutate) => {
 				mutate();
 				persist();
+			};
+			const handleViewChange = (patch) => {
+				if (projectId === null) return;
+				actions.setView(projectId, patch);
+				if (viewSaveTimer.current !== null) clearTimeout(viewSaveTimer.current);
+				viewSaveTimer.current = setTimeout(() => {
+					viewSaveTimer.current = null;
+					persist();
+				}, VIEW_SAVE_DEBOUNCE_MS);
 			};
 			const handleDelete = (ids) => {
 				if (projectId === null || ids.length === 0) return;
@@ -4049,6 +4097,8 @@ window.__ModuleLoader__.load({
 					className: "csCanvasBody",
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
 						nodes,
+						view,
+						onViewChange: handleViewChange,
 						selectedNodeId,
 						selectedNodeIds,
 						onSelectNode: (id, multi) => {
@@ -4087,9 +4137,8 @@ window.__ModuleLoader__.load({
 						},
 						focusNodeId,
 						ref: surfaceRef,
-						onScaleChange: setZoomLevel,
-						minimapVisible
-					}), layersOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
+						minimapVisible: view.minimapVisible
+					}), view.layersOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
 						className: "csCanvasLayers",
 						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
 							nodes,
@@ -4154,23 +4203,20 @@ window.__ModuleLoader__.load({
 							onUngroup: () => {
 								if (selectedNode !== null && selectedNode.kind === "group" && projectId !== null) persistAfter(() => actions.ungroup(projectId, selectedNode.id));
 							},
-							onAlign: (alignment) => {
-								if (projectId !== null) persistAfter(() => actions.alignNodes(projectId, selectedNodeIds, alignment));
-							},
-							onDistribute: (direction) => {
-								if (projectId !== null) persistAfter(() => actions.distributeNodes(projectId, selectedNodeIds, direction));
-							},
 							onAutoArrange: () => {
-								if (projectId !== null) persistAfter(() => actions.autoArrange(projectId));
+								if (projectId === null) return;
+								persistAfter(() => actions.autoArrange(projectId));
+								fitPendingRef.current = true;
+								setFitRequestedAt(Date.now());
 							},
 							onAddNode: (kind) => {
 								if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
 							},
-							layersOpen,
+							layersOpen: view.layersOpen,
 							onToggleLayers: () => {
-								setLayersOpen((open) => !open);
+								handleViewChange({ layersOpen: !view.layersOpen });
 							},
-							scale: zoomLevel,
+							scale: view.scale,
 							onZoomOut: () => {
 								surfaceRef.current?.zoomBy(1 / ZOOM_STEP);
 							},
@@ -4183,9 +4229,9 @@ window.__ModuleLoader__.load({
 							onResetZoom: () => {
 								surfaceRef.current?.resetZoom();
 							},
-							minimapVisible,
+							minimapVisible: view.minimapVisible,
 							onToggleMinimap: () => {
-								setMinimapVisible((visible) => !visible);
+								handleViewChange({ minimapVisible: !view.minimapVisible });
 							}
 						}), canvasBody]
 					}),
@@ -4369,6 +4415,10 @@ window.__ModuleLoader__.load({
 			const devSeed = params.get("cs-dev-seed") === "1";
 			const layout = new StudioLayoutController();
 			const storeInstance = createProjectStore().create();
+			const applyLoadedCanvas = (projectId, loaded) => {
+				storeInstance.actions.setNodes(projectId, loaded.nodes);
+				storeInstance.actions.setView(projectId, loaded.view ?? {}, loaded.view !== void 0);
+			};
 			const resolveActiveProjectId = () => {
 				const manual = storeInstance.getSnapshot().selectedProjectId;
 				if (manual !== null) return manual;
@@ -4387,7 +4437,7 @@ window.__ModuleLoader__.load({
 				storeInstance.actions.select(id);
 				(async () => {
 					try {
-						storeInstance.actions.setNodes(id, await loadStudioCanvas(id));
+						applyLoadedCanvas(id, await loadStudioCanvas(id));
 					} catch {}
 				})();
 			};
@@ -4395,8 +4445,7 @@ window.__ModuleLoader__.load({
 			ctx.effect(() => {
 				const reloadCanvas = async (projectId) => {
 					try {
-						const loaded = await loadStudioCanvas(projectId);
-						storeInstance.actions.setNodes(projectId, loaded);
+						applyLoadedCanvas(projectId, await loadStudioCanvas(projectId));
 					} catch {}
 				};
 				return ctx.conversationEvents.register(createAssetCaptureDefinition({
@@ -4444,7 +4493,7 @@ window.__ModuleLoader__.load({
 				if (node === void 0) return;
 				try {
 					await retryStudioNode(projectId, node, overrides);
-					storeInstance.actions.setNodes(projectId, await loadStudioCanvas(projectId));
+					applyLoadedCanvas(projectId, await loadStudioCanvas(projectId));
 				} catch (cause) {
 					storeInstance.actions.markPendingError(projectId, node.runId ?? nodeId, cause instanceof Error ? cause.message : "重试失败");
 				}
@@ -4484,7 +4533,8 @@ window.__ModuleLoader__.load({
 							}
 						};
 						const persistCanvas = async (projectId) => {
-							await saveStudioCanvas(projectId, storeInstance.getSnapshot().nodes[projectId] ?? []);
+							const snapshot = storeInstance.getSnapshot();
+							await saveStudioCanvas(projectId, snapshot.nodes[projectId] ?? [], viewOf(snapshot, projectId).view);
 						};
 						const openProject = async (project) => {
 							storeInstance.actions.select(project.id);
@@ -4493,11 +4543,11 @@ window.__ModuleLoader__.load({
 								await ctx.workspaces.rename(workspace.workspaceId, project.name);
 								ctx.workspaces.startSession(workspace.workspaceId);
 								const loaded = await loadStudioCanvas(project.id);
-								storeInstance.actions.setNodes(project.id, loaded);
-								if (devSeed && loaded.length === 0) {
+								applyLoadedCanvas(project.id, loaded);
+								if (devSeed && loaded.nodes.length === 0) {
 									const seeded = seedNodes();
 									storeInstance.actions.setNodes(project.id, seeded);
-									await saveStudioCanvas(project.id, seeded);
+									await saveStudioCanvas(project.id, seeded, viewOf(storeInstance.getSnapshot(), project.id).view);
 								}
 							} catch (cause) {
 								storeInstance.actions.setFailed(cause instanceof Error ? cause.message : "项目会话绑定失败");

@@ -17,7 +17,9 @@
  * lives on client-minted pending nodes and is stripped on reload.
  */
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client'
-import type { StudioCanvasNode, StudioCanvasNodeKind } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasNodeKind, StudioCanvasView } from '../contracts/canvas.js'
+import { VIEW_DEFAULTS } from '../contracts/canvas.js'
+import { clampViewScale, computeArrangeLayout } from '../canvas-view.js'
 import type { StudioCaptureAsset } from '../asset-capture.js'
 import type { StudioProject } from '../contracts/project.js'
 
@@ -57,6 +59,13 @@ export interface HistoryEntry {
   nodes: readonly StudioCanvasNode[]
 }
 
+/** Per-project viewport entry: the view plus whether it came from disk. */
+export interface ProjectViewEntry {
+  view: StudioCanvasView
+  /** False when no persisted view existed (client should fit content once). */
+  saved: boolean
+}
+
 /** Project-list + canvas store state. */
 export interface ProjectStoreState {
   projects: readonly StudioProject[]
@@ -69,6 +78,8 @@ export interface ProjectStoreState {
   creating: boolean
   /** 每个项目的画布节点（按生成时间追加）。 */
   nodes: Readonly<Record<string, readonly StudioCanvasNode[]>>
+  /** 每个项目的视口/面板状态（缩放、平移、图层与小地图开关）。 */
+  views: Readonly<Record<string, ProjectViewEntry>>
   /** Undo/redo snapshot history (global, entries carry their project). */
   history: HistoryEntry[]
   historyIndex: number
@@ -85,6 +96,11 @@ export type ProjectStoreActions = {
   setCreating: (draft: ProjectStoreState, creating: boolean) => void
   /** 打开项目时载入持久化节点（剥离瞬态状态）。 */
   setNodes: (draft: ProjectStoreState, projectId: string, nodes: readonly StudioCanvasNode[]) => void
+  /**
+   * 载入 / 更新某项目的视口与面板状态（增量合并）。`saved` 标记该视图是否
+   * 来自磁盘（未保存过时客户端应先适配内容一次）。
+   */
+  setView: (draft: ProjectStoreState, projectId: string, patch: Partial<StudioCanvasView>, saved?: boolean) => void
   /** 捕获一条 agent 资产 → 自动布局 + 血缘链接后写入节点列表。 */
   addAsset: (draft: ProjectStoreState, projectId: string, asset: StudioCaptureAsset) => void
   /** 选中节点（ctrl/cmd 追加多选；null 清空）。 */
@@ -117,11 +133,7 @@ export type ProjectStoreActions = {
   groupSelected: (draft: ProjectStoreState, projectId: string) => void
   /** 解组：移除 group 节点并释放子节点 parentId（写历史）。 */
   ungroup: (draft: ProjectStoreState, projectId: string, groupId: string) => void
-  /** 对齐（union 边界：左/中/右/上/中/下，写历史）。 */
-  alignNodes: (draft: ProjectStoreState, projectId: string, ids: string[], alignment: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom') => void
-  /** 分布（水平/垂直等距，写历史）。 */
-  distributeNodes: (draft: ProjectStoreState, projectId: string, ids: string[], direction: 'horizontal' | 'vertical') => void
-  /** 按血缘深度一键整理布局（写历史）。 */
+  /** 一键整理布局：无重叠网格 + 组随行（写历史）。适配视野由调用方负责。 */
   autoArrange: (draft: ProjectStoreState, projectId: string) => void
   /** 生成中的占位节点（client 侧瞬态）。 */
   setPendingNode: (draft: ProjectStoreState, projectId: string, node: StudioCanvasNode) => void
@@ -139,6 +151,15 @@ export type ProjectStoreActions = {
 export function nodesOf(state: ProjectStoreState, projectId: string | null): readonly StudioCanvasNode[] {
   if (projectId === null) return []
   return state.nodes[projectId] ?? []
+}
+
+/** Shared fallback so `viewOf` never allocates (stable snapshot identity). */
+const DEFAULT_VIEW_ENTRY: ProjectViewEntry = { view: VIEW_DEFAULTS, saved: false }
+
+/** 取某项目的视口条目（缺失时回退默认值，`saved: false`）。 */
+export function viewOf(state: ProjectStoreState, projectId: string | null): ProjectViewEntry {
+  if (projectId === null) return DEFAULT_VIEW_ENTRY
+  return state.views[projectId] ?? DEFAULT_VIEW_ENTRY
 }
 
 /** 取某项目最新的画布节点（用于回看 / 默认聚焦）；缺失时返回 null。 */
@@ -192,40 +213,6 @@ export function boundsOf(nodes: readonly StudioCanvasNode[]): { x: number; y: nu
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
 }
 
-/** 血缘深度（sourceIds/parentId 链长），用于自动布局分层。 */
-function depthOf(byId: Map<string, StudioCanvasNode>, node: StudioCanvasNode, seen: Set<string>): number {
-  if (seen.has(node.id)) return 0
-  seen.add(node.id)
-  const parents = [...node.sourceIds, ...(node.parentId !== undefined ? [node.parentId] : [])]
-  let maxDepth = 0
-  for (const parentId of parents) {
-    const parent = byId.get(parentId)
-    if (parent === undefined) continue
-    maxDepth = Math.max(maxDepth, depthOf(byId, parent, seen) + 1)
-  }
-  return maxDepth
-}
-
-/** 简化版血缘自动布局：按深度分层，每层横向排布（reference autoLayout 的树语义降级版）。 */
-function layoutByDepth(nodes: readonly StudioCanvasNode[]): Map<string, { x: number; y: number }> {
-  const byId = new Map(nodes.map(node => [node.id, node]))
-  const depths = new Map<string, number>()
-  for (const node of nodes) depths.set(node.id, depthOf(byId, node, new Set()))
-  const maxDepth = Math.max(0, ...depths.values())
-  const column = new Map<number, number>()
-  const positions = new Map<string, { x: number; y: number }>()
-  for (const node of [...nodes].sort(compareNodes)) {
-    const depth = depths.get(node.id) ?? 0
-    const index = column.get(depth) ?? 0
-    column.set(depth, index + 1)
-    positions.set(node.id, {
-      x: LAYOUT.origin + index * LAYOUT.stepX,
-      y: LAYOUT.origin + depth * (LAYOUT.stepY + 60) + (maxDepth - depth) * 0,
-    })
-  }
-  return positions
-}
-
 /** 快照当前节点列表进历史（内部实现：先截断 redo 尾部，再压入）。 */
 function snapshotHistory(
   history: HistoryEntry[],
@@ -256,6 +243,7 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
       error: null,
       creating: false,
       nodes: {},
+      views: {},
       history: [],
       historyIndex: -1,
       clipboard: [],
@@ -289,6 +277,16 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
           return rest as StudioCanvasNode
         })
         draft.nodes = { ...draft.nodes, [projectId]: clean }
+      },
+      setView: (draft, projectId, patch, saved) => {
+        const current = draft.views[projectId] ?? { view: VIEW_DEFAULTS, saved: false }
+        draft.views = {
+          ...draft.views,
+          [projectId]: {
+            view: { ...current.view, ...patch, scale: clampViewScale(patch.scale ?? current.view.scale) },
+            saved: saved ?? current.saved,
+          },
+        }
       },
       addAsset: (draft, projectId, asset) => {
         const existing = draft.nodes[projectId] ?? []
@@ -598,80 +596,13 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
         draft.selectedNodeIds = draft.selectedNodeIds.filter(id => id !== groupId)
         if (draft.selectedNodeId === groupId) draft.selectedNodeId = null
       },
-      alignNodes: (draft, projectId, ids, alignment) => {
-        const existing = draft.nodes[projectId]
-        if (existing === undefined || ids.length < 2) return
-        const byId = new Map(existing.map(node => [node.id, node]))
-        const members = ids
-          .map(id => byId.get(id))
-          .filter((node): node is StudioCanvasNode => node !== undefined)
-        const bounds = boundsOf(members)
-        if (bounds === null) return
-        const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
-        draft.history = history.history
-        draft.historyIndex = history.historyIndex
-        const updates = new Map<string, { x?: number; y?: number }>()
-        for (const node of members) {
-          let x = node.x
-          let y = node.y
-          if (alignment === 'left') x = bounds.x
-          else if (alignment === 'center') x = bounds.x + (bounds.width - node.width) / 2
-          else if (alignment === 'right') x = bounds.x + bounds.width - node.width
-          else if (alignment === 'top') y = bounds.y
-          else if (alignment === 'middle') y = bounds.y + (bounds.height - node.height) / 2
-          else if (alignment === 'bottom') y = bounds.y + bounds.height - node.height
-          updates.set(node.id, { x, y })
-        }
-        draft.nodes = {
-          ...draft.nodes,
-          [projectId]: existing.map(node => {
-            const update = updates.get(node.id)
-            return update === undefined ? node : { ...node, ...update }
-          }),
-        }
-      },
-      distributeNodes: (draft, projectId, ids, direction) => {
-        const existing = draft.nodes[projectId]
-        if (existing === undefined || ids.length < 3) return
-        const byId = new Map(existing.map(node => [node.id, node]))
-        const members = ids
-          .map(id => byId.get(id))
-          .filter((node): node is StudioCanvasNode => node !== undefined)
-        const sorted = direction === 'horizontal'
-          ? [...members].sort((left, right) => left.x - right.x)
-          : [...members].sort((left, right) => left.y - right.y)
-        if (sorted.length < 3) return
-        const first = sorted[0]!
-        const last = sorted[sorted.length - 1]!
-        const span = direction === 'horizontal'
-          ? (last.x + last.width) - first.x
-          : (last.y + last.height) - first.y
-        const gap = span / (sorted.length - 1)
-        const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
-        draft.history = history.history
-        draft.historyIndex = history.historyIndex
-        const updates = new Map<string, { x?: number; y?: number }>()
-        sorted.forEach((node, index) => {
-          const offset = direction === 'horizontal'
-            ? first.x + gap * index
-            : first.y + gap * index
-          updates.set(node.id, direction === 'horizontal' ? { x: offset } : { y: offset })
-        })
-        draft.nodes = {
-          ...draft.nodes,
-          [projectId]: existing.map(node => {
-            const update = updates.get(node.id)
-            return update === undefined ? node : { ...node, ...update }
-          }),
-        }
-      },
       autoArrange: (draft, projectId) => {
         const existing = draft.nodes[projectId]
         if (existing === undefined || existing.length === 0) return
         const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
         draft.history = history.history
         draft.historyIndex = history.historyIndex
-        const positions = layoutByDepth(existing)
+        const positions = computeArrangeLayout(existing)
         draft.nodes = {
           ...draft.nodes,
           [projectId]: existing.map(node => {

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StudioProjectListInjected } from './contracts.js'
-import { nodesOf, selectedNodeOf } from './project-store.js'
+import { nodesOf, selectedNodeOf, viewOf } from './project-store.js'
 import { ProjectList } from './ProjectList.js'
 import { CanvasToolbar } from './canvas/CanvasToolbar.js'
 import { CanvasSurface, type CanvasSurfaceHandle } from './canvas/CanvasSurface.js'
@@ -9,10 +9,12 @@ import { CanvasTimeline } from './canvas/CanvasTimeline.js'
 import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
-import type { StudioCanvasNode } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
 
 // Zoom step for the toolbar +/− buttons (matches the surface wheel step).
 const ZOOM_STEP = 1.2
+/** Debounce for viewport saves (pan/zoom fire per frame; disk saves must not). */
+const VIEW_SAVE_DEBOUNCE_MS = 400
 
 /** Studio root frame props: the standard root shares plus the studio inject face. */
 export type StudioFrameProps = PropsRuntime<'root'>
@@ -42,16 +44,24 @@ export function StudioFrame(props: StudioFrameProps) {
   const creating = useStudio(store => store.creating)
   const historyIndex = useStudio(store => store.historyIndex)
   const historyLength = useStudio(store => store.history.length)
+  const viewEntry = useStudio(store => viewOf(store, store.selectedProjectId))
+  const view = viewEntry.view
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
-  const [layersOpen, setLayersOpen] = useState(true)
-  const [zoomLevel, setZoomLevel] = useState(1)
-  const [minimapVisible, setMinimapVisible] = useState(true)
   const surfaceRef = useRef<CanvasSurfaceHandle>(null)
   const [menu, setMenu] = useState<{ node: StudioCanvasNode; x: number; y: number } | null>(null)
+  const viewSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fitPendingRef = useRef(false)
+  const fittedProjectRef = useRef<string | null>(null)
+  // 整理布局后等新坐标渲染完成再适配视野（imperative fit 读的是渲染后的节点表）。
+  const [fitRequestedAt, setFitRequestedAt] = useState(0)
 
   // 首次挂载即拉取项目列表，无需手动点「刷新」。
   useEffect(() => { void refreshProjects() }, [refreshProjects])
+  // 视口/面板变化 → store 已即时更新；磁盘持久化防抖合并（拖拽平移每帧触发）。
+  useEffect(() => () => {
+    if (viewSaveTimer.current !== null) clearTimeout(viewSaveTimer.current)
+  }, [])
   // 右键菜单：任意按下即关闭。
   useEffect(() => {
     if (menu === null) return
@@ -61,6 +71,20 @@ export function StudioFrame(props: StudioFrameProps) {
   }, [menu])
 
   const projectId = selectedProjectId
+  // 无持久化视图的旧项目：节点首次就绪后自动适配一次视野。
+  useEffect(() => {
+    if (projectId === null || viewEntry.saved || nodes.length === 0) return
+    if (fittedProjectRef.current === projectId) return
+    fittedProjectRef.current = projectId
+    surfaceRef.current?.fitToContent()
+  }, [projectId, viewEntry.saved, nodes])
+  // 整理布局后的适配：等 nodes 新坐标渲染进 surface 再执行。
+  useEffect(() => {
+    if (fitRequestedAt === 0) return
+    if (!fitPendingRef.current) return
+    fitPendingRef.current = false
+    surfaceRef.current?.fitToContent()
+  }, [fitRequestedAt, nodes])
   const beginEdit = (): void => {
     if (projectId !== null) actions.pushHistory(projectId)
   }
@@ -72,6 +96,16 @@ export function StudioFrame(props: StudioFrameProps) {
   const persistAfter = (mutate: () => void): void => {
     mutate()
     persist()
+  }
+  // 视口/面板状态：store 即时合并（画布受控渲染），磁盘保存防抖合并。
+  const handleViewChange = (patch: Partial<StudioCanvasView>): void => {
+    if (projectId === null) return
+    actions.setView(projectId, patch)
+    if (viewSaveTimer.current !== null) clearTimeout(viewSaveTimer.current)
+    viewSaveTimer.current = setTimeout(() => {
+      viewSaveTimer.current = null
+      persist()
+    }, VIEW_SAVE_DEBOUNCE_MS)
   }
   const handleDelete = (ids: string[]): void => {
     if (projectId === null || ids.length === 0) return
@@ -125,6 +159,8 @@ export function StudioFrame(props: StudioFrameProps) {
         <div className="csCanvasBody">
           <CanvasSurface
             nodes={nodes}
+            view={view}
+            onViewChange={handleViewChange}
             selectedNodeId={selectedNodeId}
             selectedNodeIds={selectedNodeIds}
             onSelectNode={(id, multi) => { actions.selectNode(id, multi) }}
@@ -143,10 +179,9 @@ export function StudioFrame(props: StudioFrameProps) {
             onContextMenu={(node, x, y) => { setMenu({ node, x, y }) }}
             focusNodeId={focusNodeId}
             ref={surfaceRef}
-            onScaleChange={setZoomLevel}
-            minimapVisible={minimapVisible}
+            minimapVisible={view.minimapVisible}
           />
-          {layersOpen && (
+          {view.layersOpen && (
             <aside className="csCanvasLayers">
               <LayerPanel
                 nodes={nodes}
@@ -201,19 +236,22 @@ export function StudioFrame(props: StudioFrameProps) {
               persistAfter(() => actions.ungroup(projectId, selectedNode.id))
             }
           }}
-          onAlign={alignment => { if (projectId !== null) persistAfter(() => actions.alignNodes(projectId, selectedNodeIds, alignment)) }}
-          onDistribute={direction => { if (projectId !== null) persistAfter(() => actions.distributeNodes(projectId, selectedNodeIds, direction)) }}
-          onAutoArrange={() => { if (projectId !== null) persistAfter(() => actions.autoArrange(projectId)) }}
+          onAutoArrange={() => {
+            if (projectId === null) return
+            persistAfter(() => actions.autoArrange(projectId))
+            fitPendingRef.current = true
+            setFitRequestedAt(Date.now())
+          }}
           onAddNode={kind => { if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind)) }}
-          layersOpen={layersOpen}
-          onToggleLayers={() => { setLayersOpen(open => !open) }}
-          scale={zoomLevel}
+          layersOpen={view.layersOpen}
+          onToggleLayers={() => { handleViewChange({ layersOpen: !view.layersOpen }) }}
+          scale={view.scale}
           onZoomOut={() => { surfaceRef.current?.zoomBy(1 / ZOOM_STEP) }}
           onZoomIn={() => { surfaceRef.current?.zoomBy(ZOOM_STEP) }}
           onFitContent={() => { surfaceRef.current?.fitToContent() }}
           onResetZoom={() => { surfaceRef.current?.resetZoom() }}
-          minimapVisible={minimapVisible}
-          onToggleMinimap={() => { setMinimapVisible(visible => !visible) }}
+          minimapVisible={view.minimapVisible}
+          onToggleMinimap={() => { handleViewChange({ minimapVisible: !view.minimapVisible }) }}
         />
         {canvasBody}
       </main>

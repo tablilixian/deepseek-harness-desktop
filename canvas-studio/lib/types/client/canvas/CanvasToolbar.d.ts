@@ -1,6 +1,4 @@
 import type { StudioCanvasNodeKind } from '../../contracts/canvas.js';
-/** Alignment targets (kept explicit so the loop stays type-safe). */
-type AlignTarget = 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom';
 /** Manually addable node kinds (media comes from agent generation). */
 type ManualNodeKind = Extract<StudioCanvasNodeKind, 'sticky' | 'text' | 'prompt'>;
 /** Props for the floating canvas toolbar. */
@@ -14,8 +12,7 @@ export interface CanvasToolbarProps {
     onDelete(): void;
     onGroup(): void;
     onUngroup(): void;
-    onAlign(alignment: AlignTarget): void;
-    onDistribute(direction: 'horizontal' | 'vertical'): void;
+    /** One-click overlap-free arrange (the only layout action by design). */
     onAutoArrange(): void;
     onAddNode(kind: ManualNodeKind): void;
     /** Toggle the layer list overlay inside the canvas. */
@@ -32,9 +29,9 @@ export interface CanvasToolbarProps {
     onToggleMinimap(): void;
 }
 /**
- * The canvas toolbar: undo/redo, selection editing (delete/group/ungroup/
- * align/distribute), auto-arrange, and manual node creation (sticky/text/
- * prompt). Everything is props-driven — the frame wires the store actions.
+ * The canvas toolbar: undo/redo, selection editing (delete/group/ungroup),
+ * the one-click arrange, and manual node creation (sticky/text/prompt).
+ * Everything is props-driven — the frame wires the store actions.
  */
 export declare function CanvasToolbar(props: CanvasToolbarProps): import("react").JSX.Element;
 export {};

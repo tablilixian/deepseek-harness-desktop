@@ -27,6 +27,8 @@ export const STUDIO_TOOL_KINDS: Readonly<Record<string, 'image' | 'video'>> = {
   image_generate: 'image',
   video_generate: 'video',
   video_composite: 'video',
+  style_transfer: 'image',
+  storyboard_generate: 'image',
 }
 
 /** 判断工具名是否属于画布媒体工具。 */

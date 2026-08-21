@@ -1,17 +1,23 @@
-# Canvas Studio 交接文档(2026-08-20,S1–S7 参考集成完成)
+# Canvas Studio 交接文档(2026-08-21,S1–S7 集成 + 画布体验修复完成)
 
-> 用途:新开对话继续开发前的完整上下文。本文件 + [`docs/plans/canvas-studio.md`](./canvas-studio.md)(完整计划)+ [`docs/plans/canvas-studio-reference-integration.md`](./canvas-studio-reference-integration.md)(S1–S7 集成契约)是当前权威。本文件记录"当前状态、已验证机制、环境事实、下一步"。
+> 用途:新开对话继续开发前的完整上下文。本文件 + [`docs/plans/canvas-studio.md`](./canvas-studio.md)(完整计划)+ [`docs/plans/canvas-studio-reference-integration.md`](./canvas-studio-reference-integration.md)(S1–S7 集成契约)+ [`docs/plans/canvas-studio-tools.md`](./canvas-studio-tools.md)(9 工具契约)是当前权威。本文件记录"当前状态、已验证机制、环境事实、下一步"。
 
 ## 1. 当前状态
 
-**P1–P4+ 全部完成,参考画布 S1–S7 集成完成并已提交推送。UI 布局经过多轮调整,当前为最终形态。**
+**P1–P4+ 与参考画布 S1–S7 集成已完成并推送;2026-08-21 会话完成了 9 工具扩展(未提交)与一轮画布体验修复(视频播放/视图持久化 v3/工具栏精简/跳动与悬停 bug,未提交)。**
 
-- 仓库根新增 `canvas-studio/` 独立包(已入根 workspaces,一行),桌面 profile 已集成(`corepack yarn dev` 可见三栏工作台)。
-- 布局:左栏项目列表,中间无限画布(顶部固定工具栏 + 底部分镜时间线),右栏仅为官方对话区。工具栏集中了缩放 ±/适配/重置、图层显隐、小地图显隐和所有编辑操作。图层列表作为可开关的悬浮面板叠在画布右上角;小地图也支持工具条显隐开关。
-- P1(骨架 + 三栏)、P2(项目注册表 + 会话绑定)、P3(媒体工具 + 产物托管,Host 侧注册 + 落盘 + 静态托管)、P4(捕获生成产物上画布)、P4+(持久化画布 + 重启恢复 + 血缘 + 会话级项目归属)均已完成。
-- **参考画布集成(S1–S7)已完成**:把用户提供的 WL-AI-Director 风格画布参考(`reference/canvas-module-design.md` + `reference/canvas/` 92 个文件)概念级借鉴进 Canvas Studio,全部按 DSH 纪律重写,每个借鉴点带来源文件标注(见集成计划文档 §4/§5 的来源地图与许可证边界)。**已提交 `9a314b6e88` 并推送到 fork(`origin/canvas-studio`)**。
-- **验证状态**:`corepack yarn workspace canvas-studio check`(build + verify:loader + typecheck)全绿,`test:smoke` **16/16 通过**。根级 `corepack yarn check` 仍被缺失的 `dsh-community-fabric` / `dsh-community-market` 包阻塞(既有仓库状态,与本次改动无关,见 §5)。
-- **许可证边界**:参考源码是 CC BY-NC-SA 4.0,DSH Desktop 是 MIT —— 只做概念/算法/结构级借鉴,不逐字移植;`reference/` 目录已加入 `.gitignore`,**不进入 MIT 仓库**。
+- 仓库根 `canvas-studio/` 独立包,桌面 profile 已集成(`corepack yarn dev` 三栏工作台)。
+- 布局:左栏项目列表,中间无限画布(顶部固定工具栏 + 底部分镜时间线),右栏为官方对话区。图层列表是画布右上角可开关浮窗;小地图支持工具条显隐。
+- **9 工具扩展(2026-08-21,未提交)**:在原 3 个生成工具外新增 `prompt_enhance` / `upload_image` / `image2vl` / `style_transfer` / `storyboard_generate` / `deduction`,全部走 Drama Backend 同步端点;核心规则「所有图片输入必须先 `upload_image` 拿 filename」;详见 [`canvas-studio-tools.md`](./canvas-studio-tools.md)。
+- **画布体验修复(2026-08-21,未提交)**:
+  1. **视频不能播放**:`.csNodeMedia` 对 img/video 统一 `pointer-events:none`,视频原生控制条收不到点击;现仅 `img.csNodeMedia` 保持 none。产物路由补 `Range`/`Accept-Ranges`/206/416,支持流式播放与拖进度条。
+  2. **视图持久化(canvas.json v3)**:缩放/平移/图层开关/小地图开关落盘,重启恢复。契约 `StudioCanvasView` + `CANVAS_DOCUMENT_VERSION=3`;Host `readCanvas` 返回整文档、`writeCanvas(projectId, nodes, view?)`(Host 写入保留已存视图);client store 增 `views` + `setView` + `viewOf`;CanvasSurface 改**受控视图**(offset/scale 来自 store);帧层 400ms 防抖保存;旧项目无存档视图时首次载入自动适配一次视野。
+  3. **工具栏精简**:移除六种对齐与水平/垂直分布按钮(含 store 的 `alignNodes`/`distributeNodes`),只留「整理布局」;整理算法重写为**无重叠网格**(`canvas-view.ts computeArrangeLayout`:单元尺寸取最大节点、组盒子随行且子图层保持相对偏移、按血缘深度+创建时间排序),整理后自动适配视野。
+  4. **画布跳动 bug**:时间线点击后 `focusNodeId` effect 依赖 `[focusNodeId, nodes]`,任何节点变化(拖拽帧、生成重载)都会重新居中;改为仅在 focusNodeId 变化时居中一次(`lastFocusedRef` 守卫,nodes 走 ref)。
+  5. **悬停跟随移动 bug**:手势状态机空闲态原是 `mode:'pan'`(坐标残留 0,0),悬停触发 pointermove 导致画布跟鼠标走;引入 `mode:'none'` 空闲态,且 `buttons===0` 时自愈结束手势。
+- **验证状态**:`corepack yarn workspace canvas-studio check`(build + verify:loader + typecheck)全绿,`test:smoke` **21/21 通过**(原 16 + canvas-view 5)。
+- **事故记录**:2026-08-21 曾因带类型错误构建(clean 后 tsc 失败)导致 `lib/` 残缺,桌面启动黑屏。纪律:**启动桌面前必须完整跑过 `check`**。
+- 根级 `corepack yarn check` 仍被缺失的 `dsh-community-fabric` / `dsh-community-market` 包阻塞(既有仓库状态,与本插件无关)。
 
 ## 2. 参考画布集成(S1–S7)摘要
 
@@ -36,44 +42,47 @@
 ```
 canvas-studio/
 ├── package.json          # dsh.bundle.patch + dsh.client + exports["./client"] + scripts
+│                         # [2026-08-21] dependencies 增 @deepseek-ai/dsh-skill(P6 skill 用,lockfile 待更新)
 ├── cordis.patch.yml      # insert 自身行 + 禁用 ui-layout
 ├── tsconfig.json / tsconfig.client.json / tsdown.config.ts
 ├── scripts/              # clean.mjs / dev-install.mjs / verify-client-loader.mjs
 ├── tests/
-│   ├── asset-capture.test.mjs   # [P4/P4+/S7] 16 用例(原 8 + S7 新增 8)
-│   └── generate.test.mjs        # [S7 新增] 3 用例:retryOf 原地更新/缺失目标报错/普通追加
+│   ├── asset-capture.test.mjs   # [P4/P4+/S7] 13 用例
+│   ├── generate.test.mjs        # [S7/9工具] 3 用例:retryOf 原地更新/缺失目标报错/普通追加(mock registry 已升 v3 文档形态)
+│   └── canvas-view.test.mjs     # [2026-08-21 新增] 5 用例:视图规范化/缩放钳制/无重叠布局/组随行/空表
 └── src/
-    ├── config.ts         # [P3] 明文配置:DRAMA_API_BASE/KEY、ENDPOINTS、sizeForAspectRatio、newAssetId
+    ├── config.ts         # [P3/9工具] 明文配置:DRAMA_API_BASE/KEY、ENDPOINTS(13 端点)、sizeForAspectRatio、newAssetId
+    ├── canvas-view.ts    # [2026-08-21 新增] 纯函数:clampViewScale/normalizeCanvasView/computeArrangeLayout(无重叠网格+组随行);lib 产物可被 node --test 直连
     ├── contracts/
     │   ├── project.ts    # StudioProject 共享类型
-    │   └── canvas.ts     # [P4+/S1] StudioCanvasNode(v2)/StudioCanvasDocument/StudioCanvasOperationType/CANVAS_DOCUMENT_VERSION/NODE_DEFAULTS
-    ├── projects.ts       # Host:ProjectRegistry + readCanvas/writeCanvas/appendCanvasNode + normalizeCanvasDocument
-    ├── generate.ts       # [P3/S7] generateAsset + retryOf + operationTypeOf/generationPromptOf + GenerateParams
-    ├── routes.ts         # /canvas-studio/projects | /canvas-studio/canvas | POST /generate | GET /assets
-    ├── host-tools.ts     # [P3 修正] Host 侧三个 defineTool + resolveProjectId(cwd 反查项目)
-    ├── asset-capture.ts  # [P4/S4/S7] STUDIO_TOOL_KINDS/isStudioTool + createAssetCaptureDefinition(hooks) + StudioToolCallInfo
+    │   └── canvas.ts     # [v3] StudioCanvasNode/StudioCanvasDocument(view?)/StudioCanvasView/CANVAS_DOCUMENT_VERSION=3/VIEW_DEFAULTS/NODE_DEFAULTS
+    ├── projects.ts       # Host:ProjectRegistry;readCanvas 返回整文档{nodes,view};writeCanvas(projectId,nodes,view?) 合并写且 Host 写保留已存视图
+    ├── generate.ts       # [P3/S7/9工具] generateAsset + retryOf + operationTypeOf/generationPromptOf + enhancePrompt/analyzeImage/deduction + uploadImage/resolveImageUrl
+    ├── routes.ts         # /canvas-studio/projects | /canvas-studio/canvas(GET 带 view,POST 收 view)| POST /generate | GET /assets(Range/206/416)
+    ├── host-tools.ts     # [9工具] 九个 defineTool + resolveProjectId(cwd 反查项目)
+    ├── asset-capture.ts  # [P4/S4/S7] STUDIO_TOOL_KINDS(含 style_transfer/storyboard_generate)+ createAssetCaptureDefinition(hooks)
     ├── index.ts          # Host:inject(['webServer','tools'])/apply(注册表 + 路由 + 工具注册)
     └── client/
         ├── index.ts      # apply:advanced 跳过 + provide layout + register root;inject ['slots','workspaces','conversationEvents','sessions']
-        │               # 会话级归属 + 共享 store 实例 + 捕获/占位/错误接线 + retry/steer/cancel 回调
+        │               # 会话级归属 + 共享 store 实例 + applyLoadedCanvas(节点+视图)+ retry/steer/cancel + persistCanvas 带 view
         ├── layout-controller.ts  # ILayout 实现(P1 全 no-op)
-        ├── api.ts        # list/create/deleteStudioProject + load/saveStudioCanvas + retryStudioNode
-        ├── project-store.ts      # [S3/S6] createProjectStore() 工厂(defineStore):全量 actions + 选择器 + 历史/剪贴板/分组/对齐/布局
+        ├── api.ts        # list/create/deleteStudioProject + loadStudioCanvas(→{nodes,view})/saveStudioCanvas(nodes,view) + retryStudioNode
+        ├── project-store.ts      # [S3/S6/v3] 全量 actions + 选择器(nodesOf/viewOf)+ views 状态 + setView(scale 钳制);已移除 alignNodes/distributeNodes;autoArrange 走 computeArrangeLayout
         ├── contracts.ts  # StudioProjectListInjected + StudioActions(= EngineStoreInstance actions 绑定类型)
         ├── ProjectList.tsx       # 项目列表 + 新建表单 + 行内删除
-        ├── StudioFrame.tsx       # 三栏框架 + CanvasToolbar + CanvasSurface + CanvasTimeline + LayerPanel + LayerDetailPanel + CanvasContextMenu
-        ├── styles.ts     # 注入 <style data-plugin="canvas-studio">;全部画布/节点/边/面板/菜单样式(--dsw-alias-* 语义 token)
+        ├── StudioFrame.tsx       # 三栏框架 + 受控视图接线(handleViewChange 400ms 防抖持久化)+ 无存档视图自动适配一次 + 整理后适配
+        ├── styles.ts     # 注入 <style data-plugin="canvas-studio">;[2026-08-21] 仅 img.csNodeMedia 保持 pointer-events:none,video 恢复原生控制条(--dsw-alias-* token)
         └── canvas/
-            ├── canvas-math.ts    # [S3 新增] clamp/calculateSnap/contentBounds/screenToWorld/worldToScreen
+            ├── canvas-math.ts    # clamp/calculateSnap/contentBounds/screenToWorld/worldToScreen
             ├── CanvasEdges.tsx   # [S2] 操作类型着色边 + 角色胶囊
             ├── CanvasNode.tsx    # [S3/S4] 节点盒 + 缩放/重命名/连线/角标/占位
-            ├── CanvasSurface.tsx # [S3] 无限画布(平移/缩放/拖拽/吸附/快捷键/forwardRef 暴露 zoomBy/fitToContent/resetZoom + 小地图开关)
+            ├── CanvasSurface.tsx # [v3 受控视图] offset/scale 来自 props.view,变更经 onViewChange 进 store;focusNodeId 仅变化时居中一次;手势 'none' 空闲态 + buttons===0 自愈
             ├── CanvasTimeline.tsx # [P4+] 按时间回看/定位条
-            ├── Minimap.tsx       # [S5 新增] 内容拟合 + 视口框拖拽导航
-            ├── CanvasToolbar.tsx # [S5 新增] 工具栏
-            ├── LayerPanel.tsx    # [S5 新增] 图层列表
-            ├── LayerDetailPanel.tsx # [S5 新增] 节点属性/重试/修改提示词
-            └── CanvasContextMenu.tsx # [S5 新增] 节点右键菜单
+            ├── Minimap.tsx       # [S5] 内容拟合 + 视口框拖拽导航
+            ├── CanvasToolbar.tsx # [精简] 撤销/重做/删除/编组/解组/整理布局/+便签·文本·提示/图层显隐/缩放 ±/适配/重置/小地图显隐
+            ├── LayerPanel.tsx    # [S5] 图层列表
+            ├── LayerDetailPanel.tsx # [S5] 节点属性/重试/修改提示词
+            └── CanvasContextMenu.tsx # [S5] 节点右键菜单
 ```
 
 ## 4. 已验证机制(源码级核实,不要推翻)
@@ -97,6 +106,11 @@ canvas-studio/
 17. **相对产物 URL**:`generate.ts` 产物 URL 为同源 `/canvas-studio/assets/<projectId>/<file>`(删 `port` 参数链路);`api.ts` 载入时把旧绝对 URL 归一化,桌面重启换端口不失效。
 18. **注入面 actions 绑定**:inject face 的 `actions` 类型用 `EngineStoreInstance<State, Actions>['actions']`(运行时绑定好的、剥离 draft 的版本),不是 `ProjectStoreActions` 字面量类型。
 19. **exactOptionalPropertyTypes 纪律**:canvas-studio tsconfig 开启 `exactOptionalPropertyTypes`;构建节点对象时禁止显式赋 `undefined` 给可选字段(用条件展开/解构剥离),契约字段保持 `field?: T`。
+20. **画布视图单一来源(2026-08-21)**:offset/scale/图层开关/小地图开关存 store(`views` + `setView`,scale 钳制 0.1–5),CanvasSurface 是**受控组件**;磁盘保存由帧层 400ms 防抖合并;Host 写 canvas.json(generate 落盘)不传 view 时保留已存视图;`viewOf` 返回模块级常量兜底(避免每次快照新对象触发重渲染)。
+21. **手势状态机空闲态必须是 `'none'`**:`pointermove` 在悬停时也触发;若用 `'pan'` 当空闲态(坐标残留)画布会跟随鼠标。`buttons===0` 时在 move 里自愈结束手势(表面外松开无 pointerup)。
+22. **focusNodeId 只在变化时居中一次**:`lastFocusedRef` 守卫,nodes 走 ref;依赖 nodes 会在拖拽帧/生成重载时反复拉走视口(「画布跳动」根因)。
+23. **媒体元素服务契约**:`<img>` 需要 `pointer-events:none`(防拖拽干扰),`<video>` 必须可交互(原生控制条);产物路由须支持单段 `Range`(206 + Content-Range + Accept-Ranges,非法 416),否则视频无法流式/拖进度条。
+24. **skill 机制(上游源码级,P6 依据)**:`ctx.skills.register({name kebab-case, description 非空, source:'runtime', content})` 运行时注册;base bundle 提供 `skills` 服务;web-app 禁用 `tool-skill`,但桌面 agent presets(standard/code/cordis)按 preset 挂载 → 桌面会话可见 skill 目录与 `skill` 工具;无 `tool-skill` 的组合静默不可见。
 
 ## 5. 环境事实
 
@@ -173,10 +187,13 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 - P3(工具 + 产物托管):`16d7666130` + 闪退修复 `c3411814cb`
 - P4/P4+/§18/§19(捕获上画布 + 持久化 + 会话级归属 + 相对 URL):合并提交(见计划 §16–§19)
 - 修复:render 结果值、共享 store 实例:`b700b80de2` / `6ce1e0a8bb`
-- **参考画布 S1–S7 集成:`9a314b6e88`(当前 HEAD,已推送)**
+- 参考画布 S1–S7 集成:`9a314b6e88`;布局微调:`e38e329cbb` / `1a81a9ebd4`
+- **2026-08-21(9 工具扩展 + 画布体验修复):本轮提交(见 git log;含 tools 文档、v3 视图持久化、视频播放修复、整理布局重写、跳动/悬停 bug 修复)**
 
 ## 10. 下一步
 
-1. **桌面可视化验收(建议)**:重启 `corepack yarn dev`(兼容模式)→ 打开/新建项目 → 验证:画布平移/缩放/拖拽、节点缩放/重命名/连线手柄、右键菜单(重试/修改提示词/打断)、图层列表(工具条开关/画布右上角浮窗)、属性面板、工具栏(缩放 ±/适配/重置/小地图显隐/图层显隐/编组/对齐/整理布局)、时间线回看。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
-2. **单测补强(可选)**:store 的 undo/redo/分组/对齐/吸附(需在 React 外跑,测试框架支持 import `project-store.ts` 经 tsx)——当前 smoke 已覆盖 capture 与 generate 核心路径。
-3. **收尾**:`docs/plans/canvas-studio.md` 主计划的 P4+ 章节按本次 S1–S7 结果修订(§17 完整版画布、§19 会话级归属需标注"已落地")。
+1. **桌面可视化验收**:重启 `corepack yarn dev`(兼容模式)→ 验证:视频节点可播放(控制条可点、可拖进度条)、缩放/平移/图层/小地图开关重启后恢复、「整理布局」无重叠且自动适配视野、时间线点击后拖拽/生成不再拉走视口、悬停画布不再跟随移动。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
+2. **P6 创作规范 skill(进行中)**:`@deepseek-ai/dsh-skill` 依赖已声明(lockfile 待 `corepack yarn install` 更新);实现 `src/skills/creation-spec.ts`(内联 markdown:核心规则/9 工具链/标准工作流/分镜表格式/镜头词汇/一致性要点)→ Host inject 加 `'skills'` + `ctx.effect(() => ctx.skills.register(...))` → smoke 测试(name kebab-case/description 非空/content 覆盖工具与 upload 规则)。
+3. **P6 收尾**:`scripts/dev-install.mjs` 完善;双面兼容验证(桌面 + 普通 `dsh web`,studio profile)。
+4. **技术债(文档既有记录)**:明文 API key → 加密/配置中心;`rename` 失败降级为尽力改名;项目注册表持久化 sessionId 防 workspace 堆积;store 单测补强(undo/redo/吸附,经 tsx 在 React 外跑)。
+5. **可选增强**:已声明未接工具的端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 九宫格);多参考图(image1~3 / image1~4);P4.5 项(手绘标注/独立 edge 层/缩略图 LOD);P7 内置化。

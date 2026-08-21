@@ -1,7 +1,11 @@
-import type { StudioCanvasNode } from '../../contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasView } from '../../contracts/canvas.js';
 /** Props for the pannable / zoomable canvas surface. */
 export interface CanvasSurfaceProps {
     nodes: readonly StudioCanvasNode[];
+    /** Controlled viewport + panel state (persisted per project in the store). */
+    view: StudioCanvasView;
+    /** Merge a viewport patch into the store (the caller owns persistence). */
+    onViewChange(patch: Partial<StudioCanvasView>): void;
     selectedNodeId: string | null;
     selectedNodeIds: readonly string[];
     /** Select a node (or null to clear); `multi` toggles in the multi-select roster. */
@@ -30,8 +34,6 @@ export interface CanvasSurfaceProps {
     onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void;
     /** When set, center this node in the viewport (timeline / review jump). */
     focusNodeId?: string | null;
-    /** Report the current zoom level so the frame can show it in the toolbar. */
-    onScaleChange?(scale: number): void;
     /** Whether the minimap overlay is shown (toggle lives in the toolbar). */
     minimapVisible?: boolean;
 }
@@ -46,11 +48,13 @@ export interface CanvasSurfaceHandle {
  * boxes placed at their canvas-space coordinates, the bloodline edge overlay,
  * snap alignment guides, a minimap, and corner zoom controls.
  *
- * Interactions follow the reference canvas controls: background pointer-down
- * pans (middle button or Shift+left also pan), wheel without modifiers pans,
- * Ctrl/Cmd+wheel zooms around the cursor, node pointer-down begins a node drag
- * (snap alignment + guides), the node's resize handles begin a resize, and the
- * link handle begins a manual connection drag. Keyboard: Delete removes the
+ * The viewport (`offset`/`scale`) is controlled: it lives in the project store
+ * so it survives restarts (canvas.json v3) and project switches. Interactions
+ * follow the reference canvas controls: background pointer-down pans (middle
+ * button or Shift+left also pan), wheel without modifiers pans, Ctrl/Cmd+wheel
+ * zooms around the cursor, node pointer-down begins a node drag (snap
+ * alignment + guides), the node's resize handles begin a resize, and the link
+ * handle begins a manual connection drag. Keyboard: Delete removes the
  * selection, Ctrl/Cmd+C/V copy/paste, Ctrl/Cmd+Z / Ctrl+Shift+Z / Ctrl+Y
  * undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
  */

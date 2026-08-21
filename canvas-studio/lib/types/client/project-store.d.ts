@@ -17,7 +17,7 @@
  * lives on client-minted pending nodes and is stripped on reload.
  */
 import { type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client';
-import type { StudioCanvasNode } from '../contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js';
 import type { StudioCaptureAsset } from '../asset-capture.js';
 import type { StudioProject } from '../contracts/project.js';
 /** Mint a node id in the browser (secure context over loopback). */
@@ -26,6 +26,12 @@ export declare function newNodeId(): string;
 export interface HistoryEntry {
     projectId: string;
     nodes: readonly StudioCanvasNode[];
+}
+/** Per-project viewport entry: the view plus whether it came from disk. */
+export interface ProjectViewEntry {
+    view: StudioCanvasView;
+    /** False when no persisted view existed (client should fit content once). */
+    saved: boolean;
 }
 /** Project-list + canvas store state. */
 export interface ProjectStoreState {
@@ -39,6 +45,8 @@ export interface ProjectStoreState {
     creating: boolean;
     /** 每个项目的画布节点（按生成时间追加）。 */
     nodes: Readonly<Record<string, readonly StudioCanvasNode[]>>;
+    /** 每个项目的视口/面板状态（缩放、平移、图层与小地图开关）。 */
+    views: Readonly<Record<string, ProjectViewEntry>>;
     /** Undo/redo snapshot history (global, entries carry their project). */
     history: HistoryEntry[];
     historyIndex: number;
@@ -54,6 +62,11 @@ export type ProjectStoreActions = {
     setCreating: (draft: ProjectStoreState, creating: boolean) => void;
     /** 打开项目时载入持久化节点（剥离瞬态状态）。 */
     setNodes: (draft: ProjectStoreState, projectId: string, nodes: readonly StudioCanvasNode[]) => void;
+    /**
+     * 载入 / 更新某项目的视口与面板状态（增量合并）。`saved` 标记该视图是否
+     * 来自磁盘（未保存过时客户端应先适配内容一次）。
+     */
+    setView: (draft: ProjectStoreState, projectId: string, patch: Partial<StudioCanvasView>, saved?: boolean) => void;
     /** 捕获一条 agent 资产 → 自动布局 + 血缘链接后写入节点列表。 */
     addAsset: (draft: ProjectStoreState, projectId: string, asset: StudioCaptureAsset) => void;
     /** 选中节点（ctrl/cmd 追加多选；null 清空）。 */
@@ -86,11 +99,7 @@ export type ProjectStoreActions = {
     groupSelected: (draft: ProjectStoreState, projectId: string) => void;
     /** 解组：移除 group 节点并释放子节点 parentId（写历史）。 */
     ungroup: (draft: ProjectStoreState, projectId: string, groupId: string) => void;
-    /** 对齐（union 边界：左/中/右/上/中/下，写历史）。 */
-    alignNodes: (draft: ProjectStoreState, projectId: string, ids: string[], alignment: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom') => void;
-    /** 分布（水平/垂直等距，写历史）。 */
-    distributeNodes: (draft: ProjectStoreState, projectId: string, ids: string[], direction: 'horizontal' | 'vertical') => void;
-    /** 按血缘深度一键整理布局（写历史）。 */
+    /** 一键整理布局：无重叠网格 + 组随行（写历史）。适配视野由调用方负责。 */
     autoArrange: (draft: ProjectStoreState, projectId: string) => void;
     /** 生成中的占位节点（client 侧瞬态）。 */
     setPendingNode: (draft: ProjectStoreState, projectId: string, node: StudioCanvasNode) => void;
@@ -105,6 +114,8 @@ export type ProjectStoreActions = {
 };
 /** 取某项目的全部节点（未绑定或空时返回空数组）。 */
 export declare function nodesOf(state: ProjectStoreState, projectId: string | null): readonly StudioCanvasNode[];
+/** 取某项目的视口条目（缺失时回退默认值，`saved: false`）。 */
+export declare function viewOf(state: ProjectStoreState, projectId: string | null): ProjectViewEntry;
 /** 取某项目最新的画布节点（用于回看 / 默认聚焦）；缺失时返回 null。 */
 export declare function lastNodeOf(state: ProjectStoreState, projectId: string | null): StudioCanvasNode | null;
 /** 取当前选中的节点。 */

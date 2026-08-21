@@ -1,5 +1,5 @@
 import type { StudioProject } from './contracts/project.js';
-import type { StudioCanvasNode } from './contracts/canvas.js';
+import type { StudioCanvasDocument, StudioCanvasNode, StudioCanvasView } from './contracts/canvas.js';
 /**
  * Reject names that cannot round-trip through the registry or the filesystem.
  * @param name - trimmed candidate project name.
@@ -26,18 +26,21 @@ export declare class ProjectRegistry {
     /** The absolute path of one project's canvas document. */
     canvasFile(projectId: string): string;
     /**
-     * Read a project's canvas nodes. Returns an empty list when the document is
-     * missing or corrupt (the canvas is disposable UI state, never fatal).
+     * Read a project's canvas document (nodes + persisted viewport). Returns an
+     * empty node list and no view when the document is missing or corrupt (the
+     * canvas is disposable UI state, never fatal).
      * @param projectId - target project id.
      */
-    readCanvas(projectId: string): Promise<StudioCanvasNode[]>;
+    readCanvas(projectId: string): Promise<StudioCanvasDocument>;
     /**
-     * Persist a project's canvas nodes atomically (a crash never leaves a
-     * half-written canvas document behind).
+     * Persist a project's canvas nodes (and viewport when provided) atomically
+     * (a crash never leaves a half-written canvas document behind).
      * @param projectId - target project id.
      * @param nodes - the full node list for the project.
+     * @param view - the client viewport/panel state; omitted by Host-authored
+     *   writes, which preserve the previously saved view untouched.
      */
-    writeCanvas(projectId: string, nodes: readonly StudioCanvasNode[]): Promise<void>;
+    writeCanvas(projectId: string, nodes: readonly StudioCanvasNode[], view?: StudioCanvasView): Promise<void>;
     /**
      * Append one generated-media node to a project's canvas document. The Host
      * writes this the moment an asset lands on disk, so the canvas reflects a

@@ -1,0 +1,126 @@
+/**
+ * Pure canvas-view helpers shared by the Host persistence layer and the
+ * browser store: viewport validation for `canvas.json` v3 documents and the
+ * overlap-free auto-arrange grid. Kept free of runtime imports so the Host
+ * tsc emit (`lib/canvas-view.js`) is directly testable under `node --test`.
+ */
+import type { StudioCanvasNode, StudioCanvasView } from './contracts/canvas.js'
+import { VIEW_DEFAULTS } from './contracts/canvas.js'
+
+/** Zoom clamp range (matches the surface wheel/zoom clamp). */
+export const MIN_VIEW_SCALE = 0.1
+export const MAX_VIEW_SCALE = 5
+
+/** Clamp a zoom factor into the supported range. */
+export function clampViewScale(scale: number): number {
+  return Math.min(MAX_VIEW_SCALE, Math.max(MIN_VIEW_SCALE, scale))
+}
+
+/**
+ * Coerce an unknown parsed `view` value into a safe viewport. Returns
+ * `undefined` when the value is absent or not an object, so callers can
+ * distinguish "no saved view" (fit content instead) from a default one.
+ * Invalid individual fields fall back to their defaults; scale is clamped.
+ */
+export function normalizeCanvasView(value: unknown): StudioCanvasView | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const numberOr = (candidate: unknown, fallback: number): number =>
+    typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : fallback
+  const boolOr = (candidate: unknown, fallback: boolean): boolean =>
+    typeof candidate === 'boolean' ? candidate : fallback
+  return {
+    x: numberOr(raw.x, VIEW_DEFAULTS.x),
+    y: numberOr(raw.y, VIEW_DEFAULTS.y),
+    scale: clampViewScale(numberOr(raw.scale, VIEW_DEFAULTS.scale)),
+    layersOpen: boolOr(raw.layersOpen, VIEW_DEFAULTS.layersOpen),
+    minimapVisible: boolOr(raw.minimapVisible, VIEW_DEFAULTS.minimapVisible),
+  }
+}
+
+/** Arrange-grid gaps between cells (canvas-space pixels). */
+const ARRANGE_GAP_X = 48
+const ARRANGE_GAP_Y = 48
+const ARRANGE_ORIGIN = 40
+
+/** One top-level layout unit: a node plus the children that travel with it. */
+interface ArrangeUnit {
+  node: StudioCanvasNode
+  /** Child nodes (parentId === unit.id) translated with the unit. */
+  children: StudioCanvasNode[]
+  depth: number
+}
+
+/**
+ * Compute the auto-arrange layout: an overlap-free grid over top-level units
+ * (nodes without a live parent), ordered by bloodline depth then creation
+ * time. Group nodes travel with their children (relative offsets inside the
+ * group are preserved), so a group's box keeps wrapping its members and no
+ * two boxes can overlap regardless of user-resized sizes.
+ * @returns the new canvas-space position per moved node id.
+ */
+export function computeArrangeLayout(
+  nodes: readonly StudioCanvasNode[],
+): Map<string, { x: number; y: number }> {
+  const positions = new Map<string, { x: number; y: number }>()
+  if (nodes.length === 0) return positions
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+
+  // Bloodline depth (sourceIds/parentId chain length) keeps related nodes
+  // adjacent in reading order; cycle-guarded like the store's depthOf.
+  const depthOf = (node: StudioCanvasNode): number => {
+    let maxDepth = 0
+    const seen = new Set<string>([node.id])
+    const queue: Array<{ id: string; depth: number }> = [
+      ...node.sourceIds,
+      ...(node.parentId !== undefined ? [node.parentId] : []),
+    ].map((id) => ({ id, depth: 1 }))
+    while (queue.length > 0) {
+      const current = queue.shift()!
+      if (seen.has(current.id)) continue
+      seen.add(current.id)
+      maxDepth = Math.max(maxDepth, current.depth)
+      const parent = byId.get(current.id)
+      if (parent === undefined) continue
+      for (const next of [...parent.sourceIds, ...(parent.parentId !== undefined ? [parent.parentId] : [])]) {
+        queue.push({ id: next, depth: current.depth + 1 })
+      }
+    }
+    return maxDepth
+  }
+
+  const units: ArrangeUnit[] = []
+  const childrenByParent = new Map<string, StudioCanvasNode[]>()
+  for (const node of nodes) {
+    if (node.parentId === undefined || !byId.has(node.parentId)) {
+      units.push({ node, children: [], depth: depthOf(node) })
+    } else {
+      const siblings = childrenByParent.get(node.parentId) ?? []
+      siblings.push(node)
+      childrenByParent.set(node.parentId, siblings)
+    }
+  }
+  for (const unit of units) {
+    unit.children = childrenByParent.get(unit.node.id) ?? []
+  }
+  units.sort((left, right) =>
+    left.depth !== right.depth ? left.depth - right.depth : left.node.createdAt - right.node.createdAt)
+  if (units.length === 0) return positions
+
+  // Cell size from the largest unit guarantees no overlap for any sizes.
+  const cellWidth = Math.max(...units.map((unit) => unit.node.width)) + ARRANGE_GAP_X
+  const cellHeight = Math.max(...units.map((unit) => unit.node.height)) + ARRANGE_GAP_Y
+  const columns = Math.ceil(Math.sqrt(units.length))
+
+  units.forEach((unit, index) => {
+    const targetX = ARRANGE_ORIGIN + (index % columns) * cellWidth
+    const targetY = ARRANGE_ORIGIN + Math.floor(index / columns) * cellHeight
+    const deltaX = targetX - unit.node.x
+    const deltaY = targetY - unit.node.y
+    positions.set(unit.node.id, { x: targetX, y: targetY })
+    for (const child of unit.children) {
+      positions.set(child.id, { x: child.x + deltaX, y: child.y + deltaY })
+    }
+  })
+  return positions
+}

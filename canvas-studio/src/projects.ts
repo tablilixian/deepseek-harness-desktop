@@ -11,7 +11,8 @@ import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import type { StudioProject } from './contracts/project.js'
 import { CANVAS_DOCUMENT_VERSION, NODE_DEFAULTS } from './contracts/canvas.js'
-import type { StudioCanvasDocument, StudioCanvasNode } from './contracts/canvas.js'
+import type { StudioCanvasDocument, StudioCanvasNode, StudioCanvasView } from './contracts/canvas.js'
+import { normalizeCanvasView } from './canvas-view.js'
 
 /** Registry file format version; bump with a migration when the shape changes. */
 const REGISTRY_VERSION = 1
@@ -78,33 +79,40 @@ export class ProjectRegistry {
   }
 
   /**
-   * Read a project's canvas nodes. Returns an empty list when the document is
-   * missing or corrupt (the canvas is disposable UI state, never fatal).
+   * Read a project's canvas document (nodes + persisted viewport). Returns an
+   * empty node list and no view when the document is missing or corrupt (the
+   * canvas is disposable UI state, never fatal).
    * @param projectId - target project id.
    */
-  async readCanvas(projectId: string): Promise<StudioCanvasNode[]> {
+  async readCanvas(projectId: string): Promise<StudioCanvasDocument> {
     let text: string
     try {
       text = await readFile(this.canvasFile(projectId), 'utf8')
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: CANVAS_DOCUMENT_VERSION, nodes: [] }
       throw error
     }
     try {
       const document = JSON.parse(text) as unknown
       return normalizeCanvasDocument(document)
     } catch {
-      return []
+      return { version: CANVAS_DOCUMENT_VERSION, nodes: [] }
     }
   }
 
   /**
-   * Persist a project's canvas nodes atomically (a crash never leaves a
-   * half-written canvas document behind).
+   * Persist a project's canvas nodes (and viewport when provided) atomically
+   * (a crash never leaves a half-written canvas document behind).
    * @param projectId - target project id.
    * @param nodes - the full node list for the project.
+   * @param view - the client viewport/panel state; omitted by Host-authored
+   *   writes, which preserve the previously saved view untouched.
    */
-  async writeCanvas(projectId: string, nodes: readonly StudioCanvasNode[]): Promise<void> {
+  async writeCanvas(
+    projectId: string,
+    nodes: readonly StudioCanvasNode[],
+    view?: StudioCanvasView,
+  ): Promise<void> {
     // Merge-protect: a client save replaces the whole document, but generated
     // media nodes written by the Host during `generateAsset` may not be present
     // in the client's in-memory list yet (a generation just completed). Keep any
@@ -112,10 +120,13 @@ export class ProjectRegistry {
     // cannot clobber a freshly generated asset.
     const incomingIds = new Set(nodes.map((node) => node.id))
     const existing = await this.readCanvas(projectId)
-    const preserved = existing.filter((node) => !incomingIds.has(node.id))
+    const preserved = existing.nodes.filter((node) => !incomingIds.has(node.id))
+    // Host writes omit `view`; keep whatever view the last client save left.
+    const nextView = view ?? normalizeCanvasView(existing.view)
     const document: StudioCanvasDocument = {
       version: CANVAS_DOCUMENT_VERSION,
       nodes: [...nodes, ...preserved],
+      ...(nextView !== undefined ? { view: nextView } : {}),
     }
     await writeFileAtomic(this.canvasFile(projectId), `${JSON.stringify(document, null, 2)}\n`, {
       mode: 0o600,
@@ -134,8 +145,8 @@ export class ProjectRegistry {
    */
   async appendCanvasNode(projectId: string, node: StudioCanvasNode): Promise<void> {
     const existing = await this.readCanvas(projectId)
-    if (existing.some((candidate) => candidate.id === node.id)) return
-    await this.writeCanvas(projectId, [...existing, node])
+    if (existing.nodes.some((candidate) => candidate.id === node.id)) return
+    await this.writeCanvas(projectId, [...existing.nodes, node])
   }
 
   /**
@@ -271,15 +282,17 @@ function isCanvasNode(value: unknown): value is StudioCanvasNode {
     && Array.isArray(node.sourceIds)
 }
 
-/** Coerce an unknown parsed canvas document into a safe node list (lenient). */
-function normalizeCanvasDocument(value: unknown): StudioCanvasNode[] {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return []
+/** Coerce an unknown parsed canvas document into a safe document (lenient). */
+function normalizeCanvasDocument(value: unknown): StudioCanvasDocument {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { version: CANVAS_DOCUMENT_VERSION, nodes: [] }
+  }
   const document = value as Record<string, unknown>
-  if (!Array.isArray(document.nodes)) return []
+  if (!Array.isArray(document.nodes)) return { version: CANVAS_DOCUMENT_VERSION, nodes: [] }
   // S1 migration: nodes predating the visual-state fields get defaults. zIndex
   // falls back to the document order (stable for ties broken by createdAt).
   let nextZ = 1
-  return document.nodes
+  const nodes = document.nodes
     .filter(isCanvasNode)
     .map((node) => {
       const migrated: StudioCanvasNode = {
@@ -294,4 +307,12 @@ function normalizeCanvasDocument(value: unknown): StudioCanvasNode[] {
       nextZ += 1
       return migrated
     })
+  // v3 migration: documents predating the viewport/panel state carry no view;
+  // invalid fields degrade to their defaults (normalizeCanvasView is lenient).
+  const view = normalizeCanvasView(document.view)
+  return {
+    version: CANVAS_DOCUMENT_VERSION,
+    nodes,
+    ...(view !== undefined ? { view } : {}),
+  }
 }

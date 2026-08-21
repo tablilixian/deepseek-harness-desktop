@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { BlockList, isIP } from 'node:net';
 import { extname, join, sep } from 'node:path';
 import { generateAsset } from './generate.js';
+import { normalizeCanvasView } from './canvas-view.js';
 const ROUTE_PROJECTS = '/canvas-studio/projects';
 const ROUTE_GENERATE = '/canvas-studio/generate';
 const ROUTE_ASSETS = '/canvas-studio/assets';
@@ -66,6 +67,38 @@ function sendJson(res, status, value) {
     res.setHeader('cache-control', 'no-store');
     res.setHeader('x-content-type-options', 'nosniff');
     res.end(body);
+}
+/**
+ * Parse a single-range `bytes=` header against the asset size. Returns the
+ * inclusive byte span, `'invalid'` for an unsatisfiable range (HTTP 416), or
+ * `undefined` when the header is absent/malformed (serve the whole file).
+ */
+function parseByteRange(header, size) {
+    if (header === undefined)
+        return undefined;
+    const match = /^bytes=(\d*)-(\d*)$/u.exec(header.trim());
+    if (match === null)
+        return undefined;
+    const [, rawStart, rawEnd] = match;
+    if (rawStart === '' && rawEnd === '')
+        return undefined;
+    let start;
+    let end;
+    if (rawStart === '') {
+        const suffix = Number(rawEnd);
+        if (!Number.isInteger(suffix) || suffix <= 0)
+            return 'invalid';
+        start = Math.max(0, size - suffix);
+        end = size - 1;
+    }
+    else {
+        start = Number(rawStart);
+        end = rawEnd === '' ? size - 1 : Math.min(Number(rawEnd), size - 1);
+    }
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start > end || start >= size) {
+        return 'invalid';
+    }
+    return { start, end };
 }
 /** Read a bounded JSON request body, rejecting on abort, oversize, or invalid JSON. */
 function readJson(req, signal) {
@@ -307,10 +340,27 @@ export function registerStudioRoutes(ctx, registry) {
                 try {
                     const data = await readFile(target);
                     const contentType = extname(file).toLowerCase() === '.mp4' ? 'video/mp4' : 'image/png';
-                    res.statusCode = 200;
                     res.setHeader('content-type', contentType);
                     res.setHeader('cache-control', 'no-store');
                     res.setHeader('x-content-type-options', 'nosniff');
+                    // Media elements issue `Range` requests; honor a single byte range so
+                    // <video> can stream and seek (206), falling back to the full 200 body.
+                    const range = parseByteRange(req.headers.range, data.byteLength);
+                    if (range === 'invalid') {
+                        res.statusCode = 416;
+                        res.setHeader('content-range', `bytes */${data.byteLength}`);
+                        res.end();
+                        return;
+                    }
+                    if (range !== undefined) {
+                        res.statusCode = 206;
+                        res.setHeader('accept-ranges', 'bytes');
+                        res.setHeader('content-range', `bytes ${range.start}-${range.end}/${data.byteLength}`);
+                        res.end(data.subarray(range.start, range.end + 1));
+                        return;
+                    }
+                    res.statusCode = 200;
+                    res.setHeader('accept-ranges', 'bytes');
                     res.end(data);
                 }
                 catch {
@@ -333,9 +383,10 @@ export function registerStudioRoutes(ctx, registry) {
                         return;
                     }
                     try {
-                        const nodes = await registry.readCanvas(projectId);
-                        if (!res.destroyed)
-                            sendJson(res, 200, { nodes });
+                        const document = await registry.readCanvas(projectId);
+                        if (!res.destroyed) {
+                            sendJson(res, 200, { nodes: document.nodes, view: document.view ?? null });
+                        }
                     }
                     catch (cause) {
                         if (!res.destroyed)
@@ -372,7 +423,10 @@ export function registerStudioRoutes(ctx, registry) {
                         sendJson(res, 413, { error: 'canvas node count exceeded' });
                         return;
                     }
-                    await registry.writeCanvas(body.projectId, nodes);
+                    // The view is client-owned UI state; validate leniently (invalid
+                    // fields degrade to defaults, absence keeps the previously saved one).
+                    const view = normalizeCanvasView(body.view);
+                    await registry.writeCanvas(body.projectId, nodes, view);
                     if (!controller.signal.aborted && !res.destroyed)
                         sendJson(res, 200, { ok: true });
                 }

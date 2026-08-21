@@ -18,10 +18,18 @@ export const DRAMA_API_KEY: string =
 /** 生成接口端点（与 WL 适配器对齐）。 */
 export const DRAMA_ENDPOINTS = {
   txt2image: '/api/v1/generate/txt2image',
+  txt2imageanime: '/api/v1/generate/txt2imageanime',
   image2image: '/api/v1/generate/image2image',
   uploadimage: '/api/v1/generate/uploadimage',
+  promptEnhance: '/api/v1/generate/image2promptenhance',
+  styleTransfer: '/api/v1/generate/image2styletransfer',
+  image2vl: '/api/v1/generate/image2vl',
+  storyboard: '/api/v1/generate/image2storyboard',
+  deduction: '/api/v1/generate/deduction',
+  inpaint: '/api/v1/generate/image2inpaint',
   videoMsr: '/api/v1/generate/image2videomsr',
   videoMkr: '/api/v1/generate/image2videomkr',
+  videoMkrGrid: '/api/v1/generate/image2videomkrgrid',
 } as const
 
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */

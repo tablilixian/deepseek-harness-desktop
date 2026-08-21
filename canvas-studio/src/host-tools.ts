@@ -11,7 +11,7 @@ import { sep } from 'node:path'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ProjectRegistry } from './projects.js'
-import { generateAsset, type GenerateParams, type GenerateResult } from './generate.js'
+import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, type GenerateParams, type GenerateResult } from './generate.js'
 
 /** 产物结果 schema（工具返回给模型的结构）。 */
 const resultSchema = {
@@ -30,6 +30,24 @@ function renderResult(_args: unknown, value: unknown): ContentBlock[] {
   const result = value as GenerateResult
   const duration = result.duration !== undefined ? `, ${result.duration}s` : ''
   return [{ type: 'text', text: `已生成产物: ${result.url} (${result.width}x${result.height}${duration})` }]
+}
+
+/** 把上传结果渲染成模型可读的文本块。 */
+function renderUploadResult(_args: unknown, value: unknown): ContentBlock[] {
+  const v = value as { filename: string }
+  return [{ type: 'text', text: `已上传到 Drama Backend: ${v.filename}` }]
+}
+
+/** 把文本结果渲染成模型可读的文本块。 */
+function renderTextResult(_args: unknown, value: unknown): ContentBlock[] {
+  const v = value as { text: string }
+  return [{ type: 'text', text: v.text }]
+}
+
+/** 把推演结果渲染成模型可读的文本块。 */
+function renderDeductionResult(_args: unknown, value: unknown): ContentBlock[] {
+  const v = value as { analysis: string; deduction: string }
+  return [{ type: 'text', text: `画面分析: ${v.analysis}\n\n剧情推演: ${v.deduction}` }]
 }
 
 /**
@@ -74,71 +92,215 @@ function runGeneration(
 /**
  * 创建 P3 媒体生成工具集（供 Host 的 `ctx.tools.register` 逐条注册）。
  * @param registry - 项目注册表。
- * @returns 三个 `defineTool` 定义。
+ * @returns 9 个 `defineTool` 定义：image_generate, upload_image, video_generate,
+ *   video_composite, prompt_enhance, image2vl, style_transfer, storyboard_generate, deduction。
  */
-export function createStudioTools(registry: ProjectRegistry) {
+export function createStudioTools(registry: ProjectRegistry, port: number) {
   return [
     defineTool({
       name: 'image_generate',
       description:
-        '根据提示词生成一张图片。可传入 imageUrl 作为参考图进行图生图。返回图片的托管 URL 与尺寸。',
+        '根据提示词生成一张图片。如果传入 filename（upload_image 返回的 Drama Backend 文件名），则基于该参考图进行图生图。返回图片的托管 URL 与尺寸。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
-        imageUrl: { type: 'string' as const, description: '可选参考图 URL（图生图）' },
+        filename: { type: 'string' as const, description: '可选参考图：已上传的 Drama Backend 文件名（来自 upload_image 工具，用于图生图）' },
         negativePrompt: { type: 'string' as const, description: '反向提示词' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; aspectRatio?: string; imageUrl?: string; negativePrompt?: string }
+        const a = args as { prompt: string; aspectRatio?: string; filename?: string; negativePrompt?: string }
         return runGeneration(registry, 'image_generate', {
           prompt: a.prompt,
           ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
-          ...(a.imageUrl !== undefined ? { imageUrl: a.imageUrl } : {}),
+          ...(a.filename !== undefined ? { filename: a.filename } : {}),
           ...(a.negativePrompt !== undefined ? { negativePrompt: a.negativePrompt } : {}),
         }, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
     defineTool({
+      name: 'upload_image',
+      description:
+        '将图片上传到 Drama Backend 服务器，返回服务器上的文件名。该文件名可直接用于其他工具的 filename 或 filenames 参数。所有需要图片作为输入的工具都必须先使用本工具上传图片，拿到服务器文件名后再传入。',
+      parameters: {
+        imageUrl: { type: 'string' as const, required: true, description: '图片 URL（通常是 image_generate 的产物 URL）' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            filename: { type: 'string' as const, description: 'Drama Backend 服务器上的文件名' },
+          },
+        },
+        render: renderUploadResult,
+      },
+      async execute(args, exec) {
+        const a = args as { imageUrl: string }
+        const sourceUrl = port !== undefined ? resolveImageUrl(a.imageUrl, port) : a.imageUrl
+        const filename = await uploadImage(sourceUrl, exec.signal)
+        return { filename }
+      },
+    }),
+    defineTool({
       name: 'video_generate',
       description:
-        '根据提示词与一张参考图生成视频（图生视频）。imageUrl 通常来自 image_generate 的产物 URL。返回视频的托管 URL、尺寸与时长。',
+        '根据提示词与一张参考图生成视频（图生视频）。必须提供 filename（upload_image 返回的 Drama Backend 文件名）。返回视频的托管 URL、尺寸与时长。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
-        imageUrl: { type: 'string' as const, required: true, description: '参考图 URL（图生视频的输入帧）' },
+        filename: { type: 'string' as const, required: true, description: '已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
         duration: { type: 'number' as const, description: '视频时长（秒），默认 5' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; imageUrl: string; aspectRatio?: string; duration?: number }
-        return runGeneration(registry, 'video_generate', {
-          prompt: a.prompt,
-          imageUrl: a.imageUrl,
-          ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
-          ...(a.duration !== undefined ? { duration: a.duration } : {}),
-        }, exec.signal, exec.agent?.session.header.cwd)
+        const a = args as { prompt: string; filename: string; aspectRatio?: string; duration?: number }
+        const params: GenerateParams = { prompt: a.prompt, filename: a.filename }
+        if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
+        if (a.duration !== undefined) params.duration = a.duration
+        return runGeneration(registry, 'video_generate', params, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
     defineTool({
       name: 'video_composite',
       description:
-        '将多张参考图（imageUrls）合成一段视频，首尾帧插值。返回合成视频的托管 URL、尺寸与时长。',
+        '将多张参考图合成一段视频，首尾帧插值。必须提供 filenames（upload_image 返回的 Drama Backend 文件名数组）。返回合成视频的托管 URL、尺寸与时长。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
-        imageUrls: { type: 'array' as const, description: '参考图 URL 数组（至少 1 张，最多 4 张）' },
+        filenames: { type: 'array' as const, required: true, description: '已上传的 Drama Backend 文件名数组（来自 upload_image 工具）' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
         duration: { type: 'number' as const, description: '视频时长（秒），默认 12' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; imageUrls?: string[]; aspectRatio?: string; duration?: number }
-        return runGeneration(registry, 'video_composite', {
-          prompt: a.prompt,
-          ...(a.imageUrls !== undefined ? { imageUrls: a.imageUrls } : {}),
-          ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
-          ...(a.duration !== undefined ? { duration: a.duration } : {}),
-        }, exec.signal, exec.agent?.session.header.cwd)
+        const a = args as { prompt: string; filenames: string[]; aspectRatio?: string; duration?: number }
+        const params: GenerateParams = { prompt: a.prompt, filenames: a.filenames }
+        if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
+        if (a.duration !== undefined) params.duration = a.duration
+        return runGeneration(registry, 'video_composite', params, exec.signal, exec.agent?.session.header.cwd)
+      },
+    }),
+    defineTool({
+      name: 'prompt_enhance',
+      description:
+        '增强提示词，使生成的图像/视频质量更高。输入原始提示词，返回更丰富、更详细的描述。',
+      parameters: {
+        prompt: { type: 'string' as const, required: true, description: '原始提示词' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' as const, description: '增强后的提示词' },
+          },
+        },
+        render: renderTextResult,
+      },
+      async execute(args, exec) {
+        const a = args as { prompt: string }
+        const text = await enhancePrompt(a.prompt, exec.signal)
+        return { text }
+      },
+    }),
+    defineTool({
+      name: 'image2vl',
+      description:
+        '分析一张图片的内容，返回详细的画面描述。必须提供 filename（upload_image 返回的 Drama Backend 文件名）。可用于分析已生成的图片，为后续视频生成提供参考。',
+      parameters: {
+        filename: { type: 'string' as const, required: true, description: '已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
+        prompt: { type: 'string' as const, required: true, description: '分析提示词，描述需要分析的内容' },
+        systemPrompt: { type: 'string' as const, description: '系统提示词，设定分析角色和风格' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' as const, description: '画面分析结果' },
+          },
+        },
+        render: renderTextResult,
+      },
+      async execute(args, exec) {
+        const a = args as { filename: string; prompt: string; systemPrompt?: string }
+        const text = await analyzeImage(a.filename, a.prompt, a.systemPrompt ?? '你是一个专业的影视镜头分析师。请从电影摄影的角度分析这张画面。', exec.signal)
+        return { text }
+      },
+    }),
+    defineTool({
+      name: 'style_transfer',
+      description:
+        '将一张图片的风格迁移到另一张图片上。必须提供 filename（目标图）和 styleFilename（风格参考图），两者均为 upload_image 返回的 Drama Backend 文件名。返回图片的托管 URL 与尺寸。',
+      parameters: {
+        filename: { type: 'string' as const, required: true, description: '目标图：已上传的 Drama Backend 文件名（需要改变风格的图片）' },
+        styleFilename: { type: 'string' as const, required: true, description: '风格参考图：已上传的 Drama Backend 文件名（提供风格参考的图片）' },
+        prompt: { type: 'string' as const, description: '增强提示词，描述期望的风格效果' },
+        enhance: { type: 'boolean' as const, description: '是否增强风格迁移效果' },
+        aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
+      },
+      output: { schema: resultSchema, render: renderResult },
+      async execute(args, exec) {
+        const a = args as { filename: string; styleFilename: string; prompt?: string; enhance?: boolean; aspectRatio?: string }
+        const params: GenerateParams = {
+          prompt: a.prompt ?? '',
+          filename: a.filename,
+          styleFilename: a.styleFilename,
+        }
+        if (a.enhance !== undefined) params.enhance = a.enhance
+        if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
+        return runGeneration(registry, 'style_transfer', params, exec.signal, exec.agent?.session.header.cwd)
+      },
+    }),
+    defineTool({
+      name: 'storyboard_generate',
+      description:
+        '根据文本描述生成分镜图像（格子分镜）。每行描述一个分镜场景。可传入 filename（upload_image 返回的 Drama Backend 文件名）作为参考图。返回图片的托管 URL 与尺寸。',
+      parameters: {
+        prompt: { type: 'string' as const, required: true, description: '场景描述，每行描述一个分镜场景' },
+        gridnum: { type: 'number' as const, description: '分镜格子数量，默认 4' },
+        filename: { type: 'string' as const, description: '可选参考图：已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
+        aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
+      },
+      output: { schema: resultSchema, render: renderResult },
+      async execute(args, exec) {
+        const a = args as { prompt: string; gridnum?: number; filename?: string; aspectRatio?: string }
+        const params: GenerateParams = { prompt: a.prompt }
+        if (a.gridnum !== undefined) params.gridnum = a.gridnum
+        if (a.filename !== undefined) params.filename = a.filename
+        if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
+        return runGeneration(registry, 'storyboard_generate', params, exec.signal, exec.agent?.session.header.cwd)
+      },
+    }),
+    defineTool({
+      name: 'deduction',
+      description:
+        '剧情推演：基于当前帧画面分析 + 剧情方向，推演下一帧的构图描述和关键要素。必须提供 filename（upload_image 返回的 Drama Backend 文件名）。返回画面分析和推演结果。',
+      parameters: {
+        filename: { type: 'string' as const, required: true, description: '当前帧图片：已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
+        analysisPrompt: { type: 'string' as const, description: 'VLM 画面分析提示词' },
+        deductionPrompt: { type: 'string' as const, description: '剧情推演提示词' },
+        analysisSystemPrompt: { type: 'string' as const, description: 'VLM 画面分析系统提示词' },
+        deductionSystemPrompt: { type: 'string' as const, description: '剧情推演系统提示词' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            analysis: { type: 'string' as const, description: '画面分析结果' },
+            deduction: { type: 'string' as const, description: '剧情推演结果' },
+          },
+        },
+        render: renderDeductionResult,
+      },
+      async execute(args, exec) {
+        const a = args as { filename: string; analysisPrompt?: string; deductionPrompt?: string; analysisSystemPrompt?: string; deductionSystemPrompt?: string }
+        const result = await deduction(a.filename, a.analysisPrompt, a.deductionPrompt, a.analysisSystemPrompt, a.deductionSystemPrompt, exec.signal)
+        return {
+          analysis: JSON.stringify(result.analysis ?? ''),
+          deduction: JSON.stringify(result.deduction ?? ''),
+        }
       },
     }),
   ]

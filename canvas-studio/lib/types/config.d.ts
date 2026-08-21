@@ -5,10 +5,18 @@ export declare const DRAMA_API_KEY: string;
 /** 生成接口端点（与 WL 适配器对齐）。 */
 export declare const DRAMA_ENDPOINTS: {
     readonly txt2image: "/api/v1/generate/txt2image";
+    readonly txt2imageanime: "/api/v1/generate/txt2imageanime";
     readonly image2image: "/api/v1/generate/image2image";
     readonly uploadimage: "/api/v1/generate/uploadimage";
+    readonly promptEnhance: "/api/v1/generate/image2promptenhance";
+    readonly styleTransfer: "/api/v1/generate/image2styletransfer";
+    readonly image2vl: "/api/v1/generate/image2vl";
+    readonly storyboard: "/api/v1/generate/image2storyboard";
+    readonly deduction: "/api/v1/generate/deduction";
+    readonly inpaint: "/api/v1/generate/image2inpaint";
     readonly videoMsr: "/api/v1/generate/image2videomsr";
     readonly videoMkr: "/api/v1/generate/image2videomkr";
+    readonly videoMkrGrid: "/api/v1/generate/image2videomkrgrid";
 };
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */
 export declare function sizeForAspectRatio(aspectRatio: string | undefined): {

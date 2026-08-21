@@ -3,7 +3,8 @@
  * registry and canvas routes (the community-market client fetch pattern).
  */
 import type { StudioProject } from '../contracts/project.js'
-import type { StudioCanvasNode } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
+import { normalizeCanvasView } from '../canvas-view.js'
 import type { GenerateParams } from '../generate.js'
 
 /** HTTP facts used to localize safe Client-facing Studio failures. */
@@ -73,23 +74,34 @@ function normalizeCanvasNodes(nodes: readonly StudioCanvasNode[]): StudioCanvasN
   })
 }
 
-/** Load a project's persisted canvas nodes (empty list when none). */
-export async function loadStudioCanvas(projectId: string, signal?: AbortSignal): Promise<readonly StudioCanvasNode[]> {
-  const response = await readJson<{ nodes: readonly StudioCanvasNode[] }>(
+/** Load a project's persisted canvas (nodes + viewport; view is null pre-v3). */
+export async function loadStudioCanvas(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<{ nodes: StudioCanvasNode[]; view: StudioCanvasView | null }> {
+  const response = await readJson<{ nodes: readonly StudioCanvasNode[]; view: unknown }>(
     await fetch(`/canvas-studio/canvas?projectId=${encodeURIComponent(projectId)}`, {
       cache: 'no-store',
       ...(signal === undefined ? {} : { signal }),
     }),
   )
-  return normalizeCanvasNodes(response.nodes)
+  return {
+    nodes: normalizeCanvasNodes(response.nodes),
+    view: normalizeCanvasView(response.view) ?? null,
+  }
 }
 
-/** Persist a project's full canvas node list. */
-export async function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], signal?: AbortSignal): Promise<void> {
+/** Persist a project's full canvas node list plus the current viewport state. */
+export async function saveStudioCanvas(
+  projectId: string,
+  nodes: readonly StudioCanvasNode[],
+  view: StudioCanvasView,
+  signal?: AbortSignal,
+): Promise<void> {
   await readJson<{ ok: boolean }>(await fetch('/canvas-studio/canvas', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ projectId, nodes }),
+    body: JSON.stringify({ projectId, nodes, view }),
     ...(signal === undefined ? {} : { signal }),
   }))
 }

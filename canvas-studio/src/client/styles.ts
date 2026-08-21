@@ -307,6 +307,11 @@ const STUDIO_STYLES = `
   object-fit: cover;
   display: block;
   background: var(--dsw-alias-bg-base);
+}
+
+/* Images stay inert so node dragging owns every pointer; the video keeps
+   native controls (play/seek/volume) interactive. */
+img.csNodeMedia {
   pointer-events: none;
 }
 

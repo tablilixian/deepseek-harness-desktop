@@ -22,7 +22,7 @@ export function apply(ctx: Context): void {
   // Media generation tools register on the Host (the `tools` service is
   // Host-only); each tool resolves its project from the session workspace.
   ctx.effect(() => {
-    const disposers = createStudioTools(registry).map((definition) => ctx.tools.register(definition))
+    const disposers = createStudioTools(registry, ctx.webServer.port).map((definition) => ctx.tools.register(definition))
     return () => { for (const dispose of disposers) dispose() }
   }, 'canvas-studio: media generation tools')
 }

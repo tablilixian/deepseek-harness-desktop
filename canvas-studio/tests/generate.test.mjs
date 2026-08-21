@@ -35,13 +35,13 @@ function stubFetch(mediaUrl = 'https://media.example/out.png') {
   return calls
 }
 
-/** 项目注册表打桩：读到的既有节点 + 记录写盘。 */
+/** 项目注册表打桩：读到的既有文档（v3 形态）+ 记录写盘。 */
 function stubRegistry(initialNodes, assetsDir) {
   const writes = []
   return {
     list: async () => [{ id: 'p1', name: 'P1', dir: assetsDir, createdAt: 1 }],
     assetsDir: () => assetsDir,
-    readCanvas: async () => initialNodes,
+    readCanvas: async () => ({ version: 3, nodes: initialNodes }),
     writeCanvas: async (projectId, nodes) => { writes.push({ projectId, nodes: [...nodes] }) },
     appendCanvasNode: async (projectId, node) => { writes.push({ projectId, nodes: [node] }) },
     getWrites: () => writes,
@@ -66,7 +66,7 @@ test('retryOf：结果写回原节点，不追加新节点', async () => {
       origin: 'agent',
       sourceIds: ['seed-image'],
       operationType: 'image-to-image',
-      generationPrompt: '{"prompt":"旧提示","imageUrl":"' + REF_URL + '"}',
+      generationPrompt: '{"prompt":"旧提示","filename":"ref.png"}',
       error: '生成失败: HTTP 500',
     }]
     const registry = stubRegistry(prior, dir)
@@ -74,11 +74,11 @@ test('retryOf：结果写回原节点，不追加新节点', async () => {
 
     const result = await generateAsset(registry, 'image_generate', 'p1', {
       prompt: '新提示',
-      imageUrl: REF_URL,
+      filename: 'ref.png',
       retryOf: 'n1',
     })
 
-    assert.equal(calls.length, 4) // 参考图下载 / 上传 / 生成 / 产物下载
+    assert.equal(calls.length, 2) // 生成 / 产物下载（无参考图下载/上传步骤）
     const writes = registry.getWrites()
     assert.equal(writes.length, 1)
     const saved = writes[0].nodes
@@ -91,7 +91,7 @@ test('retryOf：结果写回原节点，不追加新节点', async () => {
     assert.equal(updated.title, '旧图', '保留标题')
     assert.equal(updated.error, undefined, '重试成功清除错误标记')
     assert.equal(updated.operationType, 'image-to-image')
-    assert.equal(updated.generationPrompt, '{"prompt":"新提示","imageUrl":"' + REF_URL + '"}')
+    assert.equal(updated.generationPrompt, '{"prompt":"新提示","filename":"ref.png"}')
     assert.ok(updated.url.startsWith('/canvas-studio/assets/p1/'), '新产物同源相对 URL')
     assert.ok(result.url.startsWith('/canvas-studio/assets/p1/'))
   } finally {

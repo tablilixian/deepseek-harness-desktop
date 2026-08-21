@@ -107,10 +107,36 @@ export interface StudioCanvasDocument {
   version: number
   /** All nodes of the project (order is not significant; sort by createdAt). */
   nodes: StudioCanvasNode[]
+  /**
+   * Persisted viewport + panel state (v3). Absent in older documents; the
+   * client falls back to defaults and fits the content instead.
+   */
+  view?: StudioCanvasView
 }
 
-/** Current canvas document version (2: S1 node-model extension). */
-export const CANVAS_DOCUMENT_VERSION = 2
+/**
+ * Per-project canvas viewport and panel toggles. `x`/`y` are the surface
+ * translate (screen space), `scale` the zoom factor (clamped 0.1–5).
+ */
+export interface StudioCanvasView {
+  x: number
+  y: number
+  scale: number
+  layersOpen: boolean
+  minimapVisible: boolean
+}
+
+/** Current canvas document version (3: persisted viewport/panel state). */
+export const CANVAS_DOCUMENT_VERSION = 3
+
+/** Viewport defaults used when a document predates v3 or a field is invalid. */
+export const VIEW_DEFAULTS: StudioCanvasView = {
+  x: 0,
+  y: 0,
+  scale: 1,
+  layersOpen: true,
+  minimapVisible: true,
+}
 
 /** Defaults applied when migrating nodes that predate a field. */
 export const NODE_DEFAULTS: Readonly<{

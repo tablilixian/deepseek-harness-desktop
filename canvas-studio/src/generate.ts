@@ -20,10 +20,18 @@ import type { StudioCanvasNode, StudioCanvasOperationType } from './contracts/ca
 export interface GenerateParams {
   prompt: string
   aspectRatio?: string
-  imageUrl?: string
-  imageUrls?: string[]
+  /** 已上传到 Drama Backend 的服务器文件名（image_generate 图生图 / video_generate / style_transfer / image2vl / deduction / storyboard_generate 用）。 */
+  filename?: string
+  /** 已上传的 Drama Backend 文件名数组（video_composite 用）。 */
+  filenames?: string[]
+  /** 风格迁移的参考风格图文件名（style_transfer 用，已上传到 Drama Backend）。 */
+  styleFilename?: string
   negativePrompt?: string
   duration?: number
+  /** 分镜格子数量（storyboard_generate 用，默认 4）。 */
+  gridnum?: number
+  /** 是否增强风格迁移效果（style_transfer 用）。 */
+  enhance?: boolean
   /**
    * 节点级重试锚点：设置时把结果写回该已有节点（保留 id/位置/血缘），
    * 而不是追加新节点 —— 重试不产生新边（plan §7.8 标准 2）。
@@ -39,6 +47,16 @@ export interface GenerateResult {
   duration?: number
 }
 
+/**
+ * 将相对 URL 解析为 loopback 绝对 URL（Host 端 fetch 用）。
+ * 浏览器端 <img src> 能自动解析同源相对路径，但 Node 原生 fetch 不支持，
+ * 而 image_generate 返回的产物 URL 是相对路径（/canvas-studio/assets/...），
+ * 后续 video_generate / video_composite 作为参考图传入时必须先补全。
+ */
+function resolveImageUrl(url: string, port: number): string {
+  return url.startsWith('/') ? `http://127.0.0.1:${port}${url}` : url
+}
+
 /** 上传一张图（本地/远程 URL）到 Drama Backend，返回服务器 filename。 */
 async function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<string> {
   const response = await fetch(sourceUrl, { signal: signal ?? null })
@@ -52,9 +70,15 @@ async function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<str
     signal: signal ?? null,
   })
   if (!upload.ok) throw new Error(`参考图上传失败: ${upload.status}`)
-  const data = await upload.json() as { filename?: string }
-  if (!data.filename) throw new Error('参考图上传成功但未返回 filename')
-  return data.filename
+  const data = await upload.json() as Record<string, unknown>
+  // 兼容多种响应格式：{ filename } / { name } / { data: { filename } } / { data: { url } }
+  const filename = (data.filename
+    ?? data.name
+    ?? (data.data as Record<string, unknown> | undefined)?.filename
+    ?? (data.data as Record<string, unknown> | undefined)?.url
+  ) as string | undefined
+  if (!filename) throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`)
+  return filename
 }
 
 /** 调用 Drama Backend 生成接口，取回产物 URL。 */
@@ -88,9 +112,11 @@ async function callDrama(
 
 /** 生成工具名 → 画布操作类型（边颜色/标签的语义来源）。 */
 export function operationTypeOf(tool: string, params: GenerateParams): StudioCanvasOperationType {
-  if (tool === 'image_generate') return params.imageUrl !== undefined ? 'image-to-image' : 'text-to-image'
+  if (tool === 'image_generate') return params.filename !== undefined ? 'image-to-image' : 'text-to-image'
   if (tool === 'video_generate') return 'image-to-video'
   if (tool === 'video_composite') return 'mkr-video'
+  if (tool === 'style_transfer') return 'style-transfer'
+  if (tool === 'storyboard_generate') return 'storyboard'
   return 'import'
 }
 
@@ -100,10 +126,76 @@ export function generationPromptOf(params: GenerateParams): string {
   return JSON.stringify(rest)
 }
 
+/** 提示词增强：调用 Drama Backend 的 image2promptenhance 接口。 */
+export async function enhancePrompt(
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const data = await callDramaRaw(DRAMA_ENDPOINTS.promptEnhance, { prompt }, signal)
+  return (data.output ?? data.msg ?? data) as string
+}
+
+/** 图像分析（VLM）：调用 Drama Backend 的 image2vl 接口，使用已上传的文件名。 */
+export async function analyzeImage(
+  filename: string,
+  prompt: string,
+  systemPrompt: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const data = await callDramaRaw(DRAMA_ENDPOINTS.image2vl, {
+    image: filename,
+    prompt,
+    system_prompt: systemPrompt,
+  }, signal)
+  return (data.output ?? data.msg ?? JSON.stringify(data)) as string
+}
+
+/** 剧情推演：分析当前帧画面，推演下一帧构图，使用已上传的文件名。 */
+export async function deduction(
+  filename: string,
+  analysisPrompt?: string,
+  deductionPrompt?: string,
+  analysisSystemPrompt?: string,
+  deductionSystemPrompt?: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const body: Record<string, unknown> = { image: filename }
+  if (analysisPrompt !== undefined) body.analysis_prompt = analysisPrompt
+  if (deductionPrompt !== undefined) body.deduction_prompt = deductionPrompt
+  if (analysisSystemPrompt !== undefined) body.analysis_system_prompt = analysisSystemPrompt
+  if (deductionSystemPrompt !== undefined) body.deduction_system_prompt = deductionSystemPrompt
+  return callDramaRaw(DRAMA_ENDPOINTS.deduction, body, signal)
+}
+
+/** 带 raw 响应解析的 callDrama（文本工具用，返回完整 JSON）。 */
+async function callDramaRaw(
+  endpoint: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${DRAMA_API_BASE}${endpoint}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: signal ?? null,
+  })
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`
+    try {
+      const data = await response.json() as { error?: { message?: string }; msg?: string }
+      message = data.error?.message || data.msg || message
+    } catch {
+      /* keep default */
+    }
+    throw new Error(`生成失败: ${message}`)
+  }
+  return response.json() as Promise<Record<string, unknown>>
+}
+
 /**
  * 执行一次生成并落盘。
  * @param registry - 项目注册表（提供 assetsDir）。
- * @param tool - 工具名（image_generate / video_generate / video_composite）。
+ * @param tool - 工具名（image_generate / video_generate / video_composite / style_transfer / storyboard_generate）。
  * @param projectId - 目标项目 id。
  * @param params - 生成参数。
  * @param signal - 取消信号。
@@ -124,15 +216,14 @@ export async function generateAsset(
   let mediaUrl: string
 
   if (tool === 'image_generate') {
-    if (params.imageUrl) {
-      const filename = await uploadImage(params.imageUrl, signal)
+    if (params.filename) {
       mediaUrl = await callDrama(
         DRAMA_ENDPOINTS.image2image,
         {
           prompt: params.prompt,
           width: size.width,
           height: size.height,
-          image1: filename,
+          image1: params.filename,
           ...(params.negativePrompt ? { negative_prompt: params.negativePrompt } : {}),
         },
         signal,
@@ -150,8 +241,7 @@ export async function generateAsset(
       )
     }
   } else if (tool === 'video_generate') {
-    if (!params.imageUrl) throw new Error('video_generate 需要提供 imageUrl（参考图）')
-    const background = await uploadImage(params.imageUrl, signal)
+    if (!params.filename) throw new Error('video_generate 需要提供 filename（来自 upload_image 工具）')
     mediaUrl = await callDrama(
       DRAMA_ENDPOINTS.videoMsr,
       {
@@ -160,17 +250,21 @@ export async function generateAsset(
         height: size.height,
         duration: params.duration ?? 5,
         fps: 30,
-        background,
+        background: params.filename,
       },
       signal,
     )
   } else if (tool === 'video_composite') {
-    const urls = params.imageUrls ?? []
-    if (urls.length < 1) throw new Error('video_composite 需要提供 imageUrls')
-    const filenames = await Promise.all(urls.slice(0, 4).map((url) => uploadImage(url, signal)))
+    const filenames = params.filenames ?? []
+    if (filenames.length < 1) throw new Error('video_composite 需要提供 filenames（来自 upload_image 工具）')
+    // frame_index 按时间轴均分：API 期望的是帧位置（duration × fps），不是数组下标。
+    // 最后一张图用 -1 标记（文档约定表示结束）。
+    const totalFrames = (params.duration ?? 12) * 30
     const images = filenames.map((image, index) => ({
       image,
-      frame_index: index === filenames.length - 1 ? -1 : index,
+      frame_index: index === filenames.length - 1
+        ? -1
+        : Math.round((index / (filenames.length - 1)) * totalFrames),
     }))
     mediaUrl = await callDrama(
       DRAMA_ENDPOINTS.videoMkr,
@@ -181,6 +275,31 @@ export async function generateAsset(
         duration: params.duration ?? 12,
         fps: 30,
         images,
+      },
+      signal,
+    )
+  } else if (tool === 'style_transfer') {
+    if (!params.filename || !params.styleFilename) {
+      throw new Error('style_transfer 需要提供 filename（目标图）和 styleFilename（风格参考图）')
+    }
+    mediaUrl = await callDrama(
+      DRAMA_ENDPOINTS.styleTransfer,
+      {
+        image1: params.filename,
+        image2: params.styleFilename,
+        ...(params.prompt ? { prompt: params.prompt } : {}),
+        ...(params.enhance !== undefined ? { enhance: params.enhance } : {}),
+      },
+      signal,
+    )
+  } else if (tool === 'storyboard_generate') {
+    mediaUrl = await callDrama(
+      DRAMA_ENDPOINTS.storyboard,
+      {
+        prompt: params.prompt,
+        gridnum: params.gridnum ?? 4,
+        width: size.width,
+        ...(params.filename ? { image: params.filename } : {}),
       },
       signal,
     )
@@ -208,16 +327,11 @@ export async function generateAsset(
   // so a successful generation shows on the canvas even if the conversation
   // event's rendered text carries no usable URL.
   const sourceIds: string[] = []
-  if (params.imageUrl !== undefined) {
-    const prior = await registry.readCanvas(projectId)
-    const source = prior.find((node) => node.url === params.imageUrl)
-    if (source !== undefined) sourceIds.push(source.id)
-  }
 
   // 节点级重试（params.retryOf）：原地更新已有节点，保留 id/位置/血缘/编组，
   // 边不增加（plan §7.8 标准 2）。普通生成则追加新节点。
   if (params.retryOf !== undefined) {
-    const existing = await registry.readCanvas(projectId)
+    const existing = (await registry.readCanvas(projectId)).nodes
     const target = existing.find((node) => node.id === params.retryOf)
     if (target === undefined) {
       throw new Error(`重试目标节点不存在: ${params.retryOf}`)
@@ -259,3 +373,6 @@ export async function generateAsset(
   if (isVideo) result.duration = params.duration ?? (tool === 'video_composite' ? 12 : 5)
   return result
 }
+
+// 导出供 host-tools.ts 中 upload_image 工具使用。
+export { uploadImage, resolveImageUrl }
