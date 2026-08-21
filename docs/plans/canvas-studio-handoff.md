@@ -193,7 +193,7 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 ## 10. 下一步
 
 1. **桌面可视化验收**:重启 `corepack yarn dev`(兼容模式)→ 验证:视频节点可播放(控制条可点、可拖进度条)、缩放/平移/图层/小地图开关重启后恢复、「整理布局」无重叠且自动适配视野、时间线点击后拖拽/生成不再拉走视口、悬停画布不再跟随移动。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
-2. **P6 创作规范 skill(进行中)**:`@deepseek-ai/dsh-skill` 依赖已声明(lockfile 待 `corepack yarn install` 更新);实现 `src/skills/creation-spec.ts`(内联 markdown:核心规则/9 工具链/标准工作流/分镜表格式/镜头词汇/一致性要点)→ Host inject 加 `'skills'` + `ctx.effect(() => ctx.skills.register(...))` → smoke 测试(name kebab-case/description 非空/content 覆盖工具与 upload 规则)。
+2. **P6 创作规范 skill(✅ 2026-08-21 代码落地)**:`src/skills/creation-spec.ts`(`canvas-studio-creation`,内联 markdown:核心规则/9 工具链/标准工作流/分镜表格式/镜头词汇/一致性要点)+ Host inject `['webServer','tools','skills']` + `ctx.effect(registerCreationSkill)`;`tests/skill.test.mjs` 3 用例(kebab-case/描述上限/九工具与 upload 规则/分镜词汇);`test:smoke` **24/24**;studio profile 启动冒烟 0 错误。**待桌面人工验收**:对话中让 agent 做分镜创作,确认模型加载了 skill(会话出现 `skill` 工具调用)。
 3. **P6 收尾**:`scripts/dev-install.mjs` 完善;双面兼容验证(桌面 + 普通 `dsh web`,studio profile)。
 4. **技术债(文档既有记录)**:明文 API key → 加密/配置中心;`rename` 失败降级为尽力改名;项目注册表持久化 sessionId 防 workspace 堆积;store 单测补强(undo/redo/吸附,经 tsx 在 React 外跑)。
 5. **可选增强**:已声明未接工具的端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 九宫格);多参考图(image1~3 / image1~4);P4.5 项(手绘标注/独立 edge 层/缩略图 LOD);P7 内置化。

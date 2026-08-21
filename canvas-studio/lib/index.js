@@ -1,11 +1,12 @@
 import { ProjectRegistry } from './projects.js';
 import { registerStudioRoutes } from './routes.js';
 import { createStudioTools } from './host-tools.js';
+import { registerCreationSkill } from './skills/creation-spec.js';
 /** Stable Cordis plugin name matching the bundle patch row. */
 export const name = 'canvas-studio';
 /** Services required by the host plugin. */
-export const inject = ['webServer', 'tools'];
-/** Host plugin body: the project registry, its routes, and the media tools. */
+export const inject = ['webServer', 'tools', 'skills'];
+/** Host plugin body: the project registry, its routes, the media tools, and the creation skill. */
 export function apply(ctx) {
     const registry = new ProjectRegistry();
     ctx.effect(() => registerStudioRoutes(ctx, registry), 'canvas-studio: project routes');
@@ -16,4 +17,7 @@ export function apply(ctx) {
         return () => { for (const dispose of disposers)
             dispose(); };
     }, 'canvas-studio: media generation tools');
+    // P6: the creation-spec skill teaches the agent the storyboard format and
+    // the nine-tool pipeline; it ships inside this bundle (runtime registration).
+    ctx.effect(() => registerCreationSkill(ctx), 'canvas-studio: creation skill');
 }
