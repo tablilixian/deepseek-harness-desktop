@@ -147,8 +147,12 @@ rm -f ~/Library/Application\ Support/DSH\ Desktop/crash-evidence/active-run.json
 # 可视化验收(兼容模式 + 种子)
 # 打开桌面窗口后地址栏加 ?cs-dev-seed=1 → 新建/打开项目 → 画布应显示示例图/视频/便签
 
-# 桌面 profile 装/卸插件(必须 corepack pnpm@11.7.0,然后手工改 bundles)
-cd ~/.dsh/profiles/desktop && corepack pnpm@11.7.0 add /Users/wl/.../canvas-studio
+# 桌面 profile 装/卸插件(P6 dev-install:构建 + link + bundles 维护一条龙,幂等)
+corepack yarn workspace canvas-studio dev:install            # 装(默认 desktop profile)
+corepack yarn workspace canvas-studio dev:install studio     # 指定 profile
+corepack yarn workspace canvas-studio dev:install --remove   # 卸载
+# 等价手动路径:改 profile 的 package.json(dsh.profile.bundles + link 依赖)后
+# 在 profile 目录 corepack pnpm@11.7.0 install;不要用 dsh plugin(转发 pnpm v10 会撞 store v11)
 ```
 
 ## 7. Git 工作流(fork 双 remote)
@@ -194,6 +198,6 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 
 1. **桌面可视化验收**:重启 `corepack yarn dev`(兼容模式)→ 验证:视频节点可播放(控制条可点、可拖进度条)、缩放/平移/图层/小地图开关重启后恢复、「整理布局」无重叠且自动适配视野、时间线点击后拖拽/生成不再拉走视口、悬停画布不再跟随移动。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
 2. **P6 创作规范 skill(✅ 2026-08-21 代码落地)**:`src/skills/creation-spec.ts`(`canvas-studio-creation`,内联 markdown:核心规则/9 工具链/标准工作流/分镜表格式/镜头词汇/一致性要点)+ Host inject `['webServer','tools','skills']` + `ctx.effect(registerCreationSkill)`;`tests/skill.test.mjs` 3 用例(kebab-case/描述上限/九工具与 upload 规则/分镜词汇);`test:smoke` **24/24**;studio profile 启动冒烟 0 错误。**待桌面人工验收**:对话中让 agent 做分镜创作,确认模型加载了 skill(会话出现 `skill` 工具调用)。
-3. **P6 收尾**:`scripts/dev-install.mjs` 完善;双面兼容验证(桌面 + 普通 `dsh web`,studio profile)。
+3. **P6 收尾(✅ 2026-08-21 全部完成)**:`scripts/dev-install.mjs` 重写 —— 构建 + 改 profile manifest(`dsh.profile.bundles` 插到 web-app 后 + `link:` 依赖)+ `corepack pnpm@11.7.0 install`,幂等,支持 `--remove`/`--skip-build`/`DSH_HOME`;临时 DSH_HOME 自测 add/remove 通过,真实 desktop profile 端到端幂等验证通过。双面兼容:dsh web(studio profile)启动冒烟 0 错误 ✅、桌面 profile 验收 1–8 全过 ✅(2026-08-21)。**P1–P6 全部关闭;剩余为技术债与可选增强(P2–P4 档)及 P7 内置化。**
 4. **技术债(文档既有记录)**:明文 API key → 加密/配置中心;`rename` 失败降级为尽力改名;项目注册表持久化 sessionId 防 workspace 堆积;store 单测补强(undo/redo/吸附,经 tsx 在 React 外跑)。
 5. **可选增强**:已声明未接工具的端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 九宫格);多参考图(image1~3 / image1~4);P4.5 项(手绘标注/独立 edge 层/缩略图 LOD);P7 内置化。

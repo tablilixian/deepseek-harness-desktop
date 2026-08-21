@@ -1,6 +1,6 @@
 # Drama Backend API 文档
 
-**版本:** 0.1.0  
+**版本:** 0.2.0  
 ---
 
 ## 目录
@@ -9,9 +9,11 @@
 - [健康检查](#健康检查)
 - [图像生成](#图像生成)
 - [提示词增强](#提示词增强)
+- [角色生成](#角色生成)
 - [风格迁移](#风格迁移)
 - [IPA 风格迁移](#ipa-风格迁移)
 - [图像上传](#图像上传)
+- [流式文件上传](#流式文件上传)
 - [图像查看](#图像查看)
 - [分镜生成](#分镜生成)
 - [图像分割网格](#图像分割网格)
@@ -20,7 +22,6 @@
 - [360 HDRI 图像生成](#360-hdri-图像生成)
 - [视频生成](#视频生成)
 - [图像转视频](#图像转视频)
-- [图像转视频（宫格）](#图像转视频宫格)
 - [错误响应](#错误响应)
 
 ---
@@ -90,6 +91,10 @@
 }
 ```
 
+**说明:**
+- 使用 nunchaku-z-image-turbo 工作流生成图像
+- steps 参数固定为 8
+
 ### POST /api/v1/generate/txt2imageanime
 
 生成动漫风格图像
@@ -124,7 +129,7 @@
 ```
 
 **说明:**
-- 使用动漫风格模型生成图像
+- 使用动漫风格模型生成图像，基于 z-anime-aio 工作流
 - 适用于生成日式动漫风格的角色和场景
 
 ### POST /api/v1/generate/image2image
@@ -164,27 +169,10 @@
 }
 ```
 
-### GET /api/v1/generate/image
-
-生成默认图像（使用预置提示词）
-
-**请求参数:** 无
-
-**响应:** 返回生成的图像数据
-
-**响应示例:**
-```json
-{
-    "prompt_id": "1e315014-43e3-4140-bbf3-ef1a1119705e",
-    "filename": "z-image_00039_.png",
-    "full_url": "http://117.50.108.73:8082/view?filename=z-image_00039_.png",
-    "duration": 3.63
-}
-```
-
 **说明:**
-- 该端点使用内部预置的提示词生成图像
-- 适用于快速测试或生成默认风格图像
+- 使用 qwen_image_edit_3_image_ref 工作流生成图像
+- steps 参数固定为 4
+- 支持最多3张参考图像（image1, image2, image3）
 
 ---
 
@@ -231,7 +219,7 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 描述 |
 |------|------|------|--------|------|
-| `image` | string | 是 | - | 角色设计图（文件名） |
+| `image` | string | 否 | "" | 角色设计图（文件名） |
 
 **请求示例:**
 ```json
@@ -253,8 +241,8 @@
 ```
 
 **说明:** 
-- 该接口将根据输入的角色设计图生成三视图立绘图
-- 包含正面特写、侧面全身、背面全身三个视角
+- 该接口将根据输入的角色设计图生成四视图立绘图，使用 qwen_4view_char_2step 工作流
+- 包含正面特写、侧面全身、背面全身等多个视角
 - 背景为纯白色
 
 ---
@@ -269,8 +257,8 @@
 
 | 字段 | 类型 | 必填 | 默认值 | 描述 |
 |------|------|------|--------|------|
-| `image1` | string | 是 | - | 目标图像（需要进行风格迁移的图像） |
-| `image2` | string | 是 | - | 参考图像（提供风格参考的图像） |
+| `image1` | string | 否 | "" | 目标图像（需要进行风格迁移的图像） |
+| `image2` | string | 否 | "" | 参考图像（提供风格参考的图像） |
 | `prompt` | string | 否 | "" | 增强提示词 |
 | `enhance` | boolean | 否 | false | 是否增强风格迁移效果 |
 
@@ -297,8 +285,9 @@
 ```
 
 **说明:**
-- 该端点将 image2 的风格迁移到 image1 上
+- 该端点将 image2 的风格迁移到 image1 上，使用 Klein Transfer Style 工作流
 - image1 是目标图像，image2 是风格参考图像
+- `prompt` 和 `enhance` 参数可进一步增强风格迁移效果
 - 适用于将一幅图像的风格应用到另一幅图像上
 
 ---
@@ -367,6 +356,7 @@
 |------|------|------|------|
 | `file` | binary | 是 | 要上传的图像文件 |
 
+
 **响应示例:**
 ```json
 {
@@ -375,12 +365,16 @@
 }
 ```
 
+---
+
+## 流式文件上传
+
 ### POST /api/v1/generate/upload
 
-手动上传文件（流式接收，不会触发 Starlette 的 1MB 自动溢写）
+流式上传大文件到服务器（绕过 Starlette 的 1MB 自动溢写限制）
 
 **请求体:**
-采用form-data形式或直接流式上传
+采用form-data形式，直接发送文件流
 
 **响应示例:**
 ```json
@@ -388,6 +382,10 @@
   "status": "success"
 }
 ```
+
+**说明:**
+- 该端点手动接收流并写入文件，不会触发 Starlette 的 1MB 自动溢写
+- 适用于上传大文件场景
 
 ---
 
@@ -444,7 +442,9 @@
 }
 ```
 
----
+**说明:**
+- 使用 qwenedit_gridstoryboard 工作流生成分镜图像
+- `prompt` 每行描述一个分镜场景
 
 ## 图像分割网格
 
@@ -460,7 +460,7 @@
 | `column` | integer | 否 | 2 | 网格列数 |
 | `target_width` | integer | 否 | 1024 | 目标图像宽度 |
 | `target_height` | integer | 否 | 768 | 目标图像高度 |
-| `image` | string | 是 | - | 要分割的图像（文件名） |
+| `image` | string | 否 | "" | 要分割的图像（文件名） |
 
 **请求示例:**
 ```json
@@ -520,7 +520,7 @@
 | 字段 | 类型 | 必填 | 默认值 | 描述 |
 |------|------|------|--------|------|
 | `prompt` | string | 是 | - | 图像修复描述（描述需要修复或添加的内容） |
-| `image` | string | 是 | - | 要修复的图像（文件名） |
+| `image` | string | 否 | "" | 要修复的图像（文件名） |
 
 **请求示例:**
 ```json
@@ -543,7 +543,7 @@
 ```
 
 **说明:**
-- 该端点使用 Inpainting 技术对图像进行修复或编辑
+- 该端点使用 Inpainting 技术对图像进行修复或编辑，基于 qwen_edit_inpainting 工作流
 - 可以移除图像中的不需要元素并智能填充背景
 - 可以根据提示词添加新元素到图像中
 
@@ -617,32 +617,8 @@
 ```
 
 **说明:**
-- 该端点将普通图像转换为 360° 全景 HDRI 图像
+- 该端点将普通图像转换为 360° 全景 HDRI 图像，使用 360_HDRI_workflow 工作流
 - 适用于创建全景环境贴图和虚拟现实场景
-
----
-
-## 视频生成
-
-### POST /api/v1/generate/video
-
-生成视频
-
-**请求体:** 无（当前版本不需要请求参数）
-
-**请求示例:**
-```json
-{}
-```
-
-**响应:** 返回生成的视频信息
-
-**响应示例:**
-```json
-{
-    "status": "video generated"
-}
-```
 
 ---
 
@@ -693,8 +669,8 @@
 ```
 
 **说明:**
-- 该端点使用 MSR (Multi-Frame Super-Resolution) 技术生成视频
-- 支持最多4张参考图像和1张背景图像
+- 该端点使用 MSR (Multi-Frame Super-Resolution) 技术生成视频，基于 ltx_msr_workflow 工作流
+- 支持最多4张参考图像（image1-image4）和1张背景图像
 - 根据提示词和参考图像生成连贯的视频内容
 - 适用于从静态图像生成动态视频效果
 
@@ -758,9 +734,10 @@
 ```
 
 **说明:**
-- 该端点使用 MKR (Multi-Keyframe Rendering) 技术生成视频
+- 该端点使用 MKR (Multi-Keyframe Rendering) 技术生成视频，基于 ltx_mkr_workflow 工作流
 - 通过多个关键帧图像进行插值生成连贯的视频
 - `frame_index` 根据 `duration × fps` 计算，如 12秒 × 30fps = 360帧
+- 支持最多5张关键帧图像
 - 适用于需要精确控制关键帧位置的视频生成场景
 
 ### POST /api/v1/generate/image2videomkrgrid
@@ -813,90 +790,104 @@
 
 **说明:**
 - 该端点使用 MKR (Multi-Keyframe Rendering) 宫格视频技术生成视频
+- 根据 gridtype 动态加载对应工作流：ltx_mkr_4grid_workflow.json / ltx_mkr_6grid_workflow.json / ltx_mkr_9grid_workflow.json
 - 将输入图像分割为指定数量的宫格（4/6/9宫格），在每个宫格内分别处理
 - `frame_indexs` 根据 `duration × fps` 计算，如 12秒 × 30fps = 360帧
 - 适用于需要多宫格布局的视频生成场景
 
----
+### POST /api/v1/generate/image2videofl2va
 
-### POST /api/v1/generate/deduction
+基于首尾帧图像生成视频（FL2VA）
 
-剧情推演：基于当前帧画面分析 + 剧情方向，推演下一帧的构图描述和关键要素
-
-**处理流程（服务端内部）：**
-
-1. 用 `analysis_system_prompt` + `analysis_prompt` 调 VLM（image2vl）分析画面
-2. 用 `deduction_system_prompt` + `deduction_prompt` + 分析结果调 LLM 推演下一帧
-3. 返回结构化分析 + 推演结果
-
-**请求体 (DeductionRequest):**
+**请求体 (Image2VideoFl2vaRequest):**
 
 | 字段 | 类型 | 必填 | 默认值 | 描述 |
 |------|------|------|--------|------|
-| `image` | string | 是 | - | 当前帧图片（已上传的文件名） |
-| `analysis_system_prompt` | string | 否 | 见下方 | VLM 画面分析的系统提示词 |
-| `analysis_prompt` | string | 否 | 见下方 | VLM 画面分析的用户提示词 |
-| `deduction_system_prompt` | string | 否 | 见下方 | LLM 剧情推演的系统提示词 |
-| `deduction_prompt` | string | 否 | 见下方 | LLM 剧情推演的用户提示词 |
-
-**默认提示词：**
-
-| 字段 | 默认值 |
-|------|--------|
-| `analysis_system_prompt` | "你是一个专业的影视镜头分析师。请从电影摄影的角度分析这张画面。" |
-| `analysis_prompt` | "请分析这张画面的以下要素，每项用一句话描述：\n1. 场景：这是什么场景/环境？\n2. 构图：镜头构图方式、主体位置\n3. 光影：光源方向、光线质感、色调\n4. 角色/主体：画面中的角色或主要视觉元素\n5. 情绪/氛围：画面的情绪基调\n6. 镜头语言：机位、焦段、运镜方式" |
-| `deduction_system_prompt` | "你是一个专业的影视编剧。请基于当前帧的画面分析和剧情方向，推演下一帧的内容。" |
-| `deduction_prompt` | "基于以上画面分析结果，推演下一帧的内容。要求：\n1. 保持角色、场景、光影风格的一致性\n2. 叙事要自然推进，有合理的动因\n3. 明确描述构图变化和镜头运动\n4. 输出结构化的推演结果" |
-
-**响应 (DeductionResponse):**
-
-| 字段 | 类型 | 描述 |
-|------|------|------|
-| `analysis` | object | 当前帧的画面分析结果 |
-| `analysis.scene` | string | 场景描述 |
-| `analysis.composition` | string | 构图分析 |
-| `analysis.lighting` | string | 光影描述 |
-| `analysis.characters` | string | 角色/主体描述 |
-| `analysis.mood` | string | 情绪氛围 |
-| `analysis.camera` | string | 镜头语言 |
-| `deduction` | object | 剧情推演结果 |
-| `deduction.next_frame` | string | 下一帧的画面描述（用于图生图 prompt） |
-| `deduction.rationale` | string | 推演逻辑说明 |
-| `deduction.key_elements` | string[] | 下一帧需保留的关键元素 |
-| `deduction.changes` | string[] | 相对当前帧的变化 |
+| `prompt` | string | 是 | - | 场景描述（从脚本内容派生） |
+| `aspect` | string | 否 | "16:9" | 画面比例，可选 16:9 或 9:16 |
+| `megapixels` | number | 否 | 0.4 | 视频清晰度（百万像素） |
+| `duration` | integer | 否 | 5 | 视频时长（秒） |
+| `image1` | string | 否 | "" | 起始帧图像（文件名） |
+| `image2` | string | 否 | "" | 结束帧图像（文件名） |
 
 **请求示例:**
 ```json
 {
-  "image": "keyframe_001.png",
-  "analysis_prompt": "请分析这张画面的场景、构图、光影、角色、情绪和镜头语言",
-  "deduction_prompt": "主角发现密道，决定探索。基于画面分析，推演下一帧的内容"
+  "prompt": "A city street at sunset, camera pans forward",
+  "aspect": "16:9",
+  "megapixels": 0.4,
+  "duration": 5,
+  "image1": "start_frame.png",
+  "image2": "end_frame.png"
 }
 ```
+
+**响应:** 返回生成的视频数据
 
 **响应示例:**
 ```json
 {
-  "analysis": {
-    "scene": "古堡密室内景",
-    "composition": "中景镜头，角色坐于石阶中央，构图对称",
-    "lighting": "暖黄烛光，右侧单光源，墙壁投射阴影",
-    "characters": "中年男子，灰色长袍，面容凝重",
-    "mood": "沉思、压抑、等待",
-    "camera": "固定机位，轻微仰拍，镜头距离约2米"
-  },
-  "deduction": {
-    "next_frame": "主角从石阶上缓缓站起身，视线转向右侧墙壁上的暗门；镜头跟随上升，变为站姿中景；暗门边缘透出微光",
-    "rationale": "角色长时间沉思后进入行动阶段，由静转动是叙事的自然推进；转向暗门为下一场景做铺垫",
-    "key_elements": ["暖黄烛光", "灰色长袍", "古堡密室背景", "中年男子"],
-    "changes": ["从坐姿变为站姿", "视线方向改变", "引入暗门新元素", "镜头从仰拍变为平视"]
-  }
+    "prompt_id": "1e315014-43e3-4140-bbf3-ef1a1119705e",
+    "filename": "video_fl2va_00001_.mp4",
+    "full_url": "http://117.50.108.73:8082/view?filename=video_fl2va_00001_.mp4",
+    "duration": 8.50
 }
 ```
 
 **说明:**
-- 前端完全控制 prompt，后端只做编排（image2vl → LLM）
-- 如果图像尚未上传，需先调用 `/api/v1/generate/uploadimage` 上传
+- 该端点基于首帧与尾帧图像生成连贯视频，使用 h3_i2v_fl2va.json 工作流
+- `aspect` 支持 16:9 与 9:16，默认横屏 16:9
+- `image1` 为起始帧，`image2` 为结束帧
+- 适用于首尾帧之间插值生成动态视频
+
+### POST /api/v1/generate/image2videoref2va
+
+基于多张参考图像生成视频（全能参考 REF2VA）
+
+**请求体 (Image2VideoRef2vaRequest):**
+
+| 字段 | 类型 | 必填 | 默认值 | 描述 |
+|------|------|------|--------|------|
+| `prompt` | string | 是 | - | 场景描述（从脚本内容派生） |
+| `aspect` | string | 否 | "16:9" | 画面比例，可选 16:9 或 9:16 |
+| `megapixels` | number | 否 | 0.4 | 视频清晰度（百万像素） |
+| `duration` | integer | 否 | 5 | 视频时长（秒） |
+| `image1` | string | 否 | "" | 参考图像1（文件名） |
+| `image2` | string | 否 | "" | 参考图像2（文件名） |
+| `image3` | string | 否 | "" | 参考图像3（文件名） |
+| `image4` | string | 否 | "" | 参考图像4（文件名） |
+| `image5` | string | 否 | "" | 参考图像5（文件名） |
+| `image6` | string | 否 | "" | 参考图像6（文件名） |
+
+**请求示例:**
+```json
+{
+  "prompt": "A character walking through a fantasy city",
+  "aspect": "16:9",
+  "megapixels": 0.4,
+  "duration": 5,
+  "image1": "ref1.png",
+  "image2": "ref2.png"
+}
+```
+
+**响应:** 返回生成的视频数据
+
+**响应示例:**
+```json
+{
+    "prompt_id": "1e315014-43e3-4140-bbf3-ef1a1119705e",
+    "filename": "video_ref2va_00001_.mp4",
+    "full_url": "http://117.50.108.73:8082/view?filename=video_ref2va_00001_.mp4",
+    "duration": 8.50
+}
+```
+
+**说明:**
+- 该端点基于多张参考图像生成视频，使用 h3_i2v_ref2va.json 工作流
+- `aspect` 支持 16:9 与 9:16，默认横屏 16:9
+- 支持最多6张参考图像（image1-image6）
+- 适用于需要多参考图像保持角色和场景一致性的视频生成
 
 ---
 
