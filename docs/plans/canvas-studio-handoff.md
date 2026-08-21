@@ -114,7 +114,11 @@ canvas-studio/
 
 ## 5. 环境事实
 
-- 仓库:`/Users/wl/Desktop/job/learn/WL_AI_Studio/reference/deepseek-harness-desktop`,分支 `canvas-studio`,HEAD `9a314b6e88`(S1–S7 集成),已推送 fork `origin/canvas-studio`。
+- **桌面产品已更名 VideoBuddy(2026-08-21,用户要求)**:`dsh-plugin-desktop` 全部用户可见文案(PRODUCT_NAME/窗口标题/托盘/对话框/终端横幅/渲染进程报错)+ electron-builder `build.productName`/`shortcutName` + 相关测试断言已改;内部标识(npm 包名 `dsh-plugin-desktop`、bin `dsh-desktop`、CLI `dsh`、`~/.dsh`)不变;`update-checker.ts` 仍指上游 DSH 发布服务(仅注释保留原名)。
+- **userData 目录随之变为 `~/Library/Application Support/VideoBuddy`**(旧 `DSH Desktop` 目录弃用,重启锁清理路径见 §6)。
+- **dev 模式 Dock 悬停名**:读的是 `dsh-plugin-desktop/node_modules/electron/dist/Electron.app/Contents/Info.plist`,已 patch `CFBundleName`/`CFBundleDisplayName` = VideoBuddy;**重装 electron 后会还原**,需重跑:
+  `plutil -replace CFBundleName -string VideoBuddy <dist>/Electron.app/Contents/Info.plist`(DisplayName 同理)。
+- 仓库:`/Users/wl/Desktop/job/learn/WL_AI_Studio/reference/deepseek-harness-desktop`,分支 `canvas-studio`,已推送 fork `origin/canvas-studio`。
 - 子模块 pinned `dsh-v0.1.0-rc.7`(99f6f02),**永不编辑**,上游命令走根脚本(`corepack yarn upstream:build`)。
 - `$DSH_HOME` 未设置 → `~/.dsh`;profile:`desktop`(桌面在用,已集成 canvas-studio)、`studio`(web CLI 冒烟用)。
 - 桌面 profile settings.yaml 有用户 LLM 配置(wlqw provider,模型 `qwopus3.6-27b-v2-mtp-nvfp4`)。
@@ -141,8 +145,8 @@ cd deepseek-harness && node --import tsx/esm apps/cli/src/bin.ts --profile studi
 # 桌面启动
 corepack yarn dev
 # 桌面 dev 实例 webServer 端口动态;重启前清理 singleton 锁
-rm -f ~/Library/Application\ Support/DSH\ Desktop/Singleton{Lock,Socket,Cookie}
-rm -f ~/Library/Application\ Support/DSH\ Desktop/crash-evidence/active-run.json
+rm -f ~/Library/Application\ Support/VideoBuddy/Singleton{Lock,Socket,Cookie}
+rm -f ~/Library/Application\ Support/VideoBuddy/crash-evidence/active-run.json
 
 # 可视化验收(兼容模式 + 种子)
 # 打开桌面窗口后地址栏加 ?cs-dev-seed=1 → 新建/打开项目 → 画布应显示示例图/视频/便签

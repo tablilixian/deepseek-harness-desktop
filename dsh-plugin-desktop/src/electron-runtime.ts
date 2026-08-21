@@ -91,7 +91,7 @@ export const RENDERER_BOOT_TIMEOUT_MS = 30_000
 /** Failure class used by startup recovery to distinguish a hung Renderer. */
 export type RendererBootFailureReason = 'renderer-failed' | 'renderer-timeout'
 
-/** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
+/** Native adapter used by the VideoBuddy launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
   readonly platform: DesktopPlatform
   private readonly platformStrategy: ElectronPlatformStrategy
@@ -281,7 +281,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
           : 'This workspace is on a removable NTFS/ReFS drive.',
         detail: zh
           ? `使用过程中拔出磁盘会导致命令或插件操作失败。请保持磁盘连接。\n\n${path}`
-          : `Disconnecting the drive while DSH Desktop is running can break commands or plugin operations. Keep it connected.\n\n${path}`,
+          : `Disconnecting the drive while VideoBuddy is running can break commands or plugin operations. Keep it connected.\n\n${path}`,
         buttons: zh ? ['使用此文件夹', '选择其他文件夹'] : ['Use This Folder', 'Choose Another Folder'],
         defaultId: 1,
         cancelId: 1,
@@ -296,8 +296,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       type: 'error',
       title: zh ? '不支持的工作区存储' : 'Unsupported Workspace Storage',
       message: zh
-        ? `${decision.concern.fileSystem ?? '当前文件系统'} 不能安全用作 DSH Desktop 工作区。`
-        : `${decision.concern.fileSystem ?? 'This filesystem'} cannot safely host a DSH Desktop workspace.`,
+        ? `${decision.concern.fileSystem ?? '当前文件系统'} 不能安全用作 VideoBuddy 工作区。`
+        : `${decision.concern.fileSystem ?? 'This filesystem'} cannot safely host a VideoBuddy workspace.`,
       detail: zh
         ? `请选择本地 NTFS 或 ReFS 磁盘上的文件夹。exFAT、FAT32、网络盘和无法检测的磁盘不会被保存为工作区。\n\n${path}`
         : `Choose a folder on a local NTFS or ReFS volume. exFAT, FAT32, network drives, and uninspectable volumes are not persisted as workspaces.\n\n${path}`,
@@ -473,9 +473,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     const result = await dialog.showMessageBox({
       type: 'error',
       title: 'Plugin Recovery',
-      message: 'DSH Desktop could not load all plugins.',
-      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nOpen DSH Terminal to update or remove the failing third-party plugin, then restart DSH Desktop.`,
-      buttons: ['Open DSH Terminal', 'Restart DSH Desktop', 'Dismiss'],
+      message: 'VideoBuddy could not load all plugins.',
+      detail: `Failed plugins:\n${plugins}\n\n${error}\n\nOpen DSH Terminal to update or remove the failing third-party plugin, then restart VideoBuddy.`,
+      buttons: ['Open DSH Terminal', 'Restart VideoBuddy', 'Dismiss'],
       defaultId: 0,
       cancelId: 2,
       noLink: true,
@@ -534,8 +534,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private async confirmUpdateDownload(version: string): Promise<boolean> {
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Available',
-      message: `DSH Desktop ${version} is available.`,
+      title: 'VideoBuddy Update Available',
+      message: `VideoBuddy ${version} is available.`,
       detail: 'Download this update now?',
       buttons: ['Download', 'Later'],
       defaultId: 1,
@@ -551,7 +551,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       await dialog.showMessageBox({
         type: 'warning',
         title: 'Unable to Check for Updates',
-        message: 'DSH Desktop could not check for updates.',
+        message: 'VideoBuddy could not check for updates.',
         detail: 'Please try again later.',
         buttons: ['OK'],
         defaultId: 0,
@@ -563,8 +563,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
     if (result.status === 'up-to-date') {
       await dialog.showMessageBox({
         type: 'info',
-        title: 'DSH Desktop Is Up to Date',
-        message: 'No newer version of DSH Desktop is available.',
+        title: 'VideoBuddy Is Up to Date',
+        message: 'No newer version of VideoBuddy is available.',
         detail: `Installed version: ${result.currentVersion}`,
         buttons: ['OK'],
         defaultId: 0,
@@ -575,8 +575,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Available',
-      message: `DSH Desktop ${result.latestVersion} is available.`,
+      title: 'VideoBuddy Update Available',
+      message: `VideoBuddy ${result.latestVersion} is available.`,
       detail: 'Installer downloads are unavailable in this build.',
       buttons: ['OK'],
       defaultId: 0,
@@ -614,9 +614,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       signal.throwIfAborted()
       await dialog.showMessageBox({
         type: 'info',
-        title: 'DSH Desktop Update Downloaded',
-        message: `DSH Desktop ${version} is ready to install.`,
-        detail: 'The disk image has opened. Replace DSH Desktop in Applications, then reopen it.',
+        title: 'VideoBuddy Update Downloaded',
+        message: `VideoBuddy ${version} is ready to install.`,
+        detail: 'The disk image has opened. Replace VideoBuddy in Applications, then reopen it.',
         buttons: ['OK'],
         defaultId: 0,
         noLink: true,
@@ -626,9 +626,9 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
 
     const result = await dialog.showMessageBox({
       type: 'info',
-      title: 'DSH Desktop Update Downloaded',
-      message: `DSH Desktop ${version} is ready to install.`,
-      detail: 'Restart DSH Desktop and run the installer now?',
+      title: 'VideoBuddy Update Downloaded',
+      message: `VideoBuddy ${version} is ready to install.`,
+      detail: 'Restart VideoBuddy and run the installer now?',
       buttons: ['Restart and Install', 'Later'],
       defaultId: 1,
       cancelId: 1,
@@ -683,8 +683,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
       type: 'question',
       title: zh ? '删除更新安装包' : 'Remove Update Installer',
       message: zh
-        ? `DSH Desktop ${artifact.version} 已安装。`
-        : `DSH Desktop ${artifact.version} has been installed.`,
+        ? `VideoBuddy ${artifact.version} 已安装。`
+        : `VideoBuddy ${artifact.version} has been installed.`,
       detail: zh
         ? `是否删除下载的安装包以释放磁盘空间？\n\n${artifact.path}`
         : `Delete the downloaded installer to free disk space?\n\n${artifact.path}`,
