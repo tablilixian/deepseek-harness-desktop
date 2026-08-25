@@ -26,11 +26,12 @@ if (workspace.packageManager !== 'yarn@4.18.0') {
   fail('the product workspace must pin yarn@4.18.0')
 }
 if (JSON.stringify(workspace.workspaces) !== JSON.stringify([
+  'canvas-studio',
   'dsh-plugin-desktop',
   'dsh-community-fabric',
   'dsh-community-market',
 ])) {
-  fail('the root Yarn workspace must contain the desktop, community-fabric, and community-market packages')
+  fail('the root Yarn workspace must contain the canvas-studio, desktop, community-fabric, and community-market packages')
 }
 for (const [name, manifest] of [
   ['dsh-plugin-desktop', plugin],
