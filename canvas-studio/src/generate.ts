@@ -64,6 +64,15 @@ export function clampDuration(value: number | undefined, fallback: number): numb
   return Math.min(MAX_VIDEO_SECONDS, Math.max(1, Math.round(value ?? fallback)))
 }
 
+/** 把参考图列表收敛到最多 max 张：保留首/尾，中间均匀采样，避免超出接口上限。 */
+function sliceToMax(images: string[], max: number): string[] {
+  if (images.length <= max) return images
+  const step = (images.length - 1) / (max - 1)
+  const out: string[] = []
+  for (let i = 0; i < max; i++) out.push(images[Math.round(i * step)]!)
+  return out
+}
+
 /** Drama Backend 调用超时（毫秒）：视频生成最慢，文本类最快。 */
 const DRAMA_TIMEOUT_MS = { image: 360_000, video: 600_000, text: 60_000 }
 
@@ -327,17 +336,19 @@ export async function generateAsset(
       )
     }
   } else if (tool === 'video_generate') {
-    if (!params.filename) throw new Error('video_generate 需要提供 filename（来自 upload_image 工具）')
+    // 单图/文生视频统一走 FL2VA（首尾帧接口，也可纯文生或仅首帧）。
+    // 该接口用 aspect + megapixels，仅支持 16:9 / 9:16（1:1 就近落到 16:9）。
+    const aspect = params.aspectRatio === '9:16' ? '9:16' : '16:9'
     mediaUrl = await callDrama(
-      DRAMA_ENDPOINTS.videoMsr,
+      DRAMA_ENDPOINTS.videoFl2va,
       {
         prompt: params.prompt,
-        width: size.width,
-        height: size.height,
+        aspect,
+        megapixels: 0.4,
         // 时长钳制 ≤15s（后端长视频易失败，建议 ~10s）。
         duration: clampDuration(params.duration, 5),
-        fps: 30,
-        background: params.filename,
+        // 提供 filename 时为「首帧」模式；不提供则为纯文生视频。
+        ...(params.filename ? { image1: params.filename } : {}),
       },
       signal,
       'video',
@@ -364,29 +375,15 @@ export async function generateAsset(
         'video',
       )
     } else {
-      // 多关键帧 MKR：frame_index 按时间轴均分（duration × fps 的帧位置，
-      // 不是数组下标）；最后一张图用 -1 标记结束。时长同样钳制 ≤15s。
+      // 多参考图 REF2VA（image2videoref2va）：最多 6 张（image1–image6），
+      // 后端自动排布参考图以保持角色/场景一致性。超过 6 张时保留首尾 +
+      // 中间均匀采样。同样用 aspect + megapixels，时长钳制 ≤15s。
+      const aspect = params.aspectRatio === '9:16' ? '9:16' : '16:9'
       const duration = clampDuration(params.duration, 10)
-      const totalFrames = duration * 30
-      const images = filenames.map((image, index) => ({
-        image,
-        frame_index: index === filenames.length - 1
-          ? -1
-          : Math.round((index / (filenames.length - 1)) * totalFrames),
-      }))
-      mediaUrl = await callDrama(
-        DRAMA_ENDPOINTS.videoMkr,
-        {
-          prompt: params.prompt,
-          width: size.width,
-          height: size.height,
-          duration,
-          fps: 30,
-          images,
-        },
-        signal,
-        'video',
-      )
+      const refs = sliceToMax(filenames, 6)
+      const refBody: Record<string, unknown> = { prompt: params.prompt, aspect, megapixels: 0.4, duration }
+      refs.forEach((image, i) => { refBody[`image${i + 1}`] = image })
+      mediaUrl = await callDrama(DRAMA_ENDPOINTS.videoRef2va, refBody, signal, 'video')
     }
   } else if (tool === 'style_transfer') {
     if (!params.filename || !params.styleFilename) {

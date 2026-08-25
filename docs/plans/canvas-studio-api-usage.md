@@ -51,11 +51,11 @@
 | 14 | `POST /generate/image2inpaint` | 🆕→P11 | inpaint_image（新工具） | prompt, image | 移除/添加元素智能填充 |
 | 15 | `POST /generate/image2vl` | ✅ | image2vl | system_prompt, prompt, image? | VLM 画面分析 |
 | 16 | `POST /generate/image2360hdri` | 🆕（低优） | — | image | 全景环境贴图彩蛋 |
-| 17 | `POST /generate/image2videomsr` | ✅ | video_generate | prompt, width, height, duration=5, fps=30, image1~4, background(**必填**) | 本地仅传 background；image1~4 待 P8 扩参；默认 640×320 务必覆盖；**时长钳制 ≤15s（建议 8–10s）** |
-| 18 | `POST /generate/image2videomkr` | ✅ | video_composite（≥3 图路径） | prompt, width, height, duration=10, fps=30, images[{image, frame_index}]≤5 | frame_index = duration×fps 展开；时长钳制 ≤15s |
+| 17 | `POST /generate/image2videomsr` | ❌ 停用（2026-08-25 起弃用，改走 fl2va） | video_generate（旧） | prompt, width, height, duration=5, fps=30, image1~4, background(**必填**) | 后端 ltx_msr_workflow 崩溃返回 500，临时停用；单图/文生改走 fl2va |
+| 18 | `POST /generate/image2videomkr` | ❌ 停用（2026-08-25 起弃用，改走 ref2va） | video_composite（≥3 图旧路径） | prompt, width, height, duration=10, fps=30, images[{image, frame_index}]≤5 | 多关键帧精确控帧位；改为 ref2va 多参考（后端自动排布，丢帧位控制） |
 | 19 | `POST /generate/image2videomkrgrid` | ⚠️→P11 | video_generate mode=mkrgrid | gridtype∈{4,6,9}, frame_indexs 长度=gridtype | 宫格视频 |
-| 20 | `POST /generate/image2videofl2va` | ✅（2026-08-24） | video_composite 双图路径 | aspect(16:9\|9:16), megapixels=0.4, duration=5, image1 首帧, image2 尾帧 | 首尾帧插值；两图合成**优先走此接口**，1:1 画幅就近落 16:9 |
-| 21 | `POST /generate/image2videoref2va` | 🆕→P11 | video_generate mode=ref2va | aspect, megapixels, duration, image1~6 | 多参考一致性最强 |
+| 20 | `POST /generate/image2videofl2va` | ✅（2026-08-24 起；2026-08-25 扩展至 video_generate 首帧/文生） | video_generate（首帧/文生）+ video_composite 双图 | aspect(16:9\|9:16), megapixels=0.4, duration=5, image1 首帧, image2 尾帧（均可选） | 首尾帧插值；两图合成**优先走此接口**；video_generate 不传 filename 即纯文生、传则首帧；1:1 画幅就近落 16:9 |
+| 21 | `POST /generate/image2videoref2va` | ✅（2026-08-25 接线） | video_composite ≥3 图（+ video_generate 可扩展） | aspect, megapixels, duration, image1~6 | 多参考一致性最强；≥3 图统一走此接口，最多 6 张，超出自动采样 |
 | 22 | `GET /` | ❓ | — | — | api.md 称返回 message，实测 500 |
 | ★ | `/generate/deduction` | ❌ | deduction 工具（一期） | — | **不在 api.md，实测 404，端点已不存在**；skill 已停止教学，待后端澄清 |
 
@@ -94,13 +94,13 @@ storyboard_split(该图上传后 filename, row×column 由 N 推导: 4→2x2 / 6
 
 | 场景 | 端点/mode | 输入要点 |
 | --- | --- | --- |
-| 单镜动态（默认） | msr | background=单镜图（必填），可加 ≤4 参考；显式传宽高！ |
+| 单镜动态（默认） | fl2va（首帧/文生） | 不传 filename 纯文生；传则 image1 首帧；aspect 选画幅 |
 | 两张图之间过渡 | fl2va | image1 首帧 + image2 尾帧，aspect 选画幅 |
 | 多参考保角色 | ref2va | 最多 6 张参考（定妆+场景+道具），一致性最好 |
-| 多关键帧精确控节奏 | mkr | images≤5，frame_index=时间点×fps |
+| 多关键帧精确控节奏 | mkr（❌ 2026-08-25 停用，改 ref2va） | images≤5，frame_index=时间点×fps |
 | 宫格多机位 | mkrgrid | gridtype 4/6/9，frame_indexs 数量须等于 gridtype |
 
-#### 3.4.1 `image2videomsr` —— 图生视频（单镜动态；`video_generate` 在用 ✅）
+#### 3.4.1 `image2videomsr` —— 图生视频（单镜动态；❌ 2026-08-25 起停用，改走 fl2va）
 
 ```json
 {
@@ -132,7 +132,7 @@ storyboard_split(该图上传后 filename, row×column 由 N 推导: 4→2x2 / 6
 - aspect 仅 `16:9` / `9:16`；1:1 画幅就近落 16:9
 - 偏好单镜头连续插值；prompt 描述首帧→尾帧的运动路径（H3 FL2VA 结构）
 
-#### 3.4.3 `image2videomkr` —— 多关键帧合成（`video_composite` ≥3 图路径在用 ✅）
+#### 3.4.3 `image2videomkr` —— 多关键帧合成（❌ 2026-08-25 起停用，改走 ref2va）
 
 ```json
 {
@@ -162,7 +162,7 @@ storyboard_split(该图上传后 filename, row×column 由 N 推导: 4→2x2 / 6
 
 - gridtype 仅 4/6/9；`frame_indexs` 长度必须等于 gridtype
 
-#### 3.4.5 `image2videoref2va` —— 多参考一致性视频（未接线，P11）
+#### 3.4.5 `image2videoref2va` —— 多参考一致性视频（✅ 2026-08-25 已接线）
 
 ```json
 {
@@ -197,8 +197,8 @@ storyboard_split(该图上传后 filename, row×column 由 N 推导: 4→2x2 / 6
 | --- | --- | --- | --- |
 | image2image | image1~3 | width/height | steps 固定 4 |
 | txt2image(-anime) | — | width/height | steps 固定 8 |
-| videomsr | image1~4 + background(必填) | width/height（默认 640×320！） | duration 默认 5s, fps 30 |
-| videomkr | images ≤5 关键帧 | width/height | duration 默认 12s；frame_index=duration×fps |
+| videomsr（❌ 2026-08-25 停用） | image1~4 + background(必填) | width/height（默认 640×320！） | duration 默认 5s, fps 30 |
+| videomkr（❌ 2026-08-25 停用） | images ≤5 关键帧 | width/height | duration 默认 12s；frame_index=duration×fps |
 | videomkrgrid | 单图宫格 | width/height | gridtype∈{4,6,9} |
 | fl2va / ref2va | fl2va 2 帧 / ref2va ≤6 张 | **aspect + megapixels**（不是像素） | duration 默认 5s |
 | storyboard | image 可选 | width（单项宽） | gridnum 默认 4 |
@@ -217,3 +217,4 @@ storyboard_split(该图上传后 filename, row×column 由 N 推导: 4→2x2 / 6
 - 2026-08-24 初版：按 api.md v0.2.0 全量盘点 22 端点 + deduction 存疑项；首轮探测（health ✅、deduction 404、其余新端点已路由）；确定 P8 抽帧路线绕开流式上传。
 - 2026-08-24 二次修订：video_composite 双图路径接通 **fl2va**（首尾帧插值优先）；全部视频生成**时长钳制 ≤15s**（默认 10，建议 8–10，长片走 P9 本地拼接）；callDrama 加超时（图片 360s / 视频 600s / 文本 60s，验收反馈后翻倍）与一次性自动重试；后端视频模型确认为开源 **MiniMax H3**（`h3_*` 工作流），官方提示词规范已蒸馏进 creation-spec skill（原文属第三方材料，按 .gitignore reference/ 规则仅存本地不入库）。
 - 2026-08-24 三次修订：§3.4 扩写为五个视频端点的完整参数/示例详解；修复上传文件名缺陷（表单名唯一化 `ref-xxxxxxxx.png`，杜绝后端去重产生带空格括号的 filename 导致下游 500）；错误信息透出后端响应体片段；新增 4 个 api.md 请求体契约测试（31 项全绿）。
+- 2026-08-25 四次修订：视频生成收敛为仅 **fl2va + ref2va** 两个接口（msr 后端 500 停用、mkr 改 ref2va）；video_generate 走 fl2va（支持文生视频 / 首帧两种模式），video_composite 双图走 fl2va 首尾帧、≥3 图走 ref2va（最多 6 张，超出自动采样保首尾）；config 移除 videoMsr/videoMkr/videoMkrGrid、新增 videoRef2va；契约测试 msr/mkr 断言改为 fl2va/ref2va。

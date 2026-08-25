@@ -162,21 +162,41 @@ test('video_composite 双图走首尾帧插值（fl2va）端点，时长被钳�
   }
 })
 
-test('api.md 契约：video_generate → image2videomsr 请求体（background 必填、整数时长/fps）', async () => {
+test('api.md 契约：video_generate → image2videofl2va 首帧模式（image1=filename、aspect/megapixels、整数时长）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
   try {
     const calls = stubFetch('https://media.example/out.mp4')
     await generateAsset(stubRegistry([], dir), 'video_generate', 'p1', {
       prompt: 'p', aspectRatio: '16:9', duration: 8.6, filename: 'bg.png',
     })
-    const gen = calls.find((call) => call.url.includes('image2videomsr'))
-    assert.ok(gen, '缺少 image2videomsr 调用')
+    const gen = calls.find((call) => call.url.includes('image2videofl2va'))
+    assert.ok(gen, '缺少 image2videofl2va 调用')
     assert.equal(gen.body.prompt, 'p')
-    assert.equal(gen.body.background, 'bg.png')
-    assert.equal(gen.body.width, 1280)
-    assert.equal(gen.body.height, 720)
-    assert.equal(gen.body.duration, 9) // 整数（api.md duration: integer）
-    assert.equal(gen.body.fps, 30)
+    assert.equal(gen.body.aspect, '16:9')
+    assert.equal(gen.body.megapixels, 0.4)
+    assert.equal(gen.body.image1, 'bg.png')
+    assert.equal(gen.body.duration, 9) // clampDuration(8.6,5)→9
+    assert.equal(gen.body.image2, undefined) // 未提供尾帧
+    assert.equal(gen.body.background, undefined) // 不再走 msr
+    assert.equal(gen.body.width, undefined)
+    assert.equal(gen.body.fps, undefined)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.md 契约：video_generate 无 filename → image2videofl2va 文生视频（无 image1/image2）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.mp4')
+    await generateAsset(stubRegistry([], dir), 'video_generate', 'p1', {
+      prompt: 'p', aspectRatio: '9:16', duration: 5,
+    })
+    const gen = calls.find((call) => call.url.includes('image2videofl2va'))
+    assert.ok(gen, '缺少 image2videofl2va 调用')
+    assert.equal(gen.body.aspect, '9:16')
+    assert.equal(gen.body.image1, undefined)
+    assert.equal(gen.body.image2, undefined)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
@@ -201,21 +221,23 @@ test('api.md 契约：video_composite 双图 → image2videofl2va 请求体（as
   }
 })
 
-test('api.md 契约：video_composite 多图 → image2videomkr 关键帧（frame_index 整数、末帧 -1）', async () => {
+test('api.md 契约：video_composite 多图 → image2videoref2va（image1..imageN、aspect/megapixels）', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
   try {
     const calls = stubFetch('https://media.example/out.mp4')
     await generateAsset(stubRegistry([], dir), 'video_composite', 'p1', {
       prompt: 'p', aspectRatio: '16:9', duration: 10, filenames: ['a.png', 'b.png', 'c.png'],
     })
-    const gen = calls.find((call) => call.url.includes('image2videomkr'))
-    assert.ok(gen, '缺少 image2videomkr 调用')
+    const gen = calls.find((call) => call.url.includes('image2videoref2va'))
+    assert.ok(gen, '缺少 image2videoref2va 调用')
+    assert.equal(gen.body.aspect, '16:9')
+    assert.equal(gen.body.megapixels, 0.4)
     assert.equal(gen.body.duration, 10)
-    assert.equal(gen.body.fps, 30)
-    assert.equal(gen.body.images.length, 3)
-    assert.deepEqual(gen.body.images[0], { image: 'a.png', frame_index: 0 })
-    assert.equal(gen.body.images[1].frame_index, 150)
-    assert.deepEqual(gen.body.images[2], { image: 'c.png', frame_index: -1 })
+    assert.equal(gen.body.image1, 'a.png')
+    assert.equal(gen.body.image2, 'b.png')
+    assert.equal(gen.body.image3, 'c.png')
+    assert.equal(gen.body.images, undefined) // 不再走 mkr 的 images[]/frame_index
+    assert.equal(gen.body.fps, undefined)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

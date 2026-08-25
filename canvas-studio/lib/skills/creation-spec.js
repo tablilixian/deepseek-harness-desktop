@@ -81,7 +81,7 @@ export const CREATION_SKILL_CONTENT = `# Canvas Studio 创作规范
 4. **定妆锚点**：批准后 image_generate 生成主角定妆照 / 场景概念图 —— 这是全片一致性的锚点。
 5. **逐镜出图**：每个镜头调 image_generate，传定妆照 filename 作参考保持角色一致；风格不稳时用 style_transfer 统一到首图风格。
 6. **上传**：对每个镜头图调 upload_image 拿 filename（可并行）。
-7. **成片**：单镜动态用 video_generate；两张图衔接优先 video_composite（自动走首尾帧插值 fl2va）；三张以上转场用 video_composite 多关键帧模式（filenames 按时间顺序，自动均分帧位）。视频 prompt 一律按上方 H3 规范重写。
+7. **成片**：单镜动态用 video_generate（不传 filename 纯文生、传则首帧图生视频，均走 fl2va）；两张图衔接优先 video_composite（自动走首尾帧插值 fl2va）；三张及以上转场用 video_composite 多参考图模式（ref2va，filenames 按时间顺序，最多 6 张）。视频 prompt 一律按上方 H3 规范重写。
 
 ## 分镜表格式（提交审批的正文就用它）
 

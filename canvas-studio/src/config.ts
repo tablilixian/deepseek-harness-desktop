@@ -27,10 +27,8 @@ export const DRAMA_ENDPOINTS = {
   storyboard: '/api/v1/generate/image2storyboard',
   deduction: '/api/v1/generate/deduction',
   inpaint: '/api/v1/generate/image2inpaint',
-  videoMsr: '/api/v1/generate/image2videomsr',
-  videoMkr: '/api/v1/generate/image2videomkr',
   videoFl2va: '/api/v1/generate/image2videofl2va',
-  videoMkrGrid: '/api/v1/generate/image2videomkrgrid',
+  videoRef2va: '/api/v1/generate/image2videoref2va',
 } as const
 
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */

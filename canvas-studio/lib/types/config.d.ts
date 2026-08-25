@@ -14,10 +14,8 @@ export declare const DRAMA_ENDPOINTS: {
     readonly storyboard: "/api/v1/generate/image2storyboard";
     readonly deduction: "/api/v1/generate/deduction";
     readonly inpaint: "/api/v1/generate/image2inpaint";
-    readonly videoMsr: "/api/v1/generate/image2videomsr";
-    readonly videoMkr: "/api/v1/generate/image2videomkr";
     readonly videoFl2va: "/api/v1/generate/image2videofl2va";
-    readonly videoMkrGrid: "/api/v1/generate/image2videomkrgrid";
+    readonly videoRef2va: "/api/v1/generate/image2videoref2va";
 };
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */
 export declare function sizeForAspectRatio(aspectRatio: string | undefined): {

@@ -151,10 +151,10 @@ export function createStudioTools(registry, port) {
         }),
         defineTool({
             name: 'video_generate',
-            description: '根据提示词与一张参考图生成视频（图生视频）。必须提供 filename（upload_image 返回的 Drama Backend 文件名）。返回视频的托管 URL、尺寸与时长。',
+            description: '根据提示词生成视频，统一走 FL2VA 接口，支持两种模式：不传 filename 时为纯文生视频；传入 filename（upload_image 返回的 Drama Backend 文件名）时为「首帧」图生视频。返回视频的托管 URL、尺寸与时长。',
             parameters: {
                 prompt: { type: 'string', required: true, description: '生成提示词' },
-                filename: { type: 'string', required: true, description: '已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
+                filename: { type: 'string', description: '可选：已上传的 Drama Backend 文件名（来自 upload_image 工具），用作视频首帧；不传则为纯文生视频' },
                 aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
                 duration: { type: 'number', description: '视频时长（秒），默认 5；上限 15，建议 8–10（更长请拆多段）' },
                 sourceUrls: { type: 'array', description: '首帧图对应的画布产物 URL（此前工具结果里的 url），用于画布流程箭头' },
@@ -174,12 +174,12 @@ export function createStudioTools(registry, port) {
         }),
         defineTool({
             name: 'video_composite',
-            description: '将多张参考图合成一段视频，首尾帧插值。必须提供 filenames（upload_image 返回的 Drama Backend 文件名数组）。返回合成视频的托管 URL、尺寸与时长。',
+            description: '将多张参考图合成一段视频。两张图走首尾帧插值（FL2VA，image1 首帧 + image2 尾帧）；三张及以上走多参考图合成（REF2VA，最多 6 张，后端自动排布保持角色/场景一致性）。必须提供 filenames（upload_image 返回的 Drama Backend 文件名数组）。返回合成视频的托管 URL、尺寸与时长。',
             parameters: {
                 prompt: { type: 'string', required: true, description: '生成提示词' },
-                filenames: { type: 'array', required: true, description: '已上传的 Drama Backend 文件名数组（来自 upload_image 工具）' },
+                filenames: { type: 'array', required: true, description: '已上传的 Drama Backend 文件名数组（来自 upload_image 工具，最多 6 张，超出自动采样）' },
                 aspectRatio: { type: 'string', enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
-                duration: { type: 'number', description: '视频时长（秒），默认 10；上限 15。两张图走首尾帧插值（fl2va），三张及以上走多关键帧合成' },
+                duration: { type: 'number', description: '视频时长（秒），默认 10；上限 15。两张图走首尾帧插值（fl2va），三张及以上走多参考图合成（ref2va）' },
                 sourceUrls: { type: 'array', description: '输入图对应的画布产物 URL 数组（按 filenames 同序），用于画布流程箭头' },
             },
             output: { schema: resultSchema, render: renderResult },
