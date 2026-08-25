@@ -9,8 +9,8 @@ import { CanvasTimeline } from './canvas/CanvasTimeline.js'
 import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
+import { uploadLocalStudioImage, bytesToBase64 } from './api.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
-import { uploadLocalStudioImage } from './api.js'
 
 // Zoom step for the toolbar +/− buttons (matches the surface wheel step).
 const ZOOM_STEP = 1.2
@@ -107,17 +107,10 @@ export function StudioFrame(props: StudioFrameProps) {
   // Host 落地并上传 Drama 拿 filename → 画布新增 import 素材节点。
   const handleUploadImage = async (file: File): Promise<void> => {
     if (projectId === null) return
-    const dataBase64 = await file.text().then(text => btoa(unescape(encodeURIComponent(text)))).catch(async () => {
-      // File.text() 在某些环境不直接返回 base64；回退为 ArrayBuffer → base64。
-      const buffer = await file.arrayBuffer()
-      let binary = ''
-      const bytes = new Uint8Array(buffer)
-      const chunk = 0x8000
-      for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
-      }
-      return btoa(binary)
-    })
+    // 直接走 ArrayBuffer：file.text() 会按 UTF-8 解码二进制，把 0x80–0xFF
+    // 字节替换成 U+FFFD，导致 PNG/JPEG 头部字节被破坏（验收已复现）。
+    const buffer = await file.arrayBuffer()
+    const dataBase64 = bytesToBase64(new Uint8Array(buffer))
     try {
       const { url } = await uploadLocalStudioImage(projectId, file.name, dataBase64)
       persistAfter(() => actions.addImportNode(projectId, url, file.name || '本地素材'))

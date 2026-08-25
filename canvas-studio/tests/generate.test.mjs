@@ -279,6 +279,35 @@ test('P8.1 契约：uploadLocalImage 落盘返回同源 URL + Drama filename', a
   }
 })
 
+test('P8.1 端到端：真实 PNG 字节经 bytesToBase64 编码后落盘字节完全一致', async () => {
+  // 验收 bug 回归：PNG magic（0x89 0x50 0x4E 0x47 0x0D 0x0A 0x1A 0x0A）+ 高位字节
+  // 经过「client bytesToBase64 → Host uploadLocalImage base64 解码 → 写盘」后，
+  // 落盘字节必须与原始字节 1:1 一致。否则 <img> 会因 PNG 头错位触发 onerror。
+  const PNG_LIKE = Buffer.from([
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+    0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0xEA, 0x80, 0x81, 0x82, 0x83, 0xFE, 0xFF, 0xC0,
+    0xA0, 0xB0, 0x90, 0xFF,
+  ])
+  const { bytesToBase64 } = await import('../lib/encoding.js')
+  const { uploadLocalImage } = await import('../lib/generate.js')
+  const { readFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(join(tmpdir(), 'cs-png-roundtrip-'))
+  try {
+    stubFetch('https://media.example/out.png')
+    const dataBase64 = bytesToBase64(new Uint8Array(PNG_LIKE))
+    const { url } = await uploadLocalImage(stubRegistry([], dir), 'p1', 'photo.png', dataBase64)
+    const file = url.split('/').pop()
+    const onDisk = await readFile(join(dir, file))
+    assert.equal(onDisk.length, PNG_LIKE.length, '落盘字节数不一致')
+    for (let i = 0; i < PNG_LIKE.length; i += 1) {
+      assert.equal(onDisk[i], PNG_LIKE[i], `第 ${i} 字节不一致`)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('P8.2 契约：image_generate 多参考（3 张）→ image2image 端点映射 image1~image3', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cs-imgref-'))
   try {

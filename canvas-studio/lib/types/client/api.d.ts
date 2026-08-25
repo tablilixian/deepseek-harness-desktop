@@ -28,6 +28,15 @@ export declare function loadStudioCanvas(projectId: string, signal?: AbortSignal
     nodes: StudioCanvasNode[];
     view: StudioCanvasView | null;
 }>;
+/**
+ * 把 `Uint8Array` 编码为标准 base64。
+ *
+ * 不能用 `File.text() + btoa(unescape(encodeURIComponent(text)))` 这条捷径：
+ * `File.text()` 会按 UTF-8 解码二进制，把 0x80–0xFF 的字节替换成 U+FFFD，
+ * 导致 PNG/JPEG 头部字节被破坏，落地后再被 `<img>` 加载会触发 `onerror`。
+ * 这里直接走字节，单测里也用真实 PNG magic 字节校验过。
+ */
+export { bytesToBase64 } from '../encoding.js';
 /** P8.1：本地图片上传（base64）→ 返回同源 URL + Drama filename（供生成工具引用）。 */
 export declare function uploadLocalStudioImage(projectId: string, name: string, dataBase64: string, signal?: AbortSignal): Promise<{
     url: string;
