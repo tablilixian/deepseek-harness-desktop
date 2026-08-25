@@ -5666,7 +5666,14 @@ img.csNodeMedia {
 							try {
 								const workspace = await ctx.workspaces.create({ path: project.dir });
 								await ctx.workspaces.rename(workspace.workspaceId, project.name);
-								ctx.workspaces.startSession(workspace.workspaceId);
+								const workspaces = ctx.workspaces.list.getSnapshot();
+								const entry = workspaces.items.find((item) => item.workspaceId === workspace.workspaceId);
+								const sessions = ctx.sessions.list.getSnapshot();
+								const resumable = (entry === void 0 ? [] : entry.sessionIds).map((id) => sessions.byId[id]).filter((summary) => summary !== void 0 && summary.blank !== true && !workspaces.archivedSessionIds.includes(summary.id)).sort((left, right) => right.updatedAt - left.updatedAt)[0];
+								const currentSessionId = ctx.sessions.list.getSnapshot().current;
+								if (resumable !== void 0) {
+									if (currentSessionId !== resumable.id) ctx.sessions.open(resumable.id);
+								} else ctx.workspaces.startSession(workspace.workspaceId);
 								await reloadCanvasQueued(project.id);
 								refreshWorkflow(project.id);
 								if (devSeed) {

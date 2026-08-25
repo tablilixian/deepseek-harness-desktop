@@ -374,7 +374,27 @@ export function apply(ctx: ClientContext): void {
             // Keep the workspace/session title in sync with the project name
             // so the conversation header matches the project list.
             await ctx.workspaces.rename(workspace.workspaceId, project.name)
-            ctx.workspaces.startSession(workspace.workspaceId)
+            // 验收反馈 2026-08-25「切换后历史对话消失」：connectWorkspace 只复用
+            // 工作区下的空白会话 —— 原会话一旦聊过（非 blank），startSession 每次
+            // 都新开一个空会话并跳过去。这里改为从会话镜像里挑该工作区 updatedAt
+            // 最新的非空会话直接恢复；确实没有（首次使用）才走 startSession 建空。
+            const workspaces = ctx.workspaces.list.getSnapshot()
+            const entry = workspaces.items.find(item => item.workspaceId === workspace.workspaceId)
+            const sessions = ctx.sessions.list.getSnapshot()
+            const members = entry === undefined ? [] : entry.sessionIds
+            const resumable = members
+              .map(id => sessions.byId[id])
+              .filter((summary): summary is NonNullable<typeof summary> =>
+                summary !== undefined
+                && summary.blank !== true
+                && !workspaces.archivedSessionIds.includes(summary.id))
+              .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+            const currentSessionId = ctx.sessions.list.getSnapshot().current
+            if (resumable !== undefined) {
+              if (currentSessionId !== resumable.id) ctx.sessions.open(resumable.id)
+            } else {
+              ctx.workspaces.startSession(workspace.workspaceId)
+            }
             // P4+：载入持久化画布（含视口）；dev 模式下若项目为空则注入种子。
             await reloadCanvasQueued(project.id)
             void refreshWorkflow(project.id)
