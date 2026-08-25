@@ -74,7 +74,7 @@ async function uploadImage(sourceUrl, signal) {
     // 每次上传用唯一且只含 [A-Za-z0-9._-] 的表单文件名：写死同名会触发后端
     // 去重后缀（如 "reference (463).png"），带空格括号的文件名传回 ComfyUI
     // 工作流会导致生成 500。
-    form.append('file', new Blob([bytes]), `ref-${newAssetId().slice(0, 8)}.png`);
+    form.append('file', new Blob([new Uint8Array(bytes)]), `ref-${newAssetId().slice(0, 8)}.png`);
     const upload = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.uploadimage}`, {
         method: 'POST',
         body: form,
@@ -91,6 +91,58 @@ async function uploadImage(sourceUrl, signal) {
     if (!filename)
         throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`);
     return filename;
+}
+/**
+ * P8.1：把本地图片（base64）落地到项目 assets 目录，并返回可直接供生成工具
+ * 使用的两个引用：
+ * - `url`：同源相对路径（/canvas-studio/assets/<projectId>/<file>），画布素材节点直接用；
+ * - `filename`：经 Drama `uploadimage` 拿到的服务器文件名，供 image_generate /
+ *   video_generate / video_composite 的 filename(s) 参数使用。
+ * 文件名沿用 uploadImage 的唯一安全名约定（只含 [A-Za-z0-9._-]），避免触发
+ * 后端去重后缀破坏下游。
+ */
+export async function uploadLocalImage(registry, projectId, name, dataBase64, signal) {
+    const project = (await registry.list()).find((entry) => entry.id === projectId);
+    if (!project)
+        throw new Error(`项目不存在: ${projectId}`);
+    if (typeof dataBase64 !== 'string' || dataBase64.length === 0) {
+        throw new Error('dataBase64 不能为空');
+    }
+    let bytes;
+    try {
+        bytes = Buffer.from(dataBase64, 'base64');
+        if (bytes.length === 0)
+            throw new Error('空图片');
+    }
+    catch {
+        throw new Error('dataBase64 不是有效的 base64');
+    }
+    // 仅允许常见图片类型；其余按 png 兜底（写盘用，不影响 Drama 侧识别）。
+    const ext = /\.(png|jpe?g|webp|gif|bmp)$/iu.test(name) ? name.toLowerCase().replace(/^.*\./u, '') : 'png';
+    const assetId = newAssetId();
+    const file = `${assetId}.${ext}`;
+    const directory = registry.assetsDir(projectId);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, file), bytes);
+    const url = `/canvas-studio/assets/${projectId}/${file}`;
+    // 复用同一份字节上传到 Drama，拿到服务器 filename（供后续生成引用）。
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(bytes)]), `ref-${assetId.slice(0, 8)}.${ext}`);
+    const upload = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.uploadimage}`, {
+        method: 'POST',
+        body: form,
+        signal: signal ?? null,
+    });
+    if (!upload.ok)
+        throw new Error(`参考图上传失败: ${upload.status}`);
+    const data = await upload.json();
+    const filename = (data.filename
+        ?? data.name
+        ?? data.data?.filename
+        ?? data.data?.url);
+    if (!filename)
+        throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`);
+    return { url, filename };
 }
 /** 统一解析失败响应：优先结构化字段，否则带出响应体片段（便于定位 500 真因）。 */
 async function describeError(response) {

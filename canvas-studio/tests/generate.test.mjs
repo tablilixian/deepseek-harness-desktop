@@ -257,3 +257,24 @@ test('api.md 契约：上传表单文件名唯一且不含空格括号（避免�
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('P8.1 契约：uploadLocalImage 落盘返回同源 URL + Drama filename', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-upload-'))
+  try {
+    const calls = stubFetch('https://media.example/out.png')
+    const { uploadLocalImage } = await import('../lib/generate.js')
+    const dataBase64 = Buffer.from([1, 2, 3, 4, 5]).toString('base64')
+    const result = await uploadLocalImage(stubRegistry([], dir), 'p1', 'photo.png', dataBase64)
+    // 返回结构：同源相对 URL + Drama 服务器文件名。
+    assert.match(result.url, /^\/canvas-studio\/assets\/p1\/[\w.\-]+\.png$/u, `URL 非同源相对路径: ${result.url}`)
+    assert.equal(result.filename, 'ref.png', `filename 应来自 Drama uploadimage: ${result.filename}`)
+    // 发起了一次 Drama 上传（uploadimage），用于拿 filename。
+    assert.ok(calls.some((call) => String(call.url).includes('/upload')), '未发起 Drama uploadimage 上传')
+    // 本地写盘：assets 目录存在该文件。
+    const { readdir } = await import('node:fs/promises')
+    const files = await readdir(dir)
+    assert.ok(files.some((file) => file.endsWith('.png')), `assets 未写盘: ${files.join(',')}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

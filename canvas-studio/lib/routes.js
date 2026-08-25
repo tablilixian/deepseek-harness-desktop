@@ -2,13 +2,14 @@ import { readFile } from 'node:fs/promises';
 import { BlockList, isIP } from 'node:net';
 import { extname, join, sep } from 'node:path';
 import { normalizeWorkflow } from './contracts/project.js';
-import { generateAsset } from './generate.js';
+import { generateAsset, uploadLocalImage } from './generate.js';
 import { normalizeCanvasView } from './canvas-view.js';
 const ROUTE_PROJECTS = '/canvas-studio/projects';
 const ROUTE_GENERATE = '/canvas-studio/generate';
 const ROUTE_ASSETS = '/canvas-studio/assets';
 const ROUTE_CANVAS = '/canvas-studio/canvas';
 const ROUTE_WORKFLOW = '/canvas-studio/workflow';
+const ROUTE_UPLOAD = '/canvas-studio/upload';
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_CANVAS_NODES = 2000;
 const loopbackAddresses = new BlockList();
@@ -530,6 +531,56 @@ export function registerStudioRoutes(ctx, registry) {
                 catch (cause) {
                     if (!controller.signal.aborted && !res.destroyed) {
                         sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'workflow update failed' });
+                    }
+                }
+                finally {
+                    stopWatching();
+                }
+            } }),
+        // P8.1: local image upload. The browser encodes a dropped/selected file as
+        // base64 (no multipart parser dependency). The Host writes the bytes to the
+        // project's assets/ dir (same-origin URL for canvas nodes) and forwards them
+        // to Drama's uploadimage to obtain a server filename for generation tools.
+        ctx.webServer.register({ kind: 'exact', path: ROUTE_UPLOAD, handler: async (req, res) => {
+                if (!requestAllowed(req, expectedPort)) {
+                    sendJson(res, 403, { error: 'canvas-studio request authority rejected' });
+                    return;
+                }
+                if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+                    sendJson(res, 405, { error: 'upload requires a local same-origin POST' });
+                    return;
+                }
+                const controller = new AbortController();
+                const stopWatching = () => {
+                    req.off('aborted', onRequestAbort);
+                    res.off('close', onResponseClose);
+                };
+                const onRequestAbort = () => controller.abort();
+                const onResponseClose = () => {
+                    if (!res.writableEnded)
+                        controller.abort();
+                };
+                req.once('aborted', onRequestAbort);
+                res.once('close', onResponseClose);
+                try {
+                    const body = await readJson(req, controller.signal);
+                    if (typeof body.projectId !== 'string') {
+                        sendJson(res, 400, { error: '缺少 projectId' });
+                        return;
+                    }
+                    if (typeof body.dataBase64 !== 'string') {
+                        sendJson(res, 400, { error: '缺少 dataBase64' });
+                        return;
+                    }
+                    const name = typeof body.name === 'string' && body.name.length > 0 ? body.name : 'local.png';
+                    const result = await uploadLocalImage(registry, body.projectId, name, body.dataBase64, controller.signal);
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 200, { url: result.url, filename: result.filename });
+                    }
+                }
+                catch (cause) {
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'upload failed' });
                     }
                 }
                 finally {

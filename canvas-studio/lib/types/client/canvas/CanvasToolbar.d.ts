@@ -15,6 +15,8 @@ export interface CanvasToolbarProps {
     /** One-click overlap-free arrange (the only layout action by design). */
     onAutoArrange(): void;
     onAddNode(kind: ManualNodeKind): void;
+    /** P8.1：打开本地文件选择器上传图片到当前项目（落画布素材节点）。 */
+    onUploadImage(file: File): void;
     /** Toggle the layer list overlay inside the canvas. */
     layersOpen: boolean;
     onToggleLayers(): void;

@@ -130,6 +130,22 @@ export async function loadStudioCanvas(
   }
 }
 
+/** P8.1：本地图片上传（base64）→ 返回同源 URL + Drama filename（供生成工具引用）。 */
+export async function uploadLocalStudioImage(
+  projectId: string,
+  name: string,
+  dataBase64: string,
+  signal?: AbortSignal,
+): Promise<{ url: string; filename: string }> {
+  const response = await readJson<{ url: string; filename: string }>(await fetch('/canvas-studio/upload', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ projectId, name, dataBase64 }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+  return response
+}
+
 /** Persist a project's full canvas node list plus the current viewport state. */
 export async function saveStudioCanvas(
   projectId: string,

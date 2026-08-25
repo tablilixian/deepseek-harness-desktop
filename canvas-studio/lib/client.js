@@ -358,6 +358,19 @@ window.__ModuleLoader__.load({
 				view: normalizeCanvasView(response.view) ?? null
 			};
 		}
+		/** P8.1：本地图片上传（base64）→ 返回同源 URL + Drama filename（供生成工具引用）。 */
+		async function uploadLocalStudioImage(projectId, name, dataBase64, signal) {
+			return await readJson(await fetch("/canvas-studio/upload", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					projectId,
+					name,
+					dataBase64
+				}),
+				...signal === void 0 ? {} : { signal }
+			}));
+		}
 		/** Persist a project's full canvas node list plus the current viewport state. */
 		async function saveStudioCanvas(projectId, nodes, view, signal) {
 			await readJson(await fetch("/canvas-studio/canvas", {
@@ -1002,6 +1015,34 @@ window.__ModuleLoader__.load({
 							origin: "manual",
 							sourceIds: [],
 							...defaults
+						};
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing, node]
+						};
+						draft.selectedNodeIds = [node.id];
+						draft.selectedNodeId = node.id;
+					},
+					addImportNode: (draft, projectId, url, title) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const index = existing.length;
+						const size = NODE_SIZE.image;
+						const node = {
+							id: newNodeId(),
+							kind: "image",
+							title: typeof title === "string" && title.length > 0 ? title : "本地素材",
+							url,
+							x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
+							y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+							width: size.width,
+							height: size.height,
+							createdAt: Date.now(),
+							origin: "manual",
+							sourceIds: []
 						};
 						draft.nodes = {
 							...draft.nodes,
@@ -2458,7 +2499,8 @@ img.csNodeMedia {
 		* Everything is props-driven — the frame wires the store actions.
 		*/
 		function CanvasToolbar(props) {
-			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
+			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, onUploadImage, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
+			const uploadInputRef = (0, react.useRef)(null);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csToolbar",
 				children: [
@@ -2542,6 +2584,25 @@ img.csNodeMedia {
 									onAddNode("prompt");
 								},
 								children: "+ 提示"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								onClick: () => {
+									uploadInputRef.current?.click();
+								},
+								children: "上传图片"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+								ref: uploadInputRef,
+								type: "file",
+								accept: "image/png,image/jpeg,image/webp,image/gif",
+								style: { display: "none" },
+								onChange: (event) => {
+									const file = event.target.files?.[0];
+									if (file !== void 0) onUploadImage(file);
+									event.target.value = "";
+								}
 							})
 						]
 					}),
@@ -4279,6 +4340,23 @@ img.csNodeMedia {
 				mutate();
 				persist();
 			};
+			const handleUploadImage = async (file) => {
+				if (projectId === null) return;
+				const dataBase64 = await file.text().then((text) => btoa(unescape(encodeURIComponent(text)))).catch(async () => {
+					const buffer = await file.arrayBuffer();
+					let binary = "";
+					const bytes = new Uint8Array(buffer);
+					const chunk = 32768;
+					for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+					return btoa(binary);
+				});
+				try {
+					const { url } = await uploadLocalStudioImage(projectId, file.name, dataBase64);
+					persistAfter(() => actions.addImportNode(projectId, url, file.name || "本地素材"));
+				} catch (cause) {
+					throw cause instanceof Error ? cause : /* @__PURE__ */ new Error("图片上传失败");
+				}
+			};
 			const handleViewChange = (patch) => {
 				if (projectId === null) return;
 				actions.setView(projectId, patch);
@@ -4448,6 +4526,22 @@ img.csNodeMedia {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
 						className: "csCanvas",
+						onDragOver: (event) => {
+							if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+						},
+						onDrop: (event) => {
+							if (!event.dataTransfer.types.includes("Files")) return;
+							event.preventDefault();
+							const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+							if (file === void 0) return;
+							(async () => {
+								try {
+									await handleUploadImage(file);
+								} catch (cause) {
+									window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`);
+								}
+							})();
+						},
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasToolbar, {
 								canUndo: historyIndex >= 0,
@@ -4473,6 +4567,13 @@ img.csNodeMedia {
 								},
 								onAddNode: (kind) => {
 									if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
+								},
+								onUploadImage: async (file) => {
+									try {
+										await handleUploadImage(file);
+									} catch (cause) {
+										window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`);
+									}
 								},
 								layersOpen: view.layersOpen,
 								onToggleLayers: () => {

@@ -51,6 +51,19 @@ export declare function clampDuration(value: number | undefined, fallback: numbe
 declare function resolveImageUrl(url: string, port: number): string;
 /** 上传一张图（本地/远程 URL）到 Drama Backend，返回服务器 filename。 */
 declare function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<string>;
+/**
+ * P8.1：把本地图片（base64）落地到项目 assets 目录，并返回可直接供生成工具
+ * 使用的两个引用：
+ * - `url`：同源相对路径（/canvas-studio/assets/<projectId>/<file>），画布素材节点直接用；
+ * - `filename`：经 Drama `uploadimage` 拿到的服务器文件名，供 image_generate /
+ *   video_generate / video_composite 的 filename(s) 参数使用。
+ * 文件名沿用 uploadImage 的唯一安全名约定（只含 [A-Za-z0-9._-]），避免触发
+ * 后端去重后缀破坏下游。
+ */
+export declare function uploadLocalImage(registry: ProjectRegistry, projectId: string, name: string, dataBase64: string, signal?: AbortSignal): Promise<{
+    url: string;
+    filename: string;
+}>;
 /** 生成工具名 → 画布操作类型（边颜色/标签的语义来源）。 */
 export declare function operationTypeOf(tool: string, params: GenerateParams): StudioCanvasOperationType;
 /** 把生成参数序列化为 generationPrompt（节点重试时原样重放；retryOf 不入档）。 */

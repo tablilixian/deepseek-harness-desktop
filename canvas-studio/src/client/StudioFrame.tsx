@@ -10,6 +10,7 @@ import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
+import { uploadLocalStudioImage } from './api.js'
 
 // Zoom step for the toolbar +/− buttons (matches the surface wheel step).
 const ZOOM_STEP = 1.2
@@ -101,6 +102,29 @@ export function StudioFrame(props: StudioFrameProps) {
   const persistAfter = (mutate: () => void): void => {
     mutate()
     persist()
+  }
+  // P8.1：本地图片上传入口（工具条按钮）。读取用户选择的图片 → base64 →
+  // Host 落地并上传 Drama 拿 filename → 画布新增 import 素材节点。
+  const handleUploadImage = async (file: File): Promise<void> => {
+    if (projectId === null) return
+    const dataBase64 = await file.text().then(text => btoa(unescape(encodeURIComponent(text)))).catch(async () => {
+      // File.text() 在某些环境不直接返回 base64；回退为 ArrayBuffer → base64。
+      const buffer = await file.arrayBuffer()
+      let binary = ''
+      const bytes = new Uint8Array(buffer)
+      const chunk = 0x8000
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+      }
+      return btoa(binary)
+    })
+    try {
+      const { url } = await uploadLocalStudioImage(projectId, file.name, dataBase64)
+      persistAfter(() => actions.addImportNode(projectId, url, file.name || '本地素材'))
+    } catch (cause) {
+      // 上传失败不破坏画布；错误提示由调用方（按钮）展示给用户。
+      throw cause instanceof Error ? cause : new Error('图片上传失败')
+    }
   }
   // 视口/面板状态：store 即时合并（画布受控渲染），磁盘保存防抖合并。
   const handleViewChange = (patch: Partial<StudioCanvasView>): void => {
@@ -243,7 +267,26 @@ export function StudioFrame(props: StudioFrameProps) {
           onDelete={deleteProject}
         />
       </aside>
-      <main className="csCanvas">
+      <main
+        className="csCanvas"
+        onDragOver={(event) => {
+          // P8.1：允许把本地图片拖到画布区域，松手即上传落素材节点。
+          if (event.dataTransfer.types.includes('Files')) event.preventDefault()
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.types.includes('Files')) return
+          event.preventDefault()
+          const file = Array.from(event.dataTransfer.files).find(item => item.type.startsWith('image/'))
+          if (file === undefined) return
+          void (async () => {
+            try {
+              await handleUploadImage(file)
+            } catch (cause) {
+              window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`)
+            }
+          })()
+        }}
+      >
         <CanvasToolbar
           canUndo={historyIndex >= 0}
           canRedo={historyIndex + 1 < historyLength}
@@ -265,6 +308,14 @@ export function StudioFrame(props: StudioFrameProps) {
             setFitRequestedAt(Date.now())
           }}
           onAddNode={kind => { if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind)) }}
+          onUploadImage={async (file) => {
+            try {
+              await handleUploadImage(file)
+            } catch (cause) {
+              // 上传失败不影响画布；用浏览器原生提示告知用户（轻量、无需新增 toast 体系）。
+              window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`)
+            }
+          }}
           layersOpen={view.layersOpen}
           onToggleLayers={() => { handleViewChange({ layersOpen: !view.layersOpen }) }}
           scale={view.scale}

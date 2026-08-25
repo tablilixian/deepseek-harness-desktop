@@ -152,7 +152,7 @@ interface StudioWorkflow {
 | 真·定妆照 | 新工具 `character_sheet`（四视图立绘）替换 prompt 约定模拟 | image2character |
 | 局部重绘 | 新工具 `inpaint_image`，配合画布标注框选 | image2inpaint |
 | 动漫风 | `image_generate` 增加 `style: realistic \| anime` | txt2imageanime |
-| 视频模式扩展 | `video_generate` 增加 `mode`: msr（默认）/ fl2va（首尾帧）/ ref2va（6 参考一致性）/ mkrgrid（宫格） | fl2va / ref2va / mkrgrid |
+| 视频模式扩展 | ~~`video_generate` 增加 `mode`: msr（默认）/ fl2va（首尾帧）/ ref2va（6 参考一致性）/ mkrgrid（宫格）~~ → **2026-08-25 决策重构**：msr 停用（后端 500），`video_generate` 统一走 FL2VA（无 filename 文生 / 有 filename 首帧，已由本插件默认）；`video_composite` 双图走 FL2VA 首尾帧、≥3 图走 REF2VA（≤6 张）已落地；mkrgrid（宫格）仍挂起待定 | fl2va / ref2va（已落地）；mkrgrid（待定） |
 | IPA 风格迁移 | 多参考融合精细控制 | image2ipastyletransfer |
 | 字幕烧录 | srt 硬字幕进导出 mp4 | ffmpeg 本地 |
 | 缩略图 LOD / 手绘标注层 / 独立 edge 层 | handoff §10.5 既有项 | — |
@@ -243,7 +243,7 @@ interface StudioWorkflow {
 
 1. ⬜ 本地图片上传：`POST /canvas-studio/upload`（JSON base64，复用 readJson/16MB 上限）→ Drama `uploadimage`
    - 验收：工具条按钮 + 画布拖拽两个入口；上传后 filename 可直接作生成输入
-2. ⬜ 存量工具多参考扩参：`GenerateParams.filenames` → image2image 补 image1~3、videomsr 补 image1~4（工具 schema 加数组参数，单数 filename 保持兼容）
+2. ⬜ 存量工具多参考扩参：`GenerateParams.filenames` 已用于 `video_composite`（ref2va ≤6 张，已落地）；`image_generate` 图生图仍只传单 `filename`（image1），需补 image1~3 多参考；video 侧原「msr 补 image1~4」**已作废**（video_generate 改走 fl2va 单首帧、video_composite 改 ref2va，不再用 msr）
    - 验收：三参考图生图、参考图+背景生视频真实出片
 3. ⬜ 分镜拆单镜闭环：新工具 `storyboard_split` 调 `image2splitegrid`（gridnum→row×column 推导），产物逐格落独立节点（sourceIds 指向网格图）
    - 验收：4/6/9 格拆分正确、血缘边正确、单镜可独立重试
@@ -295,3 +295,4 @@ interface StudioWorkflow {
 - 2026-08-24（验收反馈轮）：超时翻倍（图片 360s / 视频 600s）；画布专项修复五连——媒体加载失败兜底、占位超时转失败、双击打开详情面板、sourceUrls 血缘箭头、小地图/图层默认关闭；新增 §10 画布完成度审计与优化清单。
 - 2026-08-24（点选澄清轮）：需求澄清改为**点选式交互**——新工具 `ask_user_choice`（Host 阻塞等待）+ 对话区内联选项卡片（conversationEvents 自定义聊天节点 `canvas-studio-question` 注册进上游 `conversation.chat.node` seat），用户点选后答案自动回流模型；画布侧卡片移除；skill 强制"一次一问、禁文本列表提问"。
 - 2026-08-24（视频排障轮）：定位视频 500 两层原因——①我方上传表单文件名写死 `reference.png` 触发后端去重后缀（带空格括号破坏下游，已修：唯一安全名）；②后端整体挂起（health 超时，待 WL 侧恢复）。错误信息透出后端响应体；新增 4 个 api.md 请求体契约测试；api-usage §3.4 扩写为五端点完整详解。
+- 2026-08-25（接口收敛）：视频生成收敛到两个已验证接口——`video_generate` 统一 FL2VA（文生 / 首帧），`video_composite` 双图 FL2VA 首尾帧、≥3 图 REF2VA（≤6 张，sliceToMax 收敛）；停用 msr/mkr（后端 msr 500）。config 移除 videoMsr/videoMkr/videoMkrGrid，仅留 videoFl2va/videoRef2va；契约测试替换为 fl2va/ref2va 断言。已按仓库规范（排除 dirty 子模块、只 stage canvas-studio+docs）提交并 push origin canvas-studio（commit e35bc715e7）。本文件 §7 视频模式扩展行、§11.2 P8.2 描述同步修订。下一步：进入 P8 素材入口。

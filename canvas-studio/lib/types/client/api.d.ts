@@ -28,6 +28,11 @@ export declare function loadStudioCanvas(projectId: string, signal?: AbortSignal
     nodes: StudioCanvasNode[];
     view: StudioCanvasView | null;
 }>;
+/** P8.1：本地图片上传（base64）→ 返回同源 URL + Drama filename（供生成工具引用）。 */
+export declare function uploadLocalStudioImage(projectId: string, name: string, dataBase64: string, signal?: AbortSignal): Promise<{
+    url: string;
+    filename: string;
+}>;
 /** Persist a project's full canvas node list plus the current viewport state. */
 export declare function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], view: StudioCanvasView, signal?: AbortSignal): Promise<void>;
 /**

@@ -109,6 +109,8 @@ export type ProjectStoreActions = {
     setPendingNode: (draft: ProjectStoreState, projectId: string, node: StudioCanvasNode) => void;
     /** 手动新增一个便签/文本/提示节点（写历史）。 */
     addNode: (draft: ProjectStoreState, projectId: string, kind: 'sticky' | 'text' | 'prompt') => void;
+    /** P8.1：把本地上传的图片作为素材节点落到画布（manual origin，带 url）。 */
+    addImportNode: (draft: ProjectStoreState, projectId: string, url: string, title?: string) => void;
     /** 移除 runId 匹配的占位节点（重载/完成时）。 */
     removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void;
     /** 占位节点标记失败（tool/result 的 data.error）。 */
