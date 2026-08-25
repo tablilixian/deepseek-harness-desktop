@@ -143,8 +143,8 @@ export type ProjectStoreActions = {
   setPendingNode: (draft: ProjectStoreState, projectId: string, node: StudioCanvasNode) => void
   /** 手动新增一个便签/文本/提示节点（写历史）。 */
   addNode: (draft: ProjectStoreState, projectId: string, kind: 'sticky' | 'text' | 'prompt') => void
-  /** P8.1：把本地上传的图片作为素材节点落到画布（manual origin，带 url）。 */
-  addImportNode: (draft: ProjectStoreState, projectId: string, url: string, title?: string) => void
+  /** P8.1：把本地上传的图片作为参考素材节点落到画布（manual origin，带 url/filename）。 */
+  addImportNode: (draft: ProjectStoreState, projectId: string, url: string, title?: string, filename?: string, referenceRole?: StudioCanvasNode['referenceRole'], isReference?: boolean) => void
   /** 移除 runId 匹配的占位节点（重载/完成时）。 */
   removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void
   /** 占位节点标记失败（tool/result 的 data.error）。 */
@@ -656,7 +656,7 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
         draft.selectedNodeIds = [node.id]
         draft.selectedNodeId = node.id
       },
-      addImportNode: (draft, projectId, url, title) => {
+      addImportNode: (draft, projectId, url, title, filename, referenceRole = 'image', isReference = true) => {
         const existing = draft.nodes[projectId]
         if (existing === undefined) return
         const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
@@ -669,6 +669,9 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
           kind: 'image',
           title: typeof title === 'string' && title.length > 0 ? title : '本地素材',
           url,
+          ...(typeof filename === 'string' && filename.length > 0 ? { filename } : {}),
+          ...(isReference ? { isReference: true } : {}),
+          ...(isReference && referenceRole !== undefined ? { referenceRole } : {}),
           x: LAYOUT.origin + (index % LAYOUT.columns) * LAYOUT.stepX,
           y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
           width: size.width,

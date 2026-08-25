@@ -428,6 +428,9 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             id: assetId,
             kind: isVideo ? 'video' : 'image',
             url,
+            // 图片产物默认成为可复用参考（参考托盘 / list_references 来源）；
+            // 视频暂不直接作为工具参考图，故不标记。
+            ...(isVideo ? {} : { isReference: true, referenceRole: 'image' }),
             x: 0,
             y: 0,
             width: size.width,
@@ -493,6 +496,8 @@ export async function splitStoryboard(registry, projectId, params, signal) {
             id: assetId,
             kind: 'image',
             url,
+            isReference: true,
+            referenceRole: 'image',
             x: 0,
             y: 0,
             width: 260,

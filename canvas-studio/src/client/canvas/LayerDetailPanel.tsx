@@ -29,6 +29,10 @@ export interface LayerDetailPanelProps {
   onSteer(id: string, prompt: string): void
   /** Cancel the running turn (loading nodes). */
   onCancel(id: string): void
+  /** 更新节点字段（参考图角色/强度/标记）。 */
+  onUpdateNode(id: string, updates: Partial<StudioCanvasNode>): void
+  /** 把该节点作为 @ref 引用标记复制到聊天输入框。 */
+  onReferenceToChat(node: StudioCanvasNode): void
 }
 
 /**
@@ -37,7 +41,7 @@ export interface LayerDetailPanelProps {
  * steer / cancel). Reference LayerDetailPanel semantics, DSH tokens.
  */
 export function LayerDetailPanel(props: LayerDetailPanelProps) {
-  const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel } = props
+  const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel, onUpdateNode, onReferenceToChat } = props
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState(node.title ?? '')
   const [steering, setSteering] = useState(false)
@@ -162,6 +166,52 @@ export function LayerDetailPanel(props: LayerDetailPanelProps) {
           <button type="button" className="csDetailButton" onClick={() => { onReorder(node.id, 'front') }}>置顶</button>
           <button type="button" className="csDetailButton" onClick={() => { onReorder(node.id, 'back') }}>置底</button>
         </div>
+        {node.kind === 'image' && (
+          <div className="csDetailSection">
+            <div className="csDetailRow">
+              <span className="csDetailLabel">参考图</span>
+              <button
+                type="button"
+                className={node.isReference ? 'csDetailButton csDetailButtonActive' : 'csDetailButton'}
+                onClick={() => { onUpdateNode(node.id, { isReference: !node.isReference }) }}
+              >
+                {node.isReference ? '已标记' : '标记为参考'}
+              </button>
+              <button type="button" className="csDetailButton" onClick={() => { onReferenceToChat(node) }}>
+                引用到对话
+              </button>
+            </div>
+            {node.isReference && (
+              <>
+                <div className="csDetailRow">
+                  <span className="csDetailLabel">角色</span>
+                  <select
+                    className="csDetailSelect"
+                    value={node.referenceRole ?? 'image'}
+                    onChange={event => { onUpdateNode(node.id, { referenceRole: event.target.value as 'image' | 'character' | 'style' | 'frame' }) }}
+                  >
+                    <option value="image">构图/通用</option>
+                    <option value="character">角色</option>
+                    <option value="style">风格</option>
+                    <option value="frame">首末帧</option>
+                  </select>
+                </div>
+                <div className="csDetailRow">
+                  <span className="csDetailLabel">强度</span>
+                  <input
+                    className="csDetailRange"
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round((node.referenceStrength ?? 1) * 100)}
+                    onChange={event => { onUpdateNode(node.id, { referenceStrength: Number(event.target.value) / 100 }) }}
+                  />
+                  <span className="csDetailValue">{Math.round((node.referenceStrength ?? 1) * 100)}%</span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         {generationPrompt !== null && (
           <div className="csDetailRow">
             <span className="csDetailLabel">生成参数</span>

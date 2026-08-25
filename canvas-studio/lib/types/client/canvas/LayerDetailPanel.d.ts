@@ -16,6 +16,10 @@ export interface LayerDetailPanelProps {
     onSteer(id: string, prompt: string): void;
     /** Cancel the running turn (loading nodes). */
     onCancel(id: string): void;
+    /** 更新节点字段（参考图角色/强度/标记）。 */
+    onUpdateNode(id: string, updates: Partial<StudioCanvasNode>): void;
+    /** 把该节点作为 @ref 引用标记复制到聊天输入框。 */
+    onReferenceToChat(node: StudioCanvasNode): void;
 }
 /**
  * The layer detail panel: edit the selected node's title, opacity, flip,

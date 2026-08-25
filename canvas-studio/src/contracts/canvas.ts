@@ -100,6 +100,18 @@ export interface StudioCanvasNode {
   progress?: number
   /** Transient: last failure message (never persisted). */
   error?: string
+  /**
+   * Drama Backend 文件名：可作为 image_generate / video_generate / style_transfer
+   * 等工具的参考图句柄。上传图与经 upload_image 复用的产物携带；落盘即写入，
+   * 使 list_references 能直接把 filename 交给 agent，免去运行时再上传。
+   */
+  filename?: string
+  /** 是否为可复用参考图（参考托盘与 list_references 的来源）。 */
+  isReference?: boolean
+  /** 参考图角色：决定 agent 选用哪个生成工具与强度（Runway 式分类）。 */
+  referenceRole?: 'image' | 'character' | 'style' | 'frame'
+  /** 参考强度 0–1（对应 Runway 参考强度滑块；1=强保真）。 */
+  referenceStrength?: number
 }
 
 /** Canvas persistence document written to `<project>/canvas.json`. */

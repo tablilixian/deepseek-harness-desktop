@@ -1047,7 +1047,7 @@ window.__ModuleLoader__.load({
 						draft.selectedNodeIds = [node.id];
 						draft.selectedNodeId = node.id;
 					},
-					addImportNode: (draft, projectId, url, title) => {
+					addImportNode: (draft, projectId, url, title, filename, referenceRole = "image", isReference = true) => {
 						const existing = draft.nodes[projectId];
 						if (existing === void 0) return;
 						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
@@ -1060,6 +1060,9 @@ window.__ModuleLoader__.load({
 							kind: "image",
 							title: typeof title === "string" && title.length > 0 ? title : "本地素材",
 							url,
+							...typeof filename === "string" && filename.length > 0 ? { filename } : {},
+							...isReference ? { isReference: true } : {},
+							...isReference && referenceRole !== void 0 ? { referenceRole } : {},
 							x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
 							y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
 							width: size.width,
@@ -2364,6 +2367,119 @@ img.csNodeMedia {
 
 .csMenuActionDanger:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* ---- Reference tray (left column) ---- */
+.csReferenceTray {
+  margin: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
+  overflow: hidden;
+}
+.csReferenceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  user-select: none;
+}
+.csReferenceToggle {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--dsw-alias-label-secondary);
+}
+.csReferenceList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.csReferenceItem {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+.csReferenceThumb {
+  width: 56px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  background: #e9e9e9;
+}
+.csReferenceMeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.csReferenceTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.csReferenceTitle {
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csReferenceChip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+.csReferenceRange {
+  width: 100%;
+}
+.csReferenceActions {
+  display: flex;
+  gap: 6px;
+}
+.csReferenceButton {
+  flex: 1 1 auto;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.csReferenceButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* ---- Detail panel reference section ---- */
+.csDetailSection {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+.csDetailSelect {
+  flex: 1 1 auto;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
 }
 `;
 		/** Inject the studio stylesheet once per browser lifetime. */
@@ -3908,7 +4024,7 @@ img.csNodeMedia {
 		* steer / cancel). Reference LayerDetailPanel semantics, DSH tokens.
 		*/
 		function LayerDetailPanel(props) {
-			const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel } = props;
+			const { node, onClose, onRename, onSetOpacity, onToggleFlip, onToggleLock, onToggleVisibility, onReorder, onDelete, onRetry, onSteer, onCancel, onUpdateNode, onReferenceToChat } = props;
 			const [editingTitle, setEditingTitle] = (0, react.useState)(false);
 			const [titleInput, setTitleInput] = (0, react.useState)(node.title ?? "");
 			const [steering, setSteering] = (0, react.useState)(false);
@@ -4110,6 +4226,86 @@ img.csNodeMedia {
 									})
 								]
 							}),
+							node.kind === "image" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailSection",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: "csDetailRow",
+									children: [
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: "csDetailLabel",
+											children: "参考图"
+										}),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: node.isReference ? "csDetailButton csDetailButtonActive" : "csDetailButton",
+											onClick: () => {
+												onUpdateNode(node.id, { isReference: !node.isReference });
+											},
+											children: node.isReference ? "已标记" : "标记为参考"
+										}),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csDetailButton",
+											onClick: () => {
+												onReferenceToChat(node);
+											},
+											children: "引用到对话"
+										})
+									]
+								}), node.isReference && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: "csDetailRow",
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csDetailLabel",
+										children: "角色"
+									}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+										className: "csDetailSelect",
+										value: node.referenceRole ?? "image",
+										onChange: (event) => {
+											onUpdateNode(node.id, { referenceRole: event.target.value });
+										},
+										children: [
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+												value: "image",
+												children: "构图/通用"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+												value: "character",
+												children: "角色"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+												value: "style",
+												children: "风格"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+												value: "frame",
+												children: "首末帧"
+											})
+										]
+									})]
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: "csDetailRow",
+									children: [
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: "csDetailLabel",
+											children: "强度"
+										}),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+											className: "csDetailRange",
+											type: "range",
+											min: 0,
+											max: 100,
+											value: Math.round((node.referenceStrength ?? 1) * 100),
+											onChange: (event) => {
+												onUpdateNode(node.id, { referenceStrength: Number(event.target.value) / 100 });
+											}
+										}),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+											className: "csDetailValue",
+											children: [Math.round((node.referenceStrength ?? 1) * 100), "%"]
+										})
+									]
+								})] })]
+							}),
 							generationPrompt !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: "csDetailRow",
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -4283,6 +4479,115 @@ img.csNodeMedia {
 			});
 		}
 		//#endregion
+		//#region src/client/canvas/ReferenceTray.tsx
+		/** 参考角色 → 中文标签（与 Runway 式参考分类对齐）。 */
+		const ROLE_LABELS = {
+			image: "构图/通用",
+			character: "角色",
+			style: "风格",
+			frame: "首末帧"
+		};
+		/**
+		* 参考托盘（左侧栏，复用画布作为素材库）：列出所有标记为参考图的图片节点，
+		* 每项带缩略图、角色 chip、强度滑块、「引用到对话」与「移除」操作。对应
+		* Runway 的参考区 + Midjourney 的钉住参考；节点即画布节点，不另开素材库。
+		*/
+		function ReferenceTray(props) {
+			const { nodes, onUpdateNode, onReferenceToChat } = props;
+			const [open, setOpen] = (0, react.useState)(true);
+			if (nodes.length === 0) return null;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+				className: "csReferenceTray",
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+					className: "csReferenceHeader",
+					onClick: () => {
+						setOpen((prev) => !prev);
+					},
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [
+						"参考图（",
+						nodes.length,
+						"）"
+					] }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: "csReferenceToggle",
+						children: open ? "−" : "+"
+					})]
+				}), open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: "csReferenceList",
+					children: nodes.map((node) => {
+						const role = node.referenceRole ?? "image";
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: "csReferenceItem",
+							children: [node.url !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+								className: "csReferenceThumb",
+								src: node.url,
+								alt: node.title ?? ""
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csReferenceMeta",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: "csReferenceTitleRow",
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: "csReferenceTitle",
+											title: node.title ?? "",
+											children: node.title ?? "未命名"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: "csReferenceChip",
+											children: ROLE_LABELS[role] ?? "构图/通用"
+										})]
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+										className: "csReferenceRange",
+										type: "range",
+										min: 0,
+										max: 100,
+										value: Math.round((node.referenceStrength ?? 1) * 100),
+										onChange: (event) => {
+											onUpdateNode(node.id, { referenceStrength: Number(event.target.value) / 100 });
+										}
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: "csReferenceActions",
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csReferenceButton",
+											onClick: () => {
+												onReferenceToChat(node);
+											},
+											children: "引用到对话"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: "csReferenceButton",
+											onClick: () => {
+												onUpdateNode(node.id, { isReference: false });
+											},
+											children: "移除"
+										})]
+									})
+								]
+							})]
+						}, node.id);
+					})
+				})]
+			});
+		}
+		//#endregion
+		//#region src/reference-token.ts
+		/**
+		* @ref 引用标记工具（Host/Client 共用，纯函数，无副作用）。
+		*
+		* 画布参考托盘里的图片节点用 `@ref[显示名]` 作为对话内引用句柄：用户在节点
+		* 详情面板 / 参考托盘点「引用到对话」会把该标记复制到剪贴板，粘贴进聊天框后，
+		* Host 侧生成工具（image_generate / video_generate / style_transfer / video_composite）
+		* 会自动把 `@ref[显示名]` 解析成对应的 Drama Backend 文件名，免去手动 upload_image。
+		*
+		* 这与 Midjourney 的 `--cref` / `--sref` token、Runway 的参考区思路一致：
+		* 一个稳定的引用句柄，跨「画布 ↔ 聊天」复用素材。
+		*/
+		/** 把节点显示名格式化为对话内引用标记。 */
+		function formatRefToken(title) {
+			return `@ref[${title}]`;
+		}
+		//#endregion
 		//#region src/client/StudioFrame.tsx
 		const ZOOM_STEP = 1.2;
 		/** Debounce for viewport saves (pan/zoom fire per frame; disk saves must not). */
@@ -4304,6 +4609,7 @@ img.csNodeMedia {
 			const selectedNodeId = useStudio((store) => store.selectedNodeId);
 			const selectedNodeIds = useStudio((store) => store.selectedNodeIds);
 			const nodes = useStudio((store) => nodesOf(store, store.selectedProjectId));
+			const referenceNodes = nodes.filter((node) => node.isReference === true && node.kind === "image");
 			const selectedNode = useStudio((store) => selectedNodeOf(store));
 			const phase = useStudio((store) => store.phase);
 			const error = useStudio((store) => store.error);
@@ -4371,8 +4677,8 @@ img.csNodeMedia {
 				const buffer = await file.arrayBuffer();
 				const dataBase64 = bytesToBase64(new Uint8Array(buffer));
 				try {
-					const { url } = await uploadLocalStudioImage(projectId, file.name, dataBase64);
-					persistAfter(() => actions.addImportNode(projectId, url, file.name || "本地素材"));
+					const { url, filename } = await uploadLocalStudioImage(projectId, file.name, dataBase64);
+					persistAfter(() => actions.addImportNode(projectId, url, file.name || "本地素材", filename));
 				} catch (cause) {
 					throw cause instanceof Error ? cause : /* @__PURE__ */ new Error("图片上传失败");
 				}
@@ -4410,6 +4716,14 @@ img.csNodeMedia {
 			const handleRename = (id, title) => {
 				if (projectId === null) return;
 				persistAfter(() => actions.renameNode(projectId, id, title));
+			};
+			const handleUpdateNode = (id, updates) => {
+				if (projectId !== null) persistAfter(() => actions.updateNode(projectId, id, updates));
+			};
+			const handleReferenceToChat = (node) => {
+				const token = formatRefToken(node.title ?? node.id);
+				navigator.clipboard?.writeText(token).catch(() => {});
+				window.alert(`已复制引用标记：${token}\n在右侧聊天框粘贴，并补充说明（如「用这张角色图生成分镜」）。`);
 			};
 			const handleRetry = (id) => {
 				if (projectId === null) return;
@@ -4524,25 +4838,33 @@ img.csNodeMedia {
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
 						className: "csProjects",
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-							className: "csProjectsHeader",
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "项目" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								disabled: phase === "loading" || creating,
-								onClick: () => void refreshProjects(),
-								children: "刷新"
-							})]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectList, {
-							projects,
-							selectedProjectId,
-							phase,
-							error,
-							creating,
-							onRefresh: () => void refreshProjects(),
-							onCreate: createProject,
-							onOpen: openProject,
-							onDelete: deleteProject
-						})]
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+								className: "csProjectsHeader",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "项目" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									type: "button",
+									disabled: phase === "loading" || creating,
+									onClick: () => void refreshProjects(),
+									children: "刷新"
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectList, {
+								projects,
+								selectedProjectId,
+								phase,
+								error,
+								creating,
+								onRefresh: () => void refreshProjects(),
+								onCreate: createProject,
+								onOpen: openProject,
+								onDelete: deleteProject
+							}),
+							referenceNodes.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ReferenceTray, {
+								nodes: referenceNodes,
+								onUpdateNode: handleUpdateNode,
+								onReferenceToChat: handleReferenceToChat
+							})
+						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
 						className: "csCanvas",
@@ -4708,7 +5030,9 @@ img.csNodeMedia {
 						onSteer: handleSteer,
 						onCancel: () => {
 							cancelCurrentTurn();
-						}
+						},
+						onUpdateNode: handleUpdateNode,
+						onReferenceToChat: handleReferenceToChat
 					}),
 					menu !== null && projectId !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasContextMenu, {
 						node: menu.node,

@@ -9,8 +9,10 @@ import { CanvasTimeline } from './canvas/CanvasTimeline.js'
 import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
+import { ReferenceTray } from './canvas/ReferenceTray.js'
 import { uploadLocalStudioImage, bytesToBase64 } from './api.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
+import { formatRefToken } from '../reference-token.js'
 
 // Zoom step for the toolbar +/− buttons (matches the surface wheel step).
 const ZOOM_STEP = 1.2
@@ -42,6 +44,8 @@ export function StudioFrame(props: StudioFrameProps) {
   const selectedNodeId = useStudio(store => store.selectedNodeId)
   const selectedNodeIds = useStudio(store => store.selectedNodeIds)
   const nodes = useStudio(store => nodesOf(store, store.selectedProjectId))
+  // 参考托盘数据源：所有标记为参考图的图片节点。
+  const referenceNodes = nodes.filter(node => node.isReference === true && node.kind === 'image')
   const selectedNode = useStudio(store => selectedNodeOf(store))
   const phase = useStudio(store => store.phase)
   const error = useStudio(store => store.error)
@@ -112,8 +116,10 @@ export function StudioFrame(props: StudioFrameProps) {
     const buffer = await file.arrayBuffer()
     const dataBase64 = bytesToBase64(new Uint8Array(buffer))
     try {
-      const { url } = await uploadLocalStudioImage(projectId, file.name, dataBase64)
-      persistAfter(() => actions.addImportNode(projectId, url, file.name || '本地素材'))
+      // P8.1：上传同时拿回同源 url 与 Drama filename；filename 落节点，使参考
+      // 托盘 / list_references 能直接把它交给生成工具，免去运行时再上传。
+      const { url, filename } = await uploadLocalStudioImage(projectId, file.name, dataBase64)
+      persistAfter(() => actions.addImportNode(projectId, url, file.name || '本地素材', filename))
     } catch (cause) {
       // 上传失败不破坏画布；错误提示由调用方（按钮）展示给用户。
       throw cause instanceof Error ? cause : new Error('图片上传失败')
@@ -153,6 +159,17 @@ export function StudioFrame(props: StudioFrameProps) {
   const handleRename = (id: string, title: string): void => {
     if (projectId === null) return
     persistAfter(() => actions.renameNode(projectId, id, title))
+  }
+  // P9 参考托盘：节点字段更新（角色/强度/标记）走 updateNode 并持久化。
+  const handleUpdateNode = (id: string, updates: Partial<StudioCanvasNode>): void => {
+    if (projectId !== null) persistAfter(() => actions.updateNode(projectId, id, updates))
+  }
+  // 引用到对话：把 @ref[显示名] 复制到剪贴板，提示用户粘贴到聊天框。
+  // 上游 InputBar 限制直接注入，故走「复制 + 提示」的稳健退化方案（plan §4.1 ③）。
+  const handleReferenceToChat = (node: StudioCanvasNode): void => {
+    const token = formatRefToken(node.title ?? node.id)
+    void navigator.clipboard?.writeText(token).catch(() => {})
+    window.alert(`已复制引用标记：${token}\n在右侧聊天框粘贴，并补充说明（如「用这张角色图生成分镜」）。`)
   }
   const handleRetry = (id: string): void => {
     if (projectId === null) return
@@ -259,6 +276,13 @@ export function StudioFrame(props: StudioFrameProps) {
           onOpen={openProject}
           onDelete={deleteProject}
         />
+        {referenceNodes.length > 0 && (
+          <ReferenceTray
+            nodes={referenceNodes}
+            onUpdateNode={handleUpdateNode}
+            onReferenceToChat={handleReferenceToChat}
+          />
+        )}
       </aside>
       <main
         className="csCanvas"
@@ -375,6 +399,8 @@ export function StudioFrame(props: StudioFrameProps) {
           onRetry={handleRetry}
           onSteer={handleSteer}
           onCancel={() => { void cancelCurrentTurn() }}
+          onUpdateNode={handleUpdateNode}
+          onReferenceToChat={handleReferenceToChat}
         />
       )}
       {menu !== null && projectId !== null && (

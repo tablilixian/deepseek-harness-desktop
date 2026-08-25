@@ -14,6 +14,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ProjectRegistry } from './projects.js'
 import { normalizeWorkflow } from './contracts/project.js'
 import type { StudioCanvasNode } from './contracts/canvas.js'
+import { parseRefTokens } from './reference-token.js'
 import { newAssetId } from './config.js'
 import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, splitStoryboard, type GenerateParams, type GenerateResult } from './generate.js'
 
@@ -54,6 +55,19 @@ function renderDeductionResult(_args: unknown, value: unknown): ContentBlock[] {
   return [{ type: 'text', text: `画面分析: ${v.analysis}\n\n剧情推演: ${v.deduction}` }]
 }
 
+/** 把参考图列表渲染成模型可读的文本块。 */
+function renderReferenceList(_args: unknown, value: unknown): ContentBlock[] {
+  const v = value as { references: Array<{ title: string; role: string; strength: number; filename: string | null }> }
+  if (v.references.length === 0) {
+    return [{ type: 'text', text: '当前项目没有标记为参考图的素材。可先用上传图片功能添加参考，或生成一张图后它默认成为参考。' }]
+  }
+  const lines = v.references.map((r, i) => {
+    const name = r.filename !== null ? `filename=${r.filename}` : '需先 upload_image(url) 取文件名'
+    return `${i + 1}. [${r.role}] ${r.title}（强度 ${r.strength}，${name}）`
+  })
+  return [{ type: 'text', text: `可用参考图（${v.references.length}）：\n${lines.join('\n')}` }]
+}
+
 /**
  * 从会话工作区目录解析绑定的 Canvas Studio 项目 id。
  * 项目的工作区目录即 `project.dir`；精确匹配优先，否则取最长前缀匹配
@@ -79,6 +93,41 @@ async function resolveProjectId(registry: ProjectRegistry, cwd: string | undefin
     throw new Error('当前会话工作区未绑定任何 Canvas Studio 项目，请先在左侧打开或创建一个项目')
   }
   return match
+}
+
+/**
+ * 把 `@ref[显示名]` token 解析成对应的 Drama Backend 文件名。
+ * 找不到参考节点、或该参考尚未 upload_image（缺 filename）时给出可操作报错。
+ */
+async function resolveRefFilenames(registry: ProjectRegistry, projectId: string, tokens: string[]): Promise<string[]> {
+  if (tokens.length === 0) return []
+  const nodes = (await registry.readCanvas(projectId)).nodes.filter((node) => node.isReference === true)
+  const byTitle = new Map(nodes.map((node) => [node.title ?? '', node] as const))
+  const out: string[] = []
+  for (const token of tokens) {
+    const node = byTitle.get(token)
+    if (node === undefined) {
+      throw new Error(`参考图 @ref[${token}] 在当前项目参考托盘中未找到。请先确认该素材已上传并在节点详情面板点「标记为参考」（或用 list_references 查看可用参考）。`)
+    }
+    if (node.filename === undefined || node.filename === null || node.filename.length === 0) {
+      throw new Error(`参考图 @ref[${token}] 尚未上传到 Drama Backend（缺少 filename）。请先调 upload_image(url="${node.url ?? ''}") 取得文件名，或直接在参数里粘贴该文件名。`)
+    }
+    out.push(node.filename)
+  }
+  return out
+}
+
+/** 解析单个 filename 参数：含 @ref token 时解析为 Drama 文件名，否则原样返回。 */
+async function resolveRefValue(registry: ProjectRegistry, projectId: string, value: string): Promise<string> {
+  const tokens = parseRefTokens(value)
+  if (tokens.length === 0) return value
+  const resolved = await resolveRefFilenames(registry, projectId, tokens)
+  return resolved[0] as string
+}
+
+/** 解析 filenames 数组参数：逐元素尝试 @ref 解析。 */
+async function resolveRefValues(registry: ProjectRegistry, projectId: string, values: string[]): Promise<string[]> {
+  return Promise.all(values.map((value) => resolveRefValue(registry, projectId, value)))
 }
 
 /** 解析项目后调用 Host 的 generateAsset 执行一次生成。 */
@@ -135,7 +184,7 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
     defineTool({
       name: 'image_generate',
       description:
-        '根据提示词生成一张图片。可传 filename（单参考图生图）或 filenames（最多 3 张参考图，多参考融合图生图），两者都来自 upload_image 拿到的 Drama Backend 文件名；都不传则为纯文生图。返回图片的托管 URL 与尺寸。',
+        '根据提示词生成一张图片。可传 filename（单参考图生图）或 filenames（最多 3 张参考图，多参考融合图生图），两者都来自 upload_image 拿到的 Drama Backend 文件名；都不传则为纯文生图。返回图片的托管 URL 与尺寸。参考图也可来自画布参考托盘：对话里用 @ref[参考图显示名] 直接引用（取其 Drama filename），或先调 list_references 列出当前项目可用参考及其 filename/role。若 filename/filenames 直接传 @ref[显示名]，Host 会自动解析为对应 Drama 文件名，无需手动 upload_image。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
@@ -147,10 +196,11 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
         const a = args as { prompt: string; aspectRatio?: string; filename?: string; filenames?: string[]; negativePrompt?: string; sourceUrls?: string[] }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
         const params: GenerateParams = { prompt: a.prompt }
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
-        if (a.filename !== undefined) params.filename = a.filename
-        if (Array.isArray(a.filenames) && a.filenames.length > 0) params.filenames = a.filenames
+        if (a.filename !== undefined) params.filename = await resolveRefValue(registry, projectId, a.filename)
+        if (Array.isArray(a.filenames) && a.filenames.length > 0) params.filenames = await resolveRefValues(registry, projectId, a.filenames)
         if (a.negativePrompt !== undefined) params.negativePrompt = a.negativePrompt
         if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
         return runGeneration(registry, 'image_generate', params, exec.signal, exec.agent?.session.header.cwd)
@@ -181,9 +231,39 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
       },
     }),
     defineTool({
+      name: 'list_references',
+      description:
+        '列出当前项目可复用的参考图（画布上标记为参考的素材节点）。每项含 title（显示名）、url（同源托管地址）、filename（Drama Backend 文件名，为空时需先调 upload_image(url) 取文件名）、role（image/character/style/frame）、strength（0–1 参考强度）。当用户要「用参考图/角色图/风格图生成」却没给具体文件名时，调本工具拿可用参考，再按 role 选对应工具：character→image_generate(filename)、style→style_transfer(styleFilename)、frame→video_generate(filename 首帧)、image→通用参考。',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            references: { type: 'array' as const, description: '当前项目可用的参考图列表' },
+          },
+        },
+        render: renderReferenceList,
+      },
+      async execute(_args, exec) {
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const nodes = (await registry.readCanvas(projectId)).nodes
+        const refs = nodes
+          .filter((node) => node.isReference === true && node.kind === 'image')
+          .map((node) => ({
+            title: node.title ?? node.url ?? '',
+            url: node.url ?? '',
+            filename: node.filename ?? null,
+            role: node.referenceRole ?? 'image',
+            strength: node.referenceStrength ?? 1,
+          }))
+        return { references: refs }
+      },
+    }),
+    defineTool({
       name: 'video_generate',
       description:
-        '根据提示词生成视频，统一走 FL2VA 接口，支持两种模式：不传 filename 时为纯文生视频；传入 filename（upload_image 返回的 Drama Backend 文件名）时为「首帧」图生视频。返回视频的托管 URL、尺寸与时长。',
+        '根据提示词生成视频，统一走 FL2VA 接口，支持两种模式：不传 filename 时为纯文生视频；传入 filename（upload_image 返回的 Drama Backend 文件名）时为「首帧」图生视频。返回视频的托管 URL、尺寸与时长。首帧参考图也可来自画布参考托盘：对话里用 @ref[显示名] 引用，或先调 list_references 列出（role=frame 的参考即首帧图）。若 filename 直接传 @ref[显示名]，Host 会自动解析为对应 Drama 文件名。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         filename: { type: 'string' as const, description: '可选：已上传的 Drama Backend 文件名（来自 upload_image 工具），用作视频首帧；不传则为纯文生视频' },
@@ -193,8 +273,10 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; filename: string; aspectRatio?: string; duration?: number; sourceUrls?: string[] }
-        const params: GenerateParams = { prompt: a.prompt, filename: a.filename }
+        const a = args as { prompt: string; filename?: string; aspectRatio?: string; duration?: number; sourceUrls?: string[] }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const filename = a.filename !== undefined ? await resolveRefValue(registry, projectId, a.filename) : undefined
+        const params: GenerateParams = { prompt: a.prompt, ...(filename !== undefined ? { filename } : {}) }
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
         if (a.duration !== undefined) params.duration = a.duration
         if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
@@ -204,7 +286,7 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
     defineTool({
       name: 'video_composite',
       description:
-        '将多张参考图合成一段视频。两张图走首尾帧插值（FL2VA，image1 首帧 + image2 尾帧）；三张及以上走多参考图合成（REF2VA，最多 6 张，后端自动排布保持角色/场景一致性）。必须提供 filenames（upload_image 返回的 Drama Backend 文件名数组）。返回合成视频的托管 URL、尺寸与时长。',
+        '将多张参考图合成一段视频。两张图走首尾帧插值（FL2VA，image1 首帧 + image2 尾帧）；三张及以上走多参考图合成（REF2VA，最多 6 张，后端自动排布保持角色/场景一致性）。必须提供 filenames（upload_image 返回的 Drama Backend 文件名数组）。返回合成视频的托管 URL、尺寸与时长。参考图也可来自画布参考托盘：先调 list_references 列出（role=character/image 的参考即可用），再取其 filename 填入 filenames。filenames 也可直接传 @ref[显示名]，Host 会自动解析为对应 Drama 文件名。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         filenames: { type: 'array' as const, required: true, description: '已上传的 Drama Backend 文件名数组（来自 upload_image 工具，最多 6 张，超出自动采样）' },
@@ -215,7 +297,8 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
         const a = args as { prompt: string; filenames: string[]; aspectRatio?: string; duration?: number; sourceUrls?: string[] }
-        const params: GenerateParams = { prompt: a.prompt, filenames: a.filenames }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const params: GenerateParams = { prompt: a.prompt, filenames: await resolveRefValues(registry, projectId, a.filenames) }
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
         if (a.duration !== undefined) params.duration = a.duration
         if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
@@ -273,7 +356,7 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
     defineTool({
       name: 'style_transfer',
       description:
-        '将一张图片的风格迁移到另一张图片上。必须提供 filename（目标图）和 styleFilename（风格参考图），两者均为 upload_image 返回的 Drama Backend 文件名。返回图片的托管 URL 与尺寸。',
+        '将一张图片的风格迁移到另一张图片上。必须提供 filename（目标图）和 styleFilename（风格参考图），两者均为 upload_image 返回的 Drama Backend 文件名。返回图片的托管 URL 与尺寸。风格参考图也可来自画布参考托盘：对话里用 @ref[显示名] 引用，或先调 list_references 列出（role=style 的参考即风格图）。filename/styleFilename 也可直接传 @ref[显示名]，Host 会自动解析为对应 Drama 文件名。',
       parameters: {
         filename: { type: 'string' as const, required: true, description: '目标图：已上传的 Drama Backend 文件名（需要改变风格的图片）' },
         styleFilename: { type: 'string' as const, required: true, description: '风格参考图：已上传的 Drama Backend 文件名（提供风格参考的图片）' },
@@ -284,10 +367,11 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
         const a = args as { filename: string; styleFilename: string; prompt?: string; enhance?: boolean; aspectRatio?: string }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
         const params: GenerateParams = {
           prompt: a.prompt ?? '',
-          filename: a.filename,
-          styleFilename: a.styleFilename,
+          filename: await resolveRefValue(registry, projectId, a.filename),
+          styleFilename: await resolveRefValue(registry, projectId, a.styleFilename),
         }
         if (a.enhance !== undefined) params.enhance = a.enhance
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio

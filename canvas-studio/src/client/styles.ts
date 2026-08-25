@@ -1253,6 +1253,119 @@ img.csNodeMedia {
 .csMenuActionDanger:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+/* ---- Reference tray (left column) ---- */
+.csReferenceTray {
+  margin: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
+  overflow: hidden;
+}
+.csReferenceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  user-select: none;
+}
+.csReferenceToggle {
+  font-size: 16px;
+  line-height: 1;
+  color: var(--dsw-alias-label-secondary);
+}
+.csReferenceList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.csReferenceItem {
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+}
+.csReferenceThumb {
+  width: 56px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  background: #e9e9e9;
+}
+.csReferenceMeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.csReferenceTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.csReferenceTitle {
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.csReferenceChip {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+.csReferenceRange {
+  width: 100%;
+}
+.csReferenceActions {
+  display: flex;
+  gap: 6px;
+}
+.csReferenceButton {
+  flex: 1 1 auto;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+.csReferenceButton:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* ---- Detail panel reference section ---- */
+.csDetailSection {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+.csDetailSelect {
+  flex: 1 1 auto;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
 `
 
 /** Inject the studio stylesheet once per browser lifetime. */
