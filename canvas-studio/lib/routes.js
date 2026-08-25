@@ -3,6 +3,7 @@ import { BlockList, isIP } from 'node:net';
 import { extname, join, sep } from 'node:path';
 import { normalizeWorkflow } from './contracts/project.js';
 import { generateAsset, uploadLocalImage } from './generate.js';
+import { extractVideoStyle } from './video-style.js';
 import { normalizeCanvasView } from './canvas-view.js';
 const ROUTE_PROJECTS = '/canvas-studio/projects';
 const ROUTE_GENERATE = '/canvas-studio/generate';
@@ -10,11 +11,29 @@ const ROUTE_ASSETS = '/canvas-studio/assets';
 const ROUTE_CANVAS = '/canvas-studio/canvas';
 const ROUTE_WORKFLOW = '/canvas-studio/workflow';
 const ROUTE_UPLOAD = '/canvas-studio/upload';
+const ROUTE_UPLOAD_VIDEO = '/canvas-studio/upload-video';
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** P8.4 参考视频上限：短参考片为主，128MB 已远超风格采样所需。 */
+const MAX_VIDEO_BODY_BYTES = 128 * 1024 * 1024;
 const MAX_CANVAS_NODES = 2000;
 const loopbackAddresses = new BlockList();
 loopbackAddresses.addSubnet('127.0.0.0', 8, 'ipv4');
 loopbackAddresses.addSubnet('::1', 128, 'ipv6');
+/** 托管资产的扩展名 → Content-Type（P8.4 起包含参考视频容器格式）。 */
+const ASSET_CONTENT_TYPES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.bmp': 'image/bmp',
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.webm': 'video/webm',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo',
+};
 /** The request's local authority when it arrives from the loopback device. */
 function studioAuthority(context) {
     if (context.remoteAddress === undefined || context.host === undefined)
@@ -148,6 +167,53 @@ function readJson(req, signal) {
                 finish(() => reject(new Error('invalid json')));
             }
         };
+        const onError = (cause) => finish(() => reject(cause));
+        const onRequestAbort = () => finish(() => reject(abortReason()));
+        const onSignalAbort = () => finish(() => reject(abortReason()));
+        req.on('data', onData);
+        req.once('end', onEnd);
+        req.once('error', onError);
+        req.once('aborted', onRequestAbort);
+        signal.addEventListener('abort', onSignalAbort, { once: true });
+    });
+}
+/** Read a bounded raw (octet-stream) request body, rejecting on abort or oversize. */
+function readRawBody(req, signal, maxBytes) {
+    const abortReason = () => signal.reason ?? new DOMException('The operation was aborted', 'AbortError');
+    if (signal.aborted)
+        return Promise.reject(abortReason());
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        let settled = false;
+        const cleanup = () => {
+            req.off('data', onData);
+            req.off('end', onEnd);
+            req.off('error', onError);
+            req.off('aborted', onRequestAbort);
+            signal.removeEventListener('abort', onSignalAbort);
+        };
+        const finish = (callback) => {
+            if (settled)
+                return;
+            settled = true;
+            cleanup();
+            callback();
+        };
+        const onData = (chunk) => {
+            const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            size += buffer.length;
+            if (size > maxBytes) {
+                const cause = new Error(`body too large（上限 ${Math.round(maxBytes / 1024 / 1024)}MB）`);
+                finish(() => {
+                    req.destroy(cause);
+                    reject(cause);
+                });
+                return;
+            }
+            chunks.push(buffer);
+        };
+        const onEnd = () => finish(() => resolve(Buffer.concat(chunks)));
         const onError = (cause) => finish(() => reject(cause));
         const onRequestAbort = () => finish(() => reject(abortReason()));
         const onSignalAbort = () => finish(() => reject(abortReason()));
@@ -342,7 +408,7 @@ export function registerStudioRoutes(ctx, registry) {
                 }
                 try {
                     const data = await readFile(target);
-                    const contentType = extname(file).toLowerCase() === '.mp4' ? 'video/mp4' : 'image/png';
+                    const contentType = ASSET_CONTENT_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
                     res.setHeader('content-type', contentType);
                     res.setHeader('cache-control', 'no-store');
                     res.setHeader('x-content-type-options', 'nosniff');
@@ -581,6 +647,60 @@ export function registerStudioRoutes(ctx, registry) {
                 catch (cause) {
                     if (!controller.signal.aborted && !res.destroyed) {
                         sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'upload failed' });
+                    }
+                }
+                finally {
+                    stopWatching();
+                }
+            } }),
+        // P8.4: reference-video upload. The client POSTs the raw video bytes
+        // (octet-stream; no multipart parser and no base64 inflation). The Host
+        // saves the file into the project's assets/ dir, extracts frames with
+        // ffmpeg, uploads each frame to Drama's uploadimage, and asks image2vl
+        // for a style summary. Node creation stays on the client (P8.1 pattern).
+        ctx.webServer.register({ kind: 'exact', path: ROUTE_UPLOAD_VIDEO, handler: async (req, res) => {
+                if (!requestAllowed(req, expectedPort)) {
+                    sendJson(res, 403, { error: 'canvas-studio request authority rejected' });
+                    return;
+                }
+                if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+                    sendJson(res, 405, { error: 'video upload requires a local same-origin POST' });
+                    return;
+                }
+                const controller = new AbortController();
+                const stopWatching = () => {
+                    req.off('aborted', onRequestAbort);
+                    res.off('close', onResponseClose);
+                };
+                const onRequestAbort = () => controller.abort();
+                const onResponseClose = () => {
+                    if (!res.writableEnded)
+                        controller.abort();
+                };
+                req.once('aborted', onRequestAbort);
+                res.once('close', onResponseClose);
+                try {
+                    const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${expectedPort}`);
+                    const projectId = requestUrl.searchParams.get('projectId');
+                    const name = requestUrl.searchParams.get('name') ?? '';
+                    if (projectId === null || projectId.length === 0) {
+                        sendJson(res, 400, { error: '缺少 projectId' });
+                        return;
+                    }
+                    const bytes = await readRawBody(req, controller.signal, MAX_VIDEO_BODY_BYTES);
+                    const result = await extractVideoStyle(registry, projectId, name, bytes, {}, controller.signal);
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 200, {
+                            videoUrl: result.videoUrl,
+                            duration: result.duration,
+                            frames: result.frames,
+                            summary: result.summary,
+                        });
+                    }
+                }
+                catch (cause) {
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'video upload failed' });
                     }
                 }
                 finally {

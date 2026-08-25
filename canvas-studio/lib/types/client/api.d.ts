@@ -3,7 +3,7 @@
  * registry and canvas routes (the community-market client fetch pattern).
  */
 import type { StudioProject, StudioWorkflow, StudioWorkflowMode } from '../contracts/project.js';
-import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasView, StudioVideoStylePayload } from '../contracts/canvas.js';
 import type { GenerateParams } from '../generate.js';
 /** HTTP facts used to localize safe Client-facing Studio failures. */
 export declare class StudioApiError extends Error {
@@ -42,6 +42,11 @@ export declare function uploadLocalStudioImage(projectId: string, name: string, 
     url: string;
     filename: string;
 }>;
+/**
+ * P8.4：本地参考视频上传（原始字节流，免 base64 膨胀）→ Host 抽帧提风格。
+ * 返回帧列表（含 Drama filename）与风格归纳文本，由调用方落成画布节点。
+ */
+export declare function uploadStudioVideo(projectId: string, file: File, signal?: AbortSignal): Promise<StudioVideoStylePayload>;
 /** Persist a project's full canvas node list plus the current viewport state. */
 export declare function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], view: StudioCanvasView, signal?: AbortSignal): Promise<void>;
 /**

@@ -181,7 +181,7 @@ interface StudioWorkflow {
 | --- | --- | --- |
 | M0 | 两份文档落盘（本文件 + api-usage） | ✅ 2026-08-24 |
 | M1 | P7 全部验收标准通过 | 🟡 代码全部完成（含审批条实时刷新修复），待用户端到端验收 |
-| M2 | P8 全部验收标准通过 | 未开始 |
+| M2 | P8 全部验收标准通过 | 🟡 代码全部完成（P8.1 上传 / P8.2 多参考 / P8.3 拆单镜 / P8.4 视频抽帧提风格），待后端可用窗口端到端验收 |
 | M3 | P9 全部验收标准通过 | 🟡 部分提前完成（fl2va 双图路径、时长钳制）；ffmpeg 本地拼接未开始 |
 | M4 | P10 完成 + P11 裁剪结论 | 🟡 超时/重试已提前落地；health 探针、key 处置、sessionId 未开始；P11 已落地 H3 提示词规范 |
 
@@ -239,17 +239,17 @@ interface StudioWorkflow {
 - ⬜ **端到端验收**：新会话跑通「点选澄清 → 五要素摘要 → 分镜表审批 → 批准 → 生成」与「放手跑」两条路径
   - 阻塞依赖：Drama Backend 恢复（当前挂起，见 §8）
 
-### 11.2 P8 素材入口 ⬜（下一个主战场）
+### 11.2 P8 素材入口 ✅（代码全部完成，待端到端验收）
 
-1. ⬜ 本地图片上传：`POST /canvas-studio/upload`（JSON base64，复用 readJson/16MB 上限）→ Drama `uploadimage`
+1. ✅ 本地图片上传：`POST /canvas-studio/upload`（JSON base64，复用 readJson/16MB 上限）→ Drama `uploadimage`
    - 验收：工具条按钮 + 画布拖拽两个入口；上传后 filename 可直接作生成输入
-2. ⬜ 存量工具多参考扩参：`GenerateParams.filenames` 已用于 `video_composite`（ref2va ≤6 张，已落地）；`image_generate` 图生图仍只传单 `filename`（image1），需补 image1~3 多参考；video 侧原「msr 补 image1~4」**已作废**（video_generate 改走 fl2va 单首帧、video_composite 改 ref2va，不再用 msr）
+2. ✅ 存量工具多参考扩参：`image_generate` 已支持 `filenames`（≤3 张映射 image1~3）；video 侧原「msr 补 image1~4」**已作废**（video_generate 走 fl2va 单首帧、video_composite 双图 fl2va / ≥3 图 ref2va）
    - 验收：三参考图生图、参考图+背景生视频真实出片
-3. ⬜ 分镜拆单镜闭环：新工具 `storyboard_split` 调 `image2splitegrid`（gridnum→row×column 推导），产物逐格落独立节点（sourceIds 指向网格图）
+3. ✅ 分镜拆单镜闭环：新工具 `storyboard_split` 调 `image2splitegrid`（gridnum→row×column 推导），产物逐格落独立节点（sourceIds 指向网格图）
    - 验收：4/6/9 格拆分正确、血缘边正确、单镜可独立重试
-4. ⬜ 参考视频抽帧提风格：上传 mp4 → ffmpeg-static 抽帧（≤8 帧）→ 帧图 uploadimage → `image2vl` 风格归纳 sticky 节点
-   - 验收：参考视频 → 风格归纳 → 用于首镜生成全流程无手写 filename
-   - 备注：本阶段引入 ffmpeg-static（P9 复用）；不依赖存疑的流式上传端点
+4. ✅ 参考视频抽帧提风格（2026-08-25）：新路由 `POST /canvas-studio/upload-video`（原始字节流，128MB 上限）→ Host `extractVideoStyle`（`src/video-style.ts`）：ffmpeg 抽帧（每 2s 一帧封顶 8；长片改全片均匀采样）→ 帧图 uploadimage 拿 filename → 均匀抽样 ≤4 帧调 `image2vl` 归纳风格。客户端落「帧 image 参考节点（role=style，带 filename）+ 风格归纳 sticky（血缘指向全部帧）」；工具条「上传视频」+ 画布拖拽视频两入口
+   - 验收：参考视频 → 风格归纳 → 用于首镜生成全流程无手写 filename（帧 filename 直接进参考托盘/list_references/@ref）
+   - 备注：ffmpeg-static 已进依赖但根 .yarnrc.yml `enableScripts: false` 跳过其 postinstall 二进制下载；运行时按「显式参数 → FFMPEG_PATH → ffmpeg-static 二进制（存在时）→ 系统 PATH」解析，均缺失报中文安装指引
 
 ### 11.3 P9 成片合成与导出 🟨（fl2va/时长钳制已提前完成）
 
@@ -296,3 +296,5 @@ interface StudioWorkflow {
 - 2026-08-24（点选澄清轮）：需求澄清改为**点选式交互**——新工具 `ask_user_choice`（Host 阻塞等待）+ 对话区内联选项卡片（conversationEvents 自定义聊天节点 `canvas-studio-question` 注册进上游 `conversation.chat.node` seat），用户点选后答案自动回流模型；画布侧卡片移除；skill 强制"一次一问、禁文本列表提问"。
 - 2026-08-24（视频排障轮）：定位视频 500 两层原因——①我方上传表单文件名写死 `reference.png` 触发后端去重后缀（带空格括号破坏下游，已修：唯一安全名）；②后端整体挂起（health 超时，待 WL 侧恢复）。错误信息透出后端响应体；新增 4 个 api.md 请求体契约测试；api-usage §3.4 扩写为五端点完整详解。
 - 2026-08-25（接口收敛）：视频生成收敛到两个已验证接口——`video_generate` 统一 FL2VA（文生 / 首帧），`video_composite` 双图 FL2VA 首尾帧、≥3 图 REF2VA（≤6 张，sliceToMax 收敛）；停用 msr/mkr（后端 msr 500）。config 移除 videoMsr/videoMkr/videoMkrGrid，仅留 videoFl2va/videoRef2va；契约测试替换为 fl2va/ref2va 断言。已按仓库规范（排除 dirty 子模块、只 stage canvas-studio+docs）提交并 push origin canvas-studio（commit e35bc715e7）。本文件 §7 视频模式扩展行、§11.2 P8.2 描述同步修订。下一步：进入 P8 素材入口。
+- 2026-08-25（P8.1–P8.3 + P9 参考闭环）：P8.1 本地图片上传（工具条 + 拖拽，arrayBuffer 修二进制破坏）、P8.2 多参考扩参（image_generate filenames ≤3）、P8.3 storyboard_split 拆单镜先后落地；P9 参考图闭环补全——节点模型加 filename/isReference/referenceRole/referenceStrength，新增 @ref[显示名] 引用标记（reference-token.ts，复制进对话由 Host 工具参数级自动解析）、参考托盘 UI、list_references 工具与 image/video/style/composite 四工具的 filename(s) 自动解析。
+- 2026-08-25（P8.4 参考视频抽帧提风格）：新路由 `POST /canvas-studio/upload-video`（原始字节流，128MB 上限）+ Host `extractVideoStyle`（src/video-style.ts）：ffmpeg 抽帧（每 2s 封顶 8 帧，长片改全片均匀采样）→ 帧图 uploadimage → 均匀抽样 ≤4 帧 image2vl 归纳 → 客户端一次快照落「帧参考节点（role=style）+ 风格归纳 sticky（血缘指向全部帧）」。引入 ffmpeg-static 依赖（enableScripts:false 下运行时回退系统 ffmpeg，解析顺序见 §11.2-4）；资产 Content-Type 扩展到常见视频容器；generate.ts 抽出 uploadBytesToDrama 共用。测试 55/55 绿（新增 video-style.test.mjs：抽帧计划纯函数、时长解析、ffmpeg 解析顺序、假 ffmpeg + mock Drama 端到端）。P8 代码全部完成，待端到端验收。

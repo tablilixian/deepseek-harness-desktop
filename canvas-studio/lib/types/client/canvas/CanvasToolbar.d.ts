@@ -17,6 +17,8 @@ export interface CanvasToolbarProps {
     onAddNode(kind: ManualNodeKind): void;
     /** P8.1：打开本地文件选择器上传图片到当前项目（落画布素材节点）。 */
     onUploadImage(file: File): void;
+    /** P8.4：打开本地文件选择器上传参考视频（Host 抽帧提风格后落画布）。 */
+    onUploadVideo(file: File): void;
     /** Toggle the layer list overlay inside the canvas. */
     layersOpen: boolean;
     onToggleLayers(): void;

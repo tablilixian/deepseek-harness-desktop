@@ -4,7 +4,7 @@
  */
 import type { StudioProject, StudioWorkflow, StudioWorkflowMode } from '../contracts/project.js'
 import { normalizeWorkflow } from '../contracts/project.js'
-import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasView, StudioVideoStylePayload } from '../contracts/canvas.js'
 import { normalizeCanvasView } from '../canvas-view.js'
 import type { GenerateParams } from '../generate.js'
 
@@ -154,6 +154,24 @@ export async function uploadLocalStudioImage(
     ...(signal === undefined ? {} : { signal }),
   }))
   return response
+}
+
+/**
+ * P8.4：本地参考视频上传（原始字节流，免 base64 膨胀）→ Host 抽帧提风格。
+ * 返回帧列表（含 Drama filename）与风格归纳文本，由调用方落成画布节点。
+ */
+export async function uploadStudioVideo(
+  projectId: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<StudioVideoStylePayload> {
+  const query = new URLSearchParams({ projectId, name: file.name })
+  return readJson<StudioVideoStylePayload>(await fetch(`/canvas-studio/upload-video?${query.toString()}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream' },
+    body: file,
+    ...(signal === undefined ? {} : { signal }),
+  }))
 }
 
 /** Persist a project's full canvas node list plus the current viewport state. */

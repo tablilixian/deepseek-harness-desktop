@@ -17,7 +17,7 @@
  * lives on client-minted pending nodes and is stripped on reload.
  */
 import { defineStore, type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client'
-import type { StudioCanvasNode, StudioCanvasNodeKind, StudioCanvasView } from '../contracts/canvas.js'
+import type { StudioCanvasNode, StudioCanvasNodeKind, StudioCanvasView, StudioVideoStylePayload } from '../contracts/canvas.js'
 import { VIEW_DEFAULTS } from '../contracts/canvas.js'
 import { clampViewScale, computeArrangeLayout } from '../canvas-view.js'
 import type { StudioCaptureAsset } from '../asset-capture.js'
@@ -145,6 +145,12 @@ export type ProjectStoreActions = {
   addNode: (draft: ProjectStoreState, projectId: string, kind: 'sticky' | 'text' | 'prompt') => void
   /** P8.1：把本地上传的图片作为参考素材节点落到画布（manual origin，带 url/filename）。 */
   addImportNode: (draft: ProjectStoreState, projectId: string, url: string, title?: string, filename?: string, referenceRole?: StudioCanvasNode['referenceRole'], isReference?: boolean) => void
+  /**
+   * P8.4：参考视频抽帧结果落画布（一次历史快照）：每个抽帧一张 image 参考节点
+   * （role=style，带 Drama filename），外加一张风格归纳 sticky 节点（sourceIds
+   * 指向全部帧，形成血缘边）。选中 sticky 便于用户立刻看到归纳文本。
+   */
+  addVideoStyleNodes: (draft: ProjectStoreState, projectId: string, payload: StudioVideoStylePayload & { name: string }) => void
   /** 移除 runId 匹配的占位节点（重载/完成时）。 */
   removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void
   /** 占位节点标记失败（tool/result 的 data.error）。 */
@@ -683,6 +689,68 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
         draft.nodes = { ...draft.nodes, [projectId]: [...existing, node] }
         draft.selectedNodeIds = [node.id]
         draft.selectedNodeId = node.id
+      },
+      addVideoStyleNodes: (draft, projectId, payload) => {
+        const existing = draft.nodes[projectId]
+        if (existing === undefined) return
+        const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
+        draft.history = history.history
+        draft.historyIndex = history.historyIndex
+        const size = NODE_SIZE.image
+        const stickySize = NODE_SIZE.sticky
+        const createdAt = Date.now()
+        // 每个抽帧一张参考图节点（role=style，带 Drama filename，可直接被生成工具引用）。
+        const frameNodes: StudioCanvasNode[] = payload.frames.map((frame, i) => {
+          const index = existing.length + i
+          return {
+            id: newNodeId(),
+            kind: 'image',
+            title: `帧 ${String(i + 1).padStart(2, '0')} @${frame.time.toFixed(1)}s`,
+            url: frame.url,
+            filename: frame.filename,
+            isReference: true,
+            referenceRole: 'style',
+            x: LAYOUT.origin + (index % LAYOUT.columns) * LAYOUT.stepX,
+            y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+            width: size.width,
+            height: size.height,
+            createdAt,
+            toolName: 'upload_video',
+            origin: 'manual',
+            sourceIds: [],
+            operationType: 'import',
+            generationPrompt: JSON.stringify({ video: payload.name, time: frame.time }),
+          }
+        })
+        // 风格归纳便签放在帧网格的下一格，血缘指向全部帧（画布上可见推导关系）。
+        const stickyIndex = existing.length + frameNodes.length
+        const stickyNode: StudioCanvasNode = {
+          id: newNodeId(),
+          kind: 'sticky',
+          title: `风格归纳 · ${payload.name.length > 0 ? payload.name : '参考视频'}`,
+          text: payload.summary,
+          x: LAYOUT.origin + (stickyIndex % LAYOUT.columns) * LAYOUT.stepX,
+          y: LAYOUT.origin + Math.floor(stickyIndex / LAYOUT.columns) * LAYOUT.stepY,
+          width: stickySize.width + 140,
+          height: stickySize.height + 120,
+          createdAt,
+          toolName: 'upload_video',
+          origin: 'manual',
+          sourceIds: frameNodes.map(node => node.id),
+          operationType: 'import',
+          generationPrompt: JSON.stringify({
+            video: payload.name,
+            duration: payload.duration,
+            videoUrl: payload.videoUrl,
+            frames: payload.frames.map(frame => frame.time),
+          }),
+        }
+        draft.nodes = {
+          ...draft.nodes,
+          [projectId]: [...existing, ...frameNodes, stickyNode],
+        }
+        draft.selectedNodeIds = [stickyNode.id]
+        draft.selectedNodeId = stickyNode.id
       },
       removePendingByRunId: (draft, projectId, runId) => {
         const existing = draft.nodes[projectId]

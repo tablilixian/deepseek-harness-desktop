@@ -166,3 +166,24 @@ export const NODE_DEFAULTS: Readonly<{
   flipX: false,
   flipY: false,
 }
+
+/** P8.4 参考视频抽帧的单帧产物（Host → 客户端落画布节点）。 */
+export interface StudioVideoFramePayload {
+  /** 帧图同源 URL（Host 已写入项目 assets）。 */
+  url: string
+  /** Drama Backend 文件名（可直接作生成工具的 filename 输入）。 */
+  filename: string
+  /** 采样时间点（秒）。 */
+  time: number
+}
+
+/** P8.4 参考视频抽帧提风格的完整结果（upload-video 路由响应）。 */
+export interface StudioVideoStylePayload {
+  /** 视频本体落盘后的同源 URL（留档）。 */
+  videoUrl: string
+  /** 探测到的视频时长（秒）。 */
+  duration: number
+  frames: StudioVideoFramePayload[]
+  /** 风格归纳文本（风格归纳 sticky 节点正文）。 */
+  summary: string
+}

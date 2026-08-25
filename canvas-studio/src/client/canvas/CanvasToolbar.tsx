@@ -20,6 +20,8 @@ export interface CanvasToolbarProps {
   onAddNode(kind: ManualNodeKind): void
   /** P8.1：打开本地文件选择器上传图片到当前项目（落画布素材节点）。 */
   onUploadImage(file: File): void
+  /** P8.4：打开本地文件选择器上传参考视频（Host 抽帧提风格后落画布）。 */
+  onUploadVideo(file: File): void
   /** Toggle the layer list overlay inside the canvas. */
   layersOpen: boolean
   onToggleLayers(): void
@@ -40,8 +42,9 @@ export interface CanvasToolbarProps {
  * Everything is props-driven — the frame wires the store actions.
  */
 export function CanvasToolbar(props: CanvasToolbarProps) {
-  const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, onUploadImage, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props
+  const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, onUploadImage, onUploadVideo, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props
   const uploadInputRef = useRef<HTMLInputElement>(null)
+  const uploadVideoInputRef = useRef<HTMLInputElement>(null)
   return (
     <div className="csToolbar">
       <div className="csToolbarGroup">
@@ -69,6 +72,25 @@ export function CanvasToolbar(props: CanvasToolbarProps) {
           onChange={(event) => {
             const file = event.target.files?.[0]
             if (file !== undefined) onUploadImage(file)
+            event.target.value = ''
+          }}
+        />
+        <button
+          type="button"
+          className="csToolbarButton"
+          title="上传参考视频：抽帧并归纳风格要素，帧图成为可用参考"
+          onClick={() => { uploadVideoInputRef.current?.click() }}
+        >
+          上传视频
+        </button>
+        <input
+          ref={uploadVideoInputRef}
+          type="file"
+          accept="video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.mov,.m4v,.webm,.mkv"
+          style={{ display: 'none' }}
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file !== undefined) onUploadVideo(file)
             event.target.value = ''
           }}
         />

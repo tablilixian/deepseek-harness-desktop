@@ -93,13 +93,38 @@ async function uploadImage(sourceUrl, signal) {
     return filename;
 }
 /**
+ * 把图片字节上传到 Drama Backend（`uploadimage`），返回服务器 filename。
+ * P8.1 本地图片与 P8.4 视频抽帧共用；表单文件名沿用唯一安全名约定
+ * （只含 [A-Za-z0-9._-]），避免触发后端去重后缀破坏下游。
+ */
+export async function uploadBytesToDrama(bytes, ext, signal) {
+    const assetId = newAssetId();
+    const form = new FormData();
+    // new Uint8Array(...) 拷贝进全新 ArrayBuffer（BlobPart 要求非 SharedArrayBuffer 视图）。
+    form.append('file', new Blob([new Uint8Array(bytes)]), `ref-${assetId.slice(0, 8)}.${ext}`);
+    const upload = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.uploadimage}`, {
+        method: 'POST',
+        body: form,
+        signal: signal ?? null,
+    });
+    if (!upload.ok)
+        throw new Error(`参考图上传失败: ${upload.status}`);
+    const data = await upload.json();
+    // 兼容多种响应格式：{ filename } / { name } / { data: { filename } } / { data: { url } }
+    const filename = (data.filename
+        ?? data.name
+        ?? data.data?.filename
+        ?? data.data?.url);
+    if (!filename)
+        throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`);
+    return filename;
+}
+/**
  * P8.1：把本地图片（base64）落地到项目 assets 目录，并返回可直接供生成工具
  * 使用的两个引用：
  * - `url`：同源相对路径（/canvas-studio/assets/<projectId>/<file>），画布素材节点直接用；
  * - `filename`：经 Drama `uploadimage` 拿到的服务器文件名，供 image_generate /
  *   video_generate / video_composite 的 filename(s) 参数使用。
- * 文件名沿用 uploadImage 的唯一安全名约定（只含 [A-Za-z0-9._-]），避免触发
- * 后端去重后缀破坏下游。
  */
 export async function uploadLocalImage(registry, projectId, name, dataBase64, signal) {
     const project = (await registry.list()).find((entry) => entry.id === projectId);
@@ -125,23 +150,8 @@ export async function uploadLocalImage(registry, projectId, name, dataBase64, si
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, file), bytes);
     const url = `/canvas-studio/assets/${projectId}/${file}`;
-    // 复用同一份字节上传到 Drama，拿到服务器 filename（供后续生成引用）。
-    const form = new FormData();
-    form.append('file', new Blob([new Uint8Array(bytes)]), `ref-${assetId.slice(0, 8)}.${ext}`);
-    const upload = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.uploadimage}`, {
-        method: 'POST',
-        body: form,
-        signal: signal ?? null,
-    });
-    if (!upload.ok)
-        throw new Error(`参考图上传失败: ${upload.status}`);
-    const data = await upload.json();
-    const filename = (data.filename
-        ?? data.name
-        ?? data.data?.filename
-        ?? data.data?.url);
-    if (!filename)
-        throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`);
+    // 同一份字节上传到 Drama，拿到服务器 filename（供后续生成引用）。
+    const filename = await uploadBytesToDrama(bytes, ext, signal);
     return { url, filename };
 }
 /** 统一解析失败响应：优先结构化字段，否则带出响应体片段（便于定位 500 真因）。 */

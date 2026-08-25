@@ -10,7 +10,7 @@ import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
 import { ReferenceTray } from './canvas/ReferenceTray.js'
-import { uploadLocalStudioImage, bytesToBase64 } from './api.js'
+import { uploadLocalStudioImage, uploadStudioVideo, bytesToBase64 } from './api.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
 import { formatRefToken } from '../reference-token.js'
 
@@ -123,6 +123,17 @@ export function StudioFrame(props: StudioFrameProps) {
     } catch (cause) {
       // 上传失败不破坏画布；错误提示由调用方（按钮）展示给用户。
       throw cause instanceof Error ? cause : new Error('图片上传失败')
+    }
+  }
+  // P8.4：参考视频上传入口。原始字节流交给 Host 抽帧提风格；成功后帧图 +
+  // 风格归纳 sticky 由客户端一次快照落画布并持久化。
+  const handleUploadVideo = async (file: File): Promise<void> => {
+    if (projectId === null) return
+    try {
+      const payload = await uploadStudioVideo(projectId, file)
+      persistAfter(() => actions.addVideoStyleNodes(projectId, { ...payload, name: file.name }))
+    } catch (cause) {
+      throw cause instanceof Error ? cause : new Error('参考视频处理失败')
     }
   }
   // 视口/面板状态：store 即时合并（画布受控渲染），磁盘保存防抖合并。
@@ -293,13 +304,18 @@ export function StudioFrame(props: StudioFrameProps) {
         onDrop={(event) => {
           if (!event.dataTransfer.types.includes('Files')) return
           event.preventDefault()
-          const file = Array.from(event.dataTransfer.files).find(item => item.type.startsWith('image/'))
-          if (file === undefined) return
+          const files = Array.from(event.dataTransfer.files)
+          // P8.4：视频文件优先（拖参考视频 = 抽帧提风格），其次按图片上传。
+          const video = files.find(item => item.type.startsWith('video/'))
+          const image = files.find(item => item.type.startsWith('image/'))
+          if (video === undefined && image === undefined) return
           void (async () => {
             try {
-              await handleUploadImage(file)
+              if (video !== undefined) await handleUploadVideo(video)
+              else if (image !== undefined) await handleUploadImage(image)
             } catch (cause) {
-              window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`)
+              const message = cause instanceof Error ? cause.message : String(cause)
+              window.alert(video !== undefined ? `参考视频处理失败：${message}` : `图片上传失败：${message}`)
             }
           })()
         }}
@@ -331,6 +347,13 @@ export function StudioFrame(props: StudioFrameProps) {
             } catch (cause) {
               // 上传失败不影响画布；用浏览器原生提示告知用户（轻量、无需新增 toast 体系）。
               window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`)
+            }
+          }}
+          onUploadVideo={async (file) => {
+            try {
+              await handleUploadVideo(file)
+            } catch (cause) {
+              window.alert(`参考视频处理失败：${cause instanceof Error ? cause.message : String(cause)}`)
             }
           }}
           layersOpen={view.layersOpen}

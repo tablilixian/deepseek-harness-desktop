@@ -395,6 +395,22 @@ window.__ModuleLoader__.load({
 				...signal === void 0 ? {} : { signal }
 			}));
 		}
+		/**
+		* P8.4：本地参考视频上传（原始字节流，免 base64 膨胀）→ Host 抽帧提风格。
+		* 返回帧列表（含 Drama filename）与风格归纳文本，由调用方落成画布节点。
+		*/
+		async function uploadStudioVideo(projectId, file, signal) {
+			const query = new URLSearchParams({
+				projectId,
+				name: file.name
+			});
+			return readJson(await fetch(`/canvas-studio/upload-video?${query.toString()}`, {
+				method: "POST",
+				headers: { "content-type": "application/octet-stream" },
+				body: file,
+				...signal === void 0 ? {} : { signal }
+			}));
+		}
 		/** Persist a project's full canvas node list plus the current viewport state. */
 		async function saveStudioCanvas(projectId, nodes, view, signal) {
 			await readJson(await fetch("/canvas-studio/canvas", {
@@ -1077,6 +1093,73 @@ window.__ModuleLoader__.load({
 						};
 						draft.selectedNodeIds = [node.id];
 						draft.selectedNodeId = node.id;
+					},
+					addVideoStyleNodes: (draft, projectId, payload) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const size = NODE_SIZE.image;
+						const stickySize = NODE_SIZE.sticky;
+						const createdAt = Date.now();
+						const frameNodes = payload.frames.map((frame, i) => {
+							const index = existing.length + i;
+							return {
+								id: newNodeId(),
+								kind: "image",
+								title: `帧 ${String(i + 1).padStart(2, "0")} @${frame.time.toFixed(1)}s`,
+								url: frame.url,
+								filename: frame.filename,
+								isReference: true,
+								referenceRole: "style",
+								x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
+								y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+								width: size.width,
+								height: size.height,
+								createdAt,
+								toolName: "upload_video",
+								origin: "manual",
+								sourceIds: [],
+								operationType: "import",
+								generationPrompt: JSON.stringify({
+									video: payload.name,
+									time: frame.time
+								})
+							};
+						});
+						const stickyIndex = existing.length + frameNodes.length;
+						const stickyNode = {
+							id: newNodeId(),
+							kind: "sticky",
+							title: `风格归纳 · ${payload.name.length > 0 ? payload.name : "参考视频"}`,
+							text: payload.summary,
+							x: LAYOUT.origin + stickyIndex % LAYOUT.columns * LAYOUT.stepX,
+							y: LAYOUT.origin + Math.floor(stickyIndex / LAYOUT.columns) * LAYOUT.stepY,
+							width: stickySize.width + 140,
+							height: stickySize.height + 120,
+							createdAt,
+							toolName: "upload_video",
+							origin: "manual",
+							sourceIds: frameNodes.map((node) => node.id),
+							operationType: "import",
+							generationPrompt: JSON.stringify({
+								video: payload.name,
+								duration: payload.duration,
+								videoUrl: payload.videoUrl,
+								frames: payload.frames.map((frame) => frame.time)
+							})
+						};
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [
+								...existing,
+								...frameNodes,
+								stickyNode
+							]
+						};
+						draft.selectedNodeIds = [stickyNode.id];
+						draft.selectedNodeId = stickyNode.id;
 					},
 					removePendingByRunId: (draft, projectId, runId) => {
 						const existing = draft.nodes[projectId];
@@ -2639,8 +2722,9 @@ img.csNodeMedia {
 		* Everything is props-driven — the frame wires the store actions.
 		*/
 		function CanvasToolbar(props) {
-			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, onUploadImage, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
+			const { canUndo, canRedo, selectedCount, hasSelection, onUndo, onRedo, onDelete, onGroup, onUngroup, onAutoArrange, onAddNode, onUploadImage, onUploadVideo, layersOpen, onToggleLayers, scale, onZoomOut, onZoomIn, onFitContent, onResetZoom, minimapVisible, onToggleMinimap } = props;
 			const uploadInputRef = (0, react.useRef)(null);
+			const uploadVideoInputRef = (0, react.useRef)(null);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csToolbar",
 				children: [
@@ -2741,6 +2825,26 @@ img.csNodeMedia {
 								onChange: (event) => {
 									const file = event.target.files?.[0];
 									if (file !== void 0) onUploadImage(file);
+									event.target.value = "";
+								}
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								className: "csToolbarButton",
+								title: "上传参考视频：抽帧并归纳风格要素，帧图成为可用参考",
+								onClick: () => {
+									uploadVideoInputRef.current?.click();
+								},
+								children: "上传视频"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+								ref: uploadVideoInputRef,
+								type: "file",
+								accept: "video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.mov,.m4v,.webm,.mkv",
+								style: { display: "none" },
+								onChange: (event) => {
+									const file = event.target.files?.[0];
+									if (file !== void 0) onUploadVideo(file);
 									event.target.value = "";
 								}
 							})
@@ -4683,6 +4787,18 @@ img.csNodeMedia {
 					throw cause instanceof Error ? cause : /* @__PURE__ */ new Error("图片上传失败");
 				}
 			};
+			const handleUploadVideo = async (file) => {
+				if (projectId === null) return;
+				try {
+					const payload = await uploadStudioVideo(projectId, file);
+					persistAfter(() => actions.addVideoStyleNodes(projectId, {
+						...payload,
+						name: file.name
+					}));
+				} catch (cause) {
+					throw cause instanceof Error ? cause : /* @__PURE__ */ new Error("参考视频处理失败");
+				}
+			};
 			const handleViewChange = (patch) => {
 				if (projectId === null) return;
 				actions.setView(projectId, patch);
@@ -4874,13 +4990,17 @@ img.csNodeMedia {
 						onDrop: (event) => {
 							if (!event.dataTransfer.types.includes("Files")) return;
 							event.preventDefault();
-							const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
-							if (file === void 0) return;
+							const files = Array.from(event.dataTransfer.files);
+							const video = files.find((item) => item.type.startsWith("video/"));
+							const image = files.find((item) => item.type.startsWith("image/"));
+							if (video === void 0 && image === void 0) return;
 							(async () => {
 								try {
-									await handleUploadImage(file);
+									if (video !== void 0) await handleUploadVideo(video);
+									else if (image !== void 0) await handleUploadImage(image);
 								} catch (cause) {
-									window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`);
+									const message = cause instanceof Error ? cause.message : String(cause);
+									window.alert(video !== void 0 ? `参考视频处理失败：${message}` : `图片上传失败：${message}`);
 								}
 							})();
 						},
@@ -4915,6 +5035,13 @@ img.csNodeMedia {
 										await handleUploadImage(file);
 									} catch (cause) {
 										window.alert(`图片上传失败：${cause instanceof Error ? cause.message : String(cause)}`);
+									}
+								},
+								onUploadVideo: async (file) => {
+									try {
+										await handleUploadVideo(file);
+									} catch (cause) {
+										window.alert(`参考视频处理失败：${cause instanceof Error ? cause.message : String(cause)}`);
 									}
 								},
 								layersOpen: view.layersOpen,

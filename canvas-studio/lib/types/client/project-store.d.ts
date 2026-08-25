@@ -17,7 +17,7 @@
  * lives on client-minted pending nodes and is stripped on reload.
  */
 import { type EngineStoreHandle } from '@deepseek-ai/dsh-client-runtime/client';
-import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasView, StudioVideoStylePayload } from '../contracts/canvas.js';
 import type { StudioCaptureAsset } from '../asset-capture.js';
 import type { StudioProject, StudioWorkflow } from '../contracts/project.js';
 /** Mint a node id in the browser (secure context over loopback). */
@@ -111,6 +111,14 @@ export type ProjectStoreActions = {
     addNode: (draft: ProjectStoreState, projectId: string, kind: 'sticky' | 'text' | 'prompt') => void;
     /** P8.1：把本地上传的图片作为参考素材节点落到画布（manual origin，带 url/filename）。 */
     addImportNode: (draft: ProjectStoreState, projectId: string, url: string, title?: string, filename?: string, referenceRole?: StudioCanvasNode['referenceRole'], isReference?: boolean) => void;
+    /**
+     * P8.4：参考视频抽帧结果落画布（一次历史快照）：每个抽帧一张 image 参考节点
+     * （role=style，带 Drama filename），外加一张风格归纳 sticky 节点（sourceIds
+     * 指向全部帧，形成血缘边）。选中 sticky 便于用户立刻看到归纳文本。
+     */
+    addVideoStyleNodes: (draft: ProjectStoreState, projectId: string, payload: StudioVideoStylePayload & {
+        name: string;
+    }) => void;
     /** 移除 runId 匹配的占位节点（重载/完成时）。 */
     removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void;
     /** 占位节点标记失败（tool/result 的 data.error）。 */

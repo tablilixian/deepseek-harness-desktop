@@ -1,0 +1,229 @@
+/**
+ * Canvas Studio P8.4 参考视频抽帧提风格（Host 侧）。
+ *
+ * 上传本地参考视频 → ffmpeg 抽帧（默认每 2s 一帧，封顶 8 帧；长片自动改为
+ * 全片均匀采样）→ 帧图走 Drama `uploadimage` 拿 filename → 均匀抽样调
+ * `image2vl` 归纳风格要素。帧素材与归纳文本返回给客户端，由客户端落成
+ * 「一组帧 image 节点 + 一张风格归纳 sticky 节点」——与 P8.1 图片上传一致：
+ * Host 只产事实（文件与 filename），画布节点由客户端写入并持久化。
+ *
+ * ffmpeg 解析顺序：显式指定 → `FFMPEG_PATH` 环境变量 → ffmpeg-static 包内
+ * 二进制（若已下载）→ PATH 上的系统 ffmpeg。仓库根 .yarnrc.yml 设了
+ * enableScripts: false，ffmpeg-static 的 postinstall 二进制下载会被跳过，
+ * 此时自动回退系统 ffmpeg；两者都不可用时抛可操作的中文错误。
+ */
+import { spawn } from 'node:child_process';
+import { accessSync, constants as fsConstants, existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createRequire } from 'node:module';
+import { newAssetId } from './config.js';
+import { analyzeImage, uploadBytesToDrama } from './generate.js';
+/** 抽帧默认间隔（秒）。 */
+const FRAME_EVERY_SECONDS = 2;
+/** 抽帧数量上限。 */
+const MAX_FRAMES = 8;
+/** 风格归纳最多送 VLM 的帧数（在抽出的帧里均匀取样，含首末）。 */
+const STYLE_SAMPLE_MAX = 4;
+/** 单个 ffmpeg 进程超时（毫秒）：探测与单帧抽图都应秒级完成。 */
+const FFMPEG_TIMEOUT_MS = 60_000;
+/** 单帧 VLM 归纳文本的最大长度（sticky 节点正文保持紧凑）。 */
+const ANALYSIS_MAX_CHARS = 600;
+const STYLE_SYSTEM_PROMPT = '你是一个专业的影视视觉分析师，擅长从画面中提炼可复用的风格要素。';
+const STYLE_PROMPT = '请从电影摄影角度归纳这段画面的视觉风格，用简洁中文要点列出（不超过 6 条），' +
+    '覆盖：色调与调色、光线、构图与镜头语言、材质质感、美术设定。只输出要点本身。';
+function isExecutableFile(path) {
+    try {
+        accessSync(path, fsConstants.X_OK);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** 按 PATH 约定枚举候选可执行文件（win32 补 .exe）。 */
+function pathCandidates() {
+    const base = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+    return (process.env.PATH ?? '')
+        .split(process.platform === 'win32' ? ';' : ':')
+        .filter((dir) => dir.length > 0)
+        .map((dir) => join(dir, base));
+}
+/**
+ * 解析本机可用的 ffmpeg 可执行路径：显式参数 → FFMPEG_PATH → ffmpeg-static
+ * （仅当二进制真实存在）→ PATH。全部落空抛中文可操作错误。
+ */
+export function resolveFfmpegPath(explicit) {
+    const candidates = [];
+    if (explicit !== undefined && explicit.length > 0)
+        candidates.push(explicit);
+    const envPath = process.env.FFMPEG_PATH;
+    if (envPath !== undefined && envPath.length > 0)
+        candidates.push(envPath);
+    try {
+        // 动态解析避免硬依赖：包缺失/未构建二进制时静默跳过，不阻塞系统回退。
+        const required = createRequire(import.meta.url)('ffmpeg-static');
+        if (typeof required === 'string' && required.length > 0)
+            candidates.push(required);
+    }
+    catch {
+        /* ffmpeg-static 未安装则跳过 */
+    }
+    for (const candidate of [...candidates, ...pathCandidates()]) {
+        if (isExecutableFile(candidate))
+            return candidate;
+    }
+    throw new Error('未找到可用的 ffmpeg。请安装 ffmpeg（macOS: brew install ffmpeg / Ubuntu: apt install ffmpeg）'
+        + '或设置环境变量 FFMPEG_PATH 指向可执行文件后重试。');
+}
+/** 运行一次 ffmpeg，收集 stdout/stderr；超时强杀并报错。 */
+function runFfmpeg(ffmpegPath, args, timeoutMs, signal) {
+    return new Promise((resolvePromise, rejectPromise) => {
+        const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+        const finish = (callback) => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            callback();
+        };
+        const onAbort = () => {
+            child.kill('SIGKILL');
+            finish(() => rejectPromise(signal?.reason ?? new DOMException('aborted', 'AbortError')));
+        };
+        const timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            finish(() => rejectPromise(new Error(`ffmpeg 执行超时（${Math.round(timeoutMs / 1000)}s）`)));
+        }, timeoutMs);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        child.stdout?.on('data', (chunk) => { stdout += String(chunk); });
+        child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+        child.on('error', (cause) => {
+            finish(() => rejectPromise(new Error(`ffmpeg 启动失败: ${cause instanceof Error ? cause.message : String(cause)}`)));
+        });
+        child.on('close', (code) => {
+            finish(() => resolvePromise({ code: code ?? -1, stdout, stderr }));
+        });
+    });
+}
+/**
+ * 从 `ffmpeg -i` 的 stderr 里解析 `Duration: HH:MM:SS.frac` 为秒。
+ * 解析失败返回 0（调用方按「未知时长只取第 0 帧」处理）。
+ */
+export function parseFfmpegDuration(stderr) {
+    const match = /Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)/u.exec(stderr);
+    if (match === null)
+        return 0;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    const fraction = Number(`0.${match[4]}`);
+    return hours * 3600 + minutes * 60 + seconds + fraction;
+}
+/**
+ * 规划抽帧时间点（纯函数）：
+ * - 时长未知/非法：只取第 0 帧；
+ * - 短片（≤ every×max）：从 0 开始每 every 秒一帧；
+ * - 长片（> every×max）：改为全片均匀取 max 帧（风格采样覆盖全片，仍 ≤ max）。
+ * 返回保留两位小数的秒值，均严格小于时长。
+ */
+export function planFrameTimes(durationSec, options) {
+    const every = Math.max(0.5, options?.everySeconds ?? FRAME_EVERY_SECONDS);
+    const max = Math.max(1, options?.maxFrames ?? MAX_FRAMES);
+    const duration = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 0;
+    if (duration <= every)
+        return [0];
+    const round2 = (value) => Math.round(value * 100) / 100;
+    const byStep = Math.ceil(duration / every);
+    const count = Math.min(max, byStep);
+    const times = [];
+    if (byStep <= max) {
+        for (let t = 0; t < duration && times.length < count; t += every)
+            times.push(round2(t));
+    }
+    else {
+        for (let i = 0; i < count; i += 1)
+            times.push(round2((i * duration) / count));
+    }
+    const inRange = times.filter((t) => t >= 0 && t < duration);
+    return inRange.length > 0 ? inRange : [0];
+}
+/** 均匀取样（含首末）：从候选帧里取至多 max 条用于 VLM 归纳。 */
+function sampleEvenly(items, max) {
+    if (items.length <= max)
+        return [...items];
+    const step = (items.length - 1) / (max - 1);
+    const out = [];
+    for (let i = 0; i < max; i += 1)
+        out.push(items[Math.round(i * step)]);
+    return out;
+}
+function truncate(text, maxChars) {
+    return text.length <= maxChars ? text : `${text.slice(0, maxChars)}…`;
+}
+function formatDuration(seconds) {
+    return `${seconds.toFixed(1)}s`;
+}
+/**
+ * 执行「上传参考视频 → 抽帧 → 上传 Drama → 风格归纳」全流程。
+ * 视频与帧都写入项目 assets 目录（同源 URL 由 webServer 托管）；任何一步失败
+ * 都整体抛错（客户端提示，不落半成品节点）。
+ */
+export async function extractVideoStyle(registry, projectId, name, bytes, options = {}, signal) {
+    const project = (await registry.list()).find((entry) => entry.id === projectId);
+    if (!project)
+        throw new Error(`项目不存在: ${projectId}`);
+    if (bytes.length === 0)
+        throw new Error('视频内容为空');
+    const ext = /\.(mp4|mov|m4v|webm|avi|mkv)$/iu.exec(name)?.[0]?.slice(1).toLowerCase() ?? 'mp4';
+    const directory = registry.assetsDir(projectId);
+    await mkdir(directory, { recursive: true });
+    // 1) 视频本体落盘（留档 + 作为 ffmpeg 输入）。
+    const videoId = newAssetId();
+    const videoFile = `${videoId}.${ext}`;
+    await writeFile(join(directory, videoFile), bytes);
+    const inputPath = join(directory, videoFile);
+    const ffmpegPath = resolveFfmpegPath(options.ffmpegPath);
+    // 2) 探测时长：`ffmpeg -i`（无输出目标）以非零码结束属预期，元信息在 stderr。
+    const probe = await runFfmpeg(ffmpegPath, ['-i', inputPath], FFMPEG_TIMEOUT_MS, signal);
+    const duration = parseFfmpegDuration(probe.stderr);
+    // 3) 逐帧抽取 PNG 并上传 Drama 拿 filename —— 后续生成工具直接可用。
+    const times = planFrameTimes(duration, options);
+    const frames = [];
+    for (const time of times) {
+        const frameId = newAssetId();
+        const frameFile = `${frameId}.png`;
+        const framePath = join(directory, frameFile);
+        const extraction = await runFfmpeg(ffmpegPath, [
+            '-ss',
+            time.toFixed(2),
+            '-i',
+            inputPath,
+            '-frames:v',
+            '1',
+            '-q:v',
+            '3',
+            '-y',
+            framePath,
+        ], FFMPEG_TIMEOUT_MS, signal);
+        if (extraction.code !== 0) {
+            const detail = truncate(extraction.stderr.trim().split('\n').at(-1) ?? '', 200);
+            throw new Error(`参考视频抽帧失败（@${time.toFixed(1)}s${detail.length > 0 ? `: ${detail}` : ''}）`);
+        }
+        if (!existsSync(framePath)) {
+            throw new Error(`参考视频抽帧失败（@${time.toFixed(1)}s）：ffmpeg 正常退出但未产出帧图`);
+        }
+        const filename = await uploadBytesToDrama(await readFile(framePath), 'png', signal);
+        frames.push({ url: `/canvas-studio/assets/${projectId}/${frameFile}`, filename, time });
+    }
+    // 4) 风格归纳：均匀抽样 ≤ styleSamples 帧，逐帧 VLM 分析后合并成 sticky 正文。
+    const samples = sampleEvenly(frames, options.styleSamples ?? STYLE_SAMPLE_MAX);
+    const sections = [];
+    for (const frame of samples) {
+        const analysis = await analyzeImage(frame.filename, STYLE_PROMPT, STYLE_SYSTEM_PROMPT, signal);
+        sections.push(`帧 @${frame.time.toFixed(1)}s\n${truncate(String(analysis).trim(), ANALYSIS_MAX_CHARS)}`);
+    }
+    const header = `【参考视频风格归纳】${name.length > 0 ? name : '参考视频'} · ${frames.length} 帧 · 时长 ${formatDuration(duration)}`;
+    const summary = [header, ...sections].join('\n\n');
+    return { videoUrl: `/canvas-studio/assets/${projectId}/${videoFile}`, duration, frames, summary };
+}
