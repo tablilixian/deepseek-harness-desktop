@@ -135,6 +135,31 @@ interface StudioWorkflow {
 2. 带 BGM 导出音画同步
 3. 导出产物出现在画布并可作为后续节点来源
 
+### 5.1 实施步骤（2026-08-25 定稿，按 commit 拆三步）
+
+**P9.1 时间轴排序持久化**（前端为主）
+1. `contracts/canvas.ts`：`StudioCanvasView` 增加 `timeline?: string[]`（clip 节点 id 有序列表；缺省时客户端按 createdAt 从视频节点派生）
+2. `canvas-view.ts` `normalizeCanvasView`：兼容旧文档（字段缺失保持 undefined；非 string 数组丢弃）；clip 定义 = `kind === 'video'` 的节点
+3. `CanvasTimeline.tsx`：条目 HTML5 拖拽重排 → `actions.setView(projectId, { timeline })`（走既有视口防抖保存链路）；时间轴点击定位行为不变
+4. 测试：normalize 往返 + 缺省派生顺序
+
+**P9.2 合成路由（Host）**
+1. ffmpeg 基建抽公共模块 `src/ffmpeg-run.ts`：把 `resolveFfmpegPath` / `runFfmpeg` 从 `video-style.ts` 移入（video-style 改为 re-export，API 不变；P9 复用同一套 env/static/PATH 解析）
+2. 新模块 `src/compose.ts`：
+   - 输入 clipIds → 读画布节点解析本地 assets 路径（url 反查文件，缺失报中文错「片段文件不存在，请重新生成」）
+   - 两段式 ffmpeg 流水线：① 逐片段统一转码（取第一个 clip 的尺寸与 fps；`scale` + `fps` + `format=yuv420p`，有音轨转 aac 无音轨 `-an`）→ 中间文件进临时目录；② concat demuxer（`-f concat -safe 0`）拼接 → 可选 BGM `amix=duration=first`（BGM 音量钳制 0.8，先混音后封装）
+   - 输出写项目 assets 根目录 `export-<uuid>.mp4`（**不放 export/ 子目录**——资产路由是 `<projectId>/<file>` 两段式，避免扩路由）
+   - 同步等待上限 120s（AbortSignal.timeout），超时报「合成超时，请减少片段数或缩短时长」
+3. `routes.ts` 注册 `POST /canvas-studio/compose`：body `{ projectId, clipIds, bgmNodeId? }`（同源校验同其它 mutation 路由）；返回 `{ url, duration }`
+4. 测试：clip 收集/参数构造纯函数断言 + 假 ffmpeg 端到端（同 video-style 测试法）+ 真 ffmpeg 双段 testsrc 本地冒烟脚本
+
+**P9.3 一键导出入口（前端）**
+1. `api.ts` `composeStudioVideo(projectId, clipIds, bgmNodeId?)`
+2. `CanvasTimeline.tsx` 工具行加「合成导出」按钮：取当前 timeline（≥2 个 clip 才可用），进行中禁用 + 文案「合成中…」；完成 alert 展示时长
+3. 成功回写画布：新 video 节点（operationType='video-composite'、origin='manual'、sourceIds=timeline 全部、title=`成片 <日期 时间>`），走 persistAfter 落盘
+4. BGM 选择第一版从简：无选择器，后续增强再补（amix 参数已在 Host 就绪）
+5. srt 旁路导出为可选尾项（分镜表 text 节点台词列 → srt 下载），不阻塞验收
+
 ## 6. P10 可靠性与安全
 
 - 健康探针：`callDrama` 前查 `GET /api/v1/health`（结果缓存 30s），不可达时报中文错误「Drama Backend 不可达，请检查服务」，不再无限挂起
@@ -180,8 +205,8 @@ interface StudioWorkflow {
 | 里程碑 | 内容 | 状态 |
 | --- | --- | --- |
 | M0 | 两份文档落盘（本文件 + api-usage） | ✅ 2026-08-24 |
-| M1 | P7 全部验收标准通过 | 🟡 代码全部完成（含审批条实时刷新修复），待用户端到端验收 |
-| M2 | P8 全部验收标准通过 | 🟡 代码全部完成（P8.1 上传 / P8.2 多参考 / P8.3 拆单镜 / P8.4 视频抽帧提风格），待后端可用窗口端到端验收 |
+| M1 | P7 全部验收标准通过 | ✅ 2026-08-25 端到端验收通过（流程跑通；少量非阻塞小问题转入后续优化） |
+| M2 | P8 全部验收标准通过 | ✅ 2026-08-25 端到端验收通过（上传/多参考/拆单镜/视频抽帧提风格全链路可用） |
 | M3 | P9 全部验收标准通过 | 🟡 部分提前完成（fl2va 双图路径、时长钳制）；ffmpeg 本地拼接未开始 |
 | M4 | P10 完成 + P11 裁剪结论 | 🟡 超时/重试已提前落地；health 探针、key 处置、sessionId 未开始；P11 已落地 H3 提示词规范 |
 
@@ -230,16 +255,15 @@ interface StudioWorkflow {
 
 > 状态：⬜ 未开始 / 🟨 进行中或部分完成 / ✅ 完成。每项含验收标准；外部依赖单独标注。
 
-### 11.1 P7 需求澄清门控 🟨（代码完成，待端到端验收）
+### 11.1 P7 需求澄清门控 ✅（2026-08-25 端到端验收通过）
 
 - ✅ registry workflow 状态机（drafting → awaiting_approval → executing，含模式 confirm/auto）
 - ✅ `submit_storyboard_for_approval` 工具 + 生成硬门禁（storyboard/video 类工具未批准即拒）
 - ✅ `ask_user_choice` 点选式提问（Host 阻塞等待 + 对话区内联选项卡片 + 答案自动回流）
 - ✅ 审批条 / 模式开关 UI；skill 五要素逐项提问协议
-- ⬜ **端到端验收**：新会话跑通「点选澄清 → 五要素摘要 → 分镜表审批 → 批准 → 生成」与「放手跑」两条路径
-  - 阻塞依赖：Drama Backend 恢复（当前挂起，见 §8）
+- ✅ **端到端验收**：「点选澄清 → 五要素摘要 → 分镜表审批 → 批准 → 生成」与「放手跑」两条路径均跑通（验收反馈的若干非阻塞小问题列入后续优化清单）
 
-### 11.2 P8 素材入口 ✅（代码全部完成，待端到端验收）
+### 11.2 P8 素材入口 ✅（2026-08-25 端到端验收通过）
 
 1. ✅ 本地图片上传：`POST /canvas-studio/upload`（JSON base64，复用 readJson/16MB 上限）→ Drama `uploadimage`
    - 验收：工具条按钮 + 画布拖拽两个入口；上传后 filename 可直接作生成输入
@@ -251,20 +275,20 @@ interface StudioWorkflow {
    - 验收：参考视频 → 风格归纳 → 用于首镜生成全流程无手写 filename（帧 filename 直接进参考托盘/list_references/@ref）
    - 备注：ffmpeg-static 已进依赖但根 .yarnrc.yml `enableScripts: false` 跳过其 postinstall 二进制下载；运行时按「显式参数 → FFMPEG_PATH → ffmpeg-static 二进制（存在时）→ 系统 PATH」解析，均缺失报中文安装指引
 
-### 11.3 P9 成片合成与导出 🟨（fl2va/时长钳制已提前完成）
+### 11.3 P9 成片合成与导出 🟨（开发中，2026-08-25 启动；实施步骤定稿见 §5.1）
 
-1. ⬜ 时间轴片段拖拽排序 + `view.timeline` 持久化（normalizeCanvasView 兼容旧文档）
-2. ⬜ 合成路由 `POST /canvas-studio/compose`：ffmpeg concat → 统一分辨率/fps → 可选 BGM amix → `assets/export/<uuid>.mp4`
+1. ⬜ P9.1 时间轴片段拖拽排序 + `view.timeline` 持久化（normalizeCanvasView 兼容旧文档）
+2. ⬜ P9.2 合成路由 `POST /canvas-studio/compose`：ffmpeg 统一转码 → concat → 可选 BGM amix → 项目 assets 根目录 `export-<uuid>.mp4`（兼容现有两段式资产路由）
    - 同步等待（上限 120s），耗时异步化列后续优化
-3. ⬜ 一键导出：产物回写画布（video-composite 终节点，origin=manual，sourceIds=clipIds）；srt 字幕旁路导出
+3. ⬜ P9.3 一键导出：产物回写画布（video-composite 终节点，origin=manual，sourceIds=clipIds）；srt 字幕旁路导出
    - 验收：3 片段排序导出连贯 mp4；带 BGM 音画同步
 
 ### 11.4 P10 可靠性与安全 🟨（约 50%）
 
 - ✅ 超时（图 360s / 视频 600s / 文本 60s）+ 一次性重试；错误体透出（含 detail 字段）
 - ✅ 视频时长钳制 ≤15s；上传文件名唯一安全化
-- ⬜ `/health` 前置探针（结果缓存 30s）+ 宕机中文提示（不再挂起）
-- ⬜ API key 处置：迁 `$DSH_HOME/canvas-studio/config.json`（0600）；鉴权去留待后端确认（§8-3）
+- 🟨 `/health` 前置探针（结果缓存 30s）+ 宕机中文提示（不再挂起）—— **下一个开发项（2026-08-25 决策，先于 P9 合成落地）**
+- ⬜ API key 处置：迁 `$DSH_HOME/canvas-studio/config.json`（0600）；鉴权去留待后端确认（§8-3）—— **优先级后置（2026-08-25 用户决策，不着急）**
 - ⬜ sessionId 持久化（StudioProject.sessionId，工具执行命中后回写）
 - ⬜ rename 失败降级；「打断仅本地中断」tooltip 标注
 
@@ -300,3 +324,4 @@ interface StudioWorkflow {
 - 2026-08-25（P8.4 参考视频抽帧提风格）：新路由 `POST /canvas-studio/upload-video`（原始字节流，128MB 上限）+ Host `extractVideoStyle`（src/video-style.ts）：ffmpeg 抽帧（每 2s 封顶 8 帧，长片改全片均匀采样）→ 帧图 uploadimage → 均匀抽样 ≤4 帧 image2vl 归纳 → 客户端一次快照落「帧参考节点（role=style）+ 风格归纳 sticky（血缘指向全部帧）」。引入 ffmpeg-static 依赖（enableScripts:false 下运行时回退系统 ffmpeg，解析顺序见 §11.2-4）；资产 Content-Type 扩展到常见视频容器；generate.ts 抽出 uploadBytesToDrama 共用。测试 55/55 绿（新增 video-style.test.mjs：抽帧计划纯函数、时长解析、ffmpeg 解析顺序、假 ffmpeg + mock Drama 端到端）。P8 代码全部完成，待端到端验收。
 - 2026-08-25（验收反馈修复四连）：① 「生成中」黑块残留 —— 占位节点此前会随整表保存落盘，载入只剥标志保留本体；现在持久化前剔除瞬态节点（isLoading / pending-* / 无 url 的 agent 媒体节点），载入时同样丢弃（自动治愈已污染项目）。② 重试无反应 —— rerunNode 失败走 markPendingError 只作用于占位，真实节点的错误被静默吞掉；现在发起即进入加载态（进度遮罩），失败把错误写回节点本体（详情面板可见），无参数的节点给出明确提示。③ 删除后重开复现 —— 删除保存（POST）与 tool/result 重载（GET 整表替换 store）并发竞争；画布读写统一进串行 Promise 链且保存取执行时刻快照，最后一次保存必为最新状态。④ 对话区 380px → 480px。
 - 2026-08-25（会话恢复修复）：openProject 此前每次调 startSession，而上游 connectWorkspace 只复用工作区下的**空白**会话 —— 原会话一旦聊过（非 blank），再次打开项目就会新开一个空会话并跳过去，表现为「切换后历史对话消失」（旧对话仍在 Host，仅不再展示）。现改为从会话镜像里挑该工作区 updatedAt 最新的**非空**会话直接 `sessions.open` 恢复（排除 archived）；确实没有历史会话才回退 startSession 建空白，首次使用行为不变。（commit aa88c02b5c）
+- 2026-08-25（验收收口与排期决策）：Drama Backend 恢复，P7 + P8 端到端验收**全部通过**（M1/M2 关闭；少量非阻塞小问题转入后续优化清单，待补录）。用户排期决策：① P10 `/health` 探针为下一个开发项（先于 P9 落地）；② API key 处置优先级后置；③ P9 成片合成正式启动，实施步骤定稿见 §5.1（P9.1 时间轴 → P9.2 compose 路由 → P9.3 导出入口，按 commit 分步）；④ 其余增强项（sessionId 持久化、P11 池、画布 8 项）先挂文档排队。推进顺序更新为：health 探针 → P9.1→P9.2→P9.3 → sessionId → P11 裁剪。
