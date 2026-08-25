@@ -1,0 +1,297 @@
+# Canvas Studio 二期优化计划（Phase 2）
+
+> DSH Desktop 项目内 canvas-studio 插件的二期打磨计划。一期（P1–P6，见 `canvas-studio.md` 与 `canvas-studio-handoff.md`）已跑通主链路并全部关闭；二期目标是补齐产品承诺的四块短板，把工具从"演示可用"打磨成"日常好用"。
+>
+> 关联文档：`canvas-studio-api-usage.md`（Drama Backend 接口使用指南，本文的接口事实来源）、`canvas-studio-tools.md`（工具契约）、`api.md`（后端原始 API 参考 v0.2.0）。
+>
+> 已确认决策（2026-08-24）：① P7 门控最先做；② 接受引入 ffmpeg-static（LGPL 构建）；③ 参考视频两步走（先抽帧提风格）；④ 二期不含内置化打包（推三期），继续 dev 形态。
+
+## 1. 一期结论与二期目标
+
+一期已交付：文字输入 → agent 编排（LLM + creation-spec skill）→ 格子分镜 → 定妆锚点 → 逐镜出图 → 图生视频/多图合成，所有产物实时落画布，支持逐节点打断/重试/改提示词。
+
+对照产品目标（"文字+参考图/参考视频 → agent 调度 → 几十秒成片，全程可视可控"）仍有四个缺口：
+
+| # | 缺口 | 现状证据 |
+| --- | --- | --- |
+| 1 | 需求澄清无硬门控 | 仅 skill 提示词纪律（`creation-spec.ts` "先给用户确认"），agent 可以跳过确认直接生成 |
+| 2 | 素材入口缺失 | 用户本地图无法进入工具链（`upload_image` 只收 URL）；无参考视频通路；存量工具多参考图参数未暴露 |
+| 3 | 成片合成缺失 | 无本地拼接/导出，"几十秒"只能靠 MKR 插值（≤~30s）或多段独立片段节点 |
+| 4 | 可靠性弱 | 后端宕机即挂起；`DRAMA_API_KEY` 明文且未随请求发送；项目不持久化 sessionId |
+
+## 2. 阶段总览与排期
+
+```
+P7 ──► P8 ──► P9        主线（交互契约 → 输入 → 输出）
+P10 ────────►           穿插
+P11                     收尾弹性池（按需裁剪）
+```
+
+| 阶段 | 主题 | 关键交付 |
+| --- | --- | --- |
+| P7 | 需求澄清门控 + 显式执行模式 | 项目工作流状态机、审批工具与 UI 条、生成硬门禁、模式开关、skill 五要素澄清 |
+| P8 | 素材入口 | 本地图片上传路由、存量工具多参考扩参、分镜拆单镜闭环（splitegrid）、参考视频抽帧提风格 |
+| P9 | 成片合成与导出 | 时间轴排序持久化、ffmpeg-static 本地拼接/转码/BGM 混音、一键导出 mp4 回写画布 |
+| P10 | 可靠性与安全 | `/health` 探针与友好降级、请求超时与重试、API key 处置、sessionId 持久化 |
+| P11 | 体验增强池 | image2character 定妆、inpaint、视频模式扩展（fl2va/ref2va/mkrgrid）、动漫风等 |
+
+## 3. P7 需求澄清门控 + 显式执行模式
+
+原则：门禁做成 Host 侧硬约束，而不是提示词纪律。
+
+### 3.1 项目工作流状态机
+
+`StudioProject` 扩展 `workflow` 字段（registry version 1→2，旧记录迁移补默认值）：
+
+```ts
+interface StudioWorkflow {
+  /** confirm：逐步确认；auto：放手跑 */
+  mode: 'confirm' | 'auto'
+  /** drafting：需求澄清中；awaiting_approval：分镜表待批准；executing：执行中 */
+  state: 'drafting' | 'awaiting_approval' | 'executing'
+}
+```
+
+- 默认 `{ mode: 'confirm', state: 'drafting' }`
+- 状态迁移：`submit_storyboard_for_approval` → `awaiting_approval`；用户批准（UI/路由）→ `executing`；用户驳回 → `drafting`；`auto` 模式下提交动作直接跳过等待置 `executing`
+
+### 3.2 新增 Host 工具 `submit_storyboard_for_approval`
+
+- 参数：`storyboard`（markdown 分镜表文本）、`summary?`
+- 行为：把分镜表落为画布 `text` 节点（复用 `appendCanvasNode`，origin=agent）；置 `workflow.state = awaiting_approval`；返回文本指示模型停止并等待用户批准
+- 会话回合在该工具后自然结束，模型不继续调生成工具
+
+### 3.3 生成硬门禁
+
+`runGeneration`（`host-tools.ts`）在解析项目后检查 workflow：
+
+- `mode === 'auto'` 或 `state === 'executing'`：放行
+- `state === 'awaiting_approval'` 或（`confirm` 且 `state === 'drafting'`）时：`storyboard_generate` / `video_generate` / `video_composite` 抛错，错误信息指导模型先走 `submit_storyboard_for_approval`；`image_generate` / `style_transfer` / `upload_image` / 文本工具放行（策划期概念图允许）
+
+### 3.4 审批 UI 与路由
+
+- 新路由 `GET/POST /canvas-studio/workflow`：GET `?projectId` 读 workflow；POST `{ projectId, action: 'approve' | 'reject' | 'setMode', mode? }`（沿用同源校验）
+- `StudioFrame` 顶部审批条：`awaiting_approval` 时显示「分镜表待批准」＋[批准开始制作] [继续修改]；批准后提示用户在对话中发送「继续」（P7 先用手动恢复；经上游会话服务自动注入消息列为增强项，可行性待验证）
+- 模式开关放在项目列表项菜单/详情区，读写走 workflow 路由
+
+### 3.5 skill 更新（`creation-spec.ts`）
+
+- 新增五要素澄清：时长 / 画幅 / 风格 / 节奏 / 受众，缺项先用对话追问，再出分镜表
+- 写入门控协议：confirm 模式必须先 `submit_storyboard_for_approval`，被拒时不要重试生成
+- 移除 `deduction` 教学（后端已 404，见 §8 探测结果）
+
+### 3.6 验收标准
+
+1. confirm 模式下，agent 跳过审批直接调 `storyboard_generate` 会被拒且收到指引
+2. 审批条批准后状态变 `executing`，用户发「继续」后流程走通
+3. auto 模式下一句话直达成片，全程无审批中断
+4. 重启后项目的 mode/state 保持
+
+## 4. P8 素材入口
+
+### 4.1 本地图片上传
+
+- 新路由 `POST /canvas-studio/upload`：body 为 JSON `{ projectId, name, dataBase64 }`（复用现有 `readJson` 与 16MB 上限；≤5MB 图 base64 后约 6.7MB，够用，避免引入 multipart 解析依赖）
+- Host 将 Buffer 经 undici `FormData`/`Blob` POST 到 Drama `uploadimage`，返回 filename 给客户端
+- 入口：① 项目详情/工具条「上传图片」按钮（文件选择器）；② 画布拖拽图片文件直接建素材节点（manual origin）并可右键「上传到后端」；③ 聊天附件桥接列为增强项（受上游 InputBar 结构限制）
+
+### 4.2 存量工具多参考扩参（优先于新增工具）
+
+- `GenerateParams.filenames?: string[]`：`image_generate` 图生图映射 `image1~3`（现仅传 image1）；`video_generate` 映射 MSR `image1~4`（现仅传 background）
+- 工具 schema 增加 `filenames` 数组参数（上限按端点），保持 `filename` 单参向后兼容
+- `video_composite` 维持现状（MKR 关键帧上限 5，已用满）
+
+### 4.3 分镜拆单镜闭环
+
+- 新工具 `storyboard_split`：对格子分镜图产物调 `image2splitegrid`（row×column 由 gridnum 推导：4→2×2、6→2×3、9→3×3，或显式传参）
+- 拆出的每张单镜自动 `appendCanvasNode` 为独立 image 节点（sourceIds 指向分镜网格节点），每个都可独立重试/inpaint/作首帧
+
+### 4.4 参考视频（两步走的第 a 步）
+
+- 不依赖存疑的流式上传端点：Host 侧用 ffmpeg-static（P9 提前引入）对本地参考视频抽帧（默认每 2s 一帧，封顶 8 帧）→ 帧图走 `uploadimage` → `image2vl` 归纳风格要素 → 作为后续生成的风格/构图参考
+- 入口：项目详情「上传参考视频」；产物为一组帧素材节点＋一张风格归纳 sticky 节点
+- 第 b 步（后端视频条件生成）等后端 roadmap，见 §8
+
+### 4.5 验收标准
+
+1. 本地 png/jpg 上传后拿到 filename，可作 image_generate / video_generate 输入
+2. `image_generate(filenames=[a,b,c])` 三参考图生图链路真实出图
+3. 分镜网格一键拆成 N 个单镜节点，血缘边正确
+4. 参考 mp4 抽帧 → 风格归纳 → 用于首镜生成，全流程无手写 filename
+
+## 5. P9 成片合成与导出
+
+- 依赖：`ffmpeg-static`（LGPL 构建二进制）进 canvas-studio 依赖；dev 形态直接走 node_modules，Electron 打包体积问题留给三期
+- 时间轴排序持久化：`StudioCanvasView` 扩展 `timeline?: string[]`（clip 节点 id 有序列表），`normalizeCanvasView` 兼容旧文档；时间轴面板支持拖拽排序
+- 合成路由 `POST /canvas-studio/compose`：`{ projectId, clipIds, bgmNodeId?, title? }`
+  - concat 片段 → 统一分辨率/fps 转码（取第一个 clip 的尺寸）→ 可选 BGM `amix` → 写入 `assets/export/<uuid>.mp4`
+  - 同步等待（本地合成几十秒视频通常 <30s，超时上限 120s）；耗时异步化列为后续优化
+- 产物回写画布：kind=video、operationType=video-composite、origin=manual、sourceIds=clipIds
+- 字幕：分镜表的台词列导出 srt 旁路文件（烧录列 P11）
+
+### 验收标准
+
+1. 选 3 个片段排序导出一个连贯 mp4，分辨率统一
+2. 带 BGM 导出音画同步
+3. 导出产物出现在画布并可作为后续节点来源
+
+## 6. P10 可靠性与安全
+
+- 健康探针：`callDrama` 前查 `GET /api/v1/health`（结果缓存 30s），不可达时报中文错误「Drama Backend 不可达，请检查服务」，不再无限挂起
+- 超时：`callDrama` 全部加 `AbortSignal.timeout`（图片类 360s、视频类 600s，2026-08-24 验收反馈翻倍；文本 60s）；网络类失败自动重试一次
+- 错误码映射：400/500/502 → 区分「参数问题」「后端内部错误」「后端不可用」的中文提示
+- 「打断只是本地中断，服务端任务不会回收」在打断按钮 tooltip 如实标注
+- API key：实测后端当前无鉴权（health 无 key 通过，见 §8）→ 待后端确认鉴权规划后再决定「随请求发送」或「移除常量」；存储先把 `config.json` 从源码明文迁到 `$DSH_HOME/canvas-studio/config.json`（0600），safeStorage/配置中心随三期桌面配置中心做
+- sessionId 持久化：`StudioProject.sessionId?`，工具执行命中项目后回写当前会话 id（具体取值路径运行时验证）；workspace 匹配优先精确 sessionId
+- rename 失败降级为尽力改名（沿用 handoff §10.4 记录）
+
+## 7. P11 体验增强池（按需裁剪）
+
+| 项 | 内容 | 依赖端点 |
+| --- | --- | --- |
+| 真·定妆照 | 新工具 `character_sheet`（四视图立绘）替换 prompt 约定模拟 | image2character |
+| 局部重绘 | 新工具 `inpaint_image`，配合画布标注框选 | image2inpaint |
+| 动漫风 | `image_generate` 增加 `style: realistic \| anime` | txt2imageanime |
+| 视频模式扩展 | `video_generate` 增加 `mode`: msr（默认）/ fl2va（首尾帧）/ ref2va（6 参考一致性）/ mkrgrid（宫格） | fl2va / ref2va / mkrgrid |
+| IPA 风格迁移 | 多参考融合精细控制 | image2ipastyletransfer |
+| 字幕烧录 | srt 硬字幕进导出 mp4 | ffmpeg 本地 |
+| 缩略图 LOD / 手绘标注层 / 独立 edge 层 | handoff §10.5 既有项 | — |
+| store 单测补强 | undo/redo/吸附（tsx 在 React 外跑） | — |
+
+## 8. Drama Backend 联调探测结果（2026-08-24）
+
+| 探测 | 结果 | 影响 |
+| --- | --- | --- |
+| `GET /api/v1/health` | ✅ `{"status":"ok"}`，无需鉴权 | P10 探针可直接落地 |
+| `GET /` | ❌ 500（api.md 称返回 message） | 记入待确认清单 |
+| `POST /generate/deduction`（空 body） | ❌ **404 Not Found** | 一期 `deduction` 工具对当前后端失效；skill 移除教学，工具保留待后端澄清 |
+| `image2character` / `ipastyletransfer` / `splitegrid` / `inpaint` / `fl2va` / `ref2va` / `360hdri` / `txt2imageanime`（空 body POST） | ⏳ 连接超时（非 404，端点已路由） | 端点存在，真实参数联调在 P8/P11 进行 |
+
+待后端确认清单：
+
+1. `deduction` 端点是否已废弃/迁移（不在 api.md v0.2.0）
+2. 流式上传 `/generate/upload` 响应无 filename，下游如何引用（P8 走本地抽帧路线则不阻塞）
+3. 鉴权：是否计划加 API key 校验（决定 `DRAMA_API_KEY` 去留）
+4. 视频/音频路线图：参考视频条件生成、TTS/BGM 是否规划
+5. 根路径 500 是否符合预期
+
+## 9. 里程碑与风险
+
+| 里程碑 | 内容 | 状态 |
+| --- | --- | --- |
+| M0 | 两份文档落盘（本文件 + api-usage） | ✅ 2026-08-24 |
+| M1 | P7 全部验收标准通过 | 🟡 代码全部完成（含审批条实时刷新修复），待用户端到端验收 |
+| M2 | P8 全部验收标准通过 | 未开始 |
+| M3 | P9 全部验收标准通过 | 🟡 部分提前完成（fl2va 双图路径、时长钳制）；ffmpeg 本地拼接未开始 |
+| M4 | P10 完成 + P11 裁剪结论 | 🟡 超时/重试已提前落地；health 探针、key 处置、sessionId 未开始；P11 已落地 H3 提示词规范 |
+
+风险：
+
+- Drama Backend 可用性波动会反复阻塞验收（一期已有先例）→ 每阶段验收尽量安排在后端可用窗口，单测用 mock 不依赖后端
+- ffmpeg-static 约 +70MB，dev 形态无感，三期打包需评估按平台分发
+- 同步阻塞 API 是并发体验天花板，若后端长期不提供任务查询/异步化，只能靠超时+重试缓解
+
+## 10. 画布完成度审计（2026-08-24 验收反馈）
+
+### 10.1 已实现
+
+| 能力 | 状态 |
+| --- | --- |
+| 视口：平移 / 滚轮平移 / Ctrl+滚轮缩放 / 适配内容 / 重置；持久化（v3） | ✅ |
+| 节点：拖拽（对齐吸附+参考线）、8 向缩放、锁定/隐藏/透明度/翻转、z 序 | ✅ |
+| 编组/解组、自动整理、复制粘贴、undo/redo（20 步）、键盘快捷键 | ✅ |
+| 选择：单选 / Ctrl 多选 / 全选 / Esc 清空；时间轴点击定位聚焦 | ✅ |
+| 详情面板：标题改名、类型/操作、工具名、时间、尺寸、透明度、翻转、锁定可见、置顶置底、生成参数查看、错误显示、重试/修改提示词/打断/删除 | ✅ |
+| 血缘边：贝塞尔曲线 + 箭头 + 操作标签 chip + 手动连线手柄 | ✅ 组件在，但 agent 生成的节点此前 sourceIds 恒空 → 见 10.2-4 |
+| 生成占位（进度条）/ 失败徽标 / 右键菜单 / 小地图 / 图层列表 | ✅ |
+
+### 10.2 本次修复（对应验收反馈四连）
+
+1. **黑图**：媒体加载失败兜底——URL 失效/产物损坏时节点显示「媒体加载失败」徽标而非静默黑块。若图本身是模型输出的黑图属后端问题（右键重试；列入 §8 后端联调）
+2. **永远「生成中」**：占位节点加 660s 宽限超时（比 Host 最长视频超时更宽），到点自动转失败并提示重试
+3. **重新编辑窗口**：双击任意节点 = 选中并打开详情面板（原双击改名保留在详情面板内）
+4. **流程箭头**：根因是 Host 落盘时 sourceIds 恒为 `[]`。新增 `sourceUrls` 参数（image_generate/video_generate/video_composite），Host 按 URL 反查画布节点写入血缘；skill 已指引模型每次传参。**仅对新会话生效**
+5. **小地图/图层列表默认关闭**（`VIEW_DEFAULTS` 调整；已保存过视图的项目保持各自记录）
+
+### 10.3 画布后续优化清单（按优先级）
+
+| # | 项 | 说明 | 归属 |
+| --- | --- | --- | --- |
+| 1 | 文本类节点正文编辑 | 便签/文本/提示双击直接改正文（现在正文只读，只能改标题） | P11 |
+| 2 | 框选多选（rubber band） | 目前只有 Ctrl 点选与全选 | P11 |
+| 3 | 时间轴拖拽排序 + 多段导出选择 | P9 本地合成的前置交互 | P9 |
+| 4 | 详情面板增强 | 产物 URL 复制/下载按钮、来源列表可视化、正文编辑入口 | P11 |
+| 5 | 单条血缘边管理 | 删除某条来源 / 边上直接改操作标签（现在只能整节点处理） | 增强 |
+| 6 | 大画布性能 LOD | >300 节点降级渲染缩略图（handoff §10.5 既有项） | P11 |
+| 7 | 触控板 pinch + 手绘标注层 | handoff §10.5 既有项 | P11 |
+| 8 | 后端偶发黑图联调 | 与 WL 侧确认 MSR/fl2va 黑帧问题（前端已兜底提示） | §8 清单 |
+
+## 11. 二期剩余工作清单（2026-08-24 盘点）
+
+> 状态：⬜ 未开始 / 🟨 进行中或部分完成 / ✅ 完成。每项含验收标准；外部依赖单独标注。
+
+### 11.1 P7 需求澄清门控 🟨（代码完成，待端到端验收）
+
+- ✅ registry workflow 状态机（drafting → awaiting_approval → executing，含模式 confirm/auto）
+- ✅ `submit_storyboard_for_approval` 工具 + 生成硬门禁（storyboard/video 类工具未批准即拒）
+- ✅ `ask_user_choice` 点选式提问（Host 阻塞等待 + 对话区内联选项卡片 + 答案自动回流）
+- ✅ 审批条 / 模式开关 UI；skill 五要素逐项提问协议
+- ⬜ **端到端验收**：新会话跑通「点选澄清 → 五要素摘要 → 分镜表审批 → 批准 → 生成」与「放手跑」两条路径
+  - 阻塞依赖：Drama Backend 恢复（当前挂起，见 §8）
+
+### 11.2 P8 素材入口 ⬜（下一个主战场）
+
+1. ⬜ 本地图片上传：`POST /canvas-studio/upload`（JSON base64，复用 readJson/16MB 上限）→ Drama `uploadimage`
+   - 验收：工具条按钮 + 画布拖拽两个入口；上传后 filename 可直接作生成输入
+2. ⬜ 存量工具多参考扩参：`GenerateParams.filenames` → image2image 补 image1~3、videomsr 补 image1~4（工具 schema 加数组参数，单数 filename 保持兼容）
+   - 验收：三参考图生图、参考图+背景生视频真实出片
+3. ⬜ 分镜拆单镜闭环：新工具 `storyboard_split` 调 `image2splitegrid`（gridnum→row×column 推导），产物逐格落独立节点（sourceIds 指向网格图）
+   - 验收：4/6/9 格拆分正确、血缘边正确、单镜可独立重试
+4. ⬜ 参考视频抽帧提风格：上传 mp4 → ffmpeg-static 抽帧（≤8 帧）→ 帧图 uploadimage → `image2vl` 风格归纳 sticky 节点
+   - 验收：参考视频 → 风格归纳 → 用于首镜生成全流程无手写 filename
+   - 备注：本阶段引入 ffmpeg-static（P9 复用）；不依赖存疑的流式上传端点
+
+### 11.3 P9 成片合成与导出 🟨（fl2va/时长钳制已提前完成）
+
+1. ⬜ 时间轴片段拖拽排序 + `view.timeline` 持久化（normalizeCanvasView 兼容旧文档）
+2. ⬜ 合成路由 `POST /canvas-studio/compose`：ffmpeg concat → 统一分辨率/fps → 可选 BGM amix → `assets/export/<uuid>.mp4`
+   - 同步等待（上限 120s），耗时异步化列后续优化
+3. ⬜ 一键导出：产物回写画布（video-composite 终节点，origin=manual，sourceIds=clipIds）；srt 字幕旁路导出
+   - 验收：3 片段排序导出连贯 mp4；带 BGM 音画同步
+
+### 11.4 P10 可靠性与安全 🟨（约 50%）
+
+- ✅ 超时（图 360s / 视频 600s / 文本 60s）+ 一次性重试；错误体透出（含 detail 字段）
+- ✅ 视频时长钳制 ≤15s；上传文件名唯一安全化
+- ⬜ `/health` 前置探针（结果缓存 30s）+ 宕机中文提示（不再挂起）
+- ⬜ API key 处置：迁 `$DSH_HOME/canvas-studio/config.json`（0600）；鉴权去留待后端确认（§8-3）
+- ⬜ sessionId 持久化（StudioProject.sessionId，工具执行命中后回写）
+- ⬜ rename 失败降级；「打断仅本地中断」tooltip 标注
+
+### 11.5 P11 增强池 🟨（按需裁剪）
+
+- ✅ H3 提示词规范进 skill；fl2va 双图路径
+- ⬜ `character_sheet`（image2character 四视图定妆，替换 prompt 约定 hack）
+- ⬜ `inpaint_image` 局部重绘（配合画布标注）
+- ⬜ 动漫风（image_generate `style: anime` → txt2imageanime）
+- ⬜ 视频模式接线扩展：ref2va（6 参考一致性）/ mkrgrid（宫格）作为 video_generate/composite 参数
+- ⬜ 字幕烧录进导出 mp4
+- ⬜ 画布 8 项（§10.3）：文本节点正文编辑、框选多选、详情面板增强、单边管理、LOD、pinch、后端黑图联调
+
+### 11.6 外部依赖（非代码）
+
+1. ⬜ Drama Backend 恢复 + 稳定性（当前挂起；黑图/500 需 WL 侧排查）
+2. ⬜ 后端对齐五问（§8）：deduction 存废、流式上传 filename、鉴权、TTS/BGM roadmap、根路径 500
+
+### 11.7 推进顺序
+
+```
+后端恢复 → P7 验收收口 → P8（1→2→3→4）→ P9（1→2→3）→ P10 扫尾 → P11 裁剪执行
+```
+
+## 12. 变更记录
+- 2026-08-24：初版。含一期复盘、P7–P11 设计、首轮后端探测结果与决策记录。
+- 2026-08-24（实施日）：M0 完成；P7 代码全部落地（workflow 状态机 + submit_storyboard_for_approval 工具与硬门禁 + workflow 路由 + 审批条/模式开关 UI + skill 五要素澄清），并修复审批条不随工具结算刷新的问题（asset-capture 识别工作流工具）；提前落地部分 P9/P10/P11 项——video_composite 双图走 fl2va、全部视频时长钳制 ≤15s、callDrama 超时+一次性重试、MiniMax H3 官方提示词规范蒸馏进 skill（原文为第三方材料仅本地留存，不入库）。27 项单测全绿。待办：P7 端到端验收 → P8。
+- 2026-08-24（验收反馈轮）：超时翻倍（图片 360s / 视频 600s）；画布专项修复五连——媒体加载失败兜底、占位超时转失败、双击打开详情面板、sourceUrls 血缘箭头、小地图/图层默认关闭；新增 §10 画布完成度审计与优化清单。
+- 2026-08-24（点选澄清轮）：需求澄清改为**点选式交互**——新工具 `ask_user_choice`（Host 阻塞等待）+ 对话区内联选项卡片（conversationEvents 自定义聊天节点 `canvas-studio-question` 注册进上游 `conversation.chat.node` seat），用户点选后答案自动回流模型；画布侧卡片移除；skill 强制"一次一问、禁文本列表提问"。
+- 2026-08-24（视频排障轮）：定位视频 500 两层原因——①我方上传表单文件名写死 `reference.png` 触发后端去重后缀（带空格括号破坏下游，已修：唯一安全名）；②后端整体挂起（health 超时，待 WL 侧恢复）。错误信息透出后端响应体；新增 4 个 api.md 请求体契约测试；api-usage §3.4 扩写为五端点完整详解。
