@@ -10,13 +10,17 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { generateAsset } from '../lib/generate.js'
+import { generateAsset, clampDuration } from '../lib/generate.js'
 
 /** 打桩 fetch：参考图下载 / 上传 / 生成 / 产物下载。 */
 function stubFetch(mediaUrl = 'https://media.example/out.png') {
   const calls = []
   globalThis.fetch = async (url, init = {}) => {
-    calls.push({ url: String(url), method: init.method ?? 'GET' })
+    let body = null
+    if (typeof init.body === 'string') {
+      try { body = JSON.parse(init.body) } catch { body = init.body }
+    }
+    calls.push({ url: String(url), method: init.method ?? 'GET', body })
     const text = String(url)
     if (init.method === 'POST') {
       if (text.includes('/upload')) {
@@ -126,6 +130,107 @@ test('普通生成：追加新节点并带 generationPrompt', async () => {
     assert.equal(node.kind, 'image')
     assert.equal(node.generationPrompt, '{"prompt":"一只猫"}')
     assert.equal(node.origin, 'agent')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+test('clampDuration：钳制到 [1,15]，默认值生效', () => {
+  assert.equal(clampDuration(undefined, 5), 5)
+  assert.equal(clampDuration(undefined, 10), 10)
+  assert.equal(clampDuration(8, 10), 8)
+  assert.equal(clampDuration(30, 10), 15)
+  assert.equal(clampDuration(0.4, 10), 1)
+})
+
+test('video_composite 双图走首尾帧插值（fl2va）端点，时长被钳制', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.mp4')
+    const registry = stubRegistry([], dir)
+    await generateAsset(registry, 'video_composite', 'p1', {
+      prompt: 'x',
+      aspectRatio: '16:9',
+      duration: 30,
+      filenames: ['a.png', 'b.png'],
+    })
+    const gen = calls.find((call) => call.url.includes('/generate/'))
+    assert.ok(gen.url.includes('image2videofl2va'), `期望 fl2va 端点，实际 ${gen.url}`)
+    const node = registry.getWrites()[0].nodes[0]
+    assert.equal(node.duration, 15)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.md 契约：video_generate → image2videomsr 请求体（background 必填、整数时长/fps）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.mp4')
+    await generateAsset(stubRegistry([], dir), 'video_generate', 'p1', {
+      prompt: 'p', aspectRatio: '16:9', duration: 8.6, filename: 'bg.png',
+    })
+    const gen = calls.find((call) => call.url.includes('image2videomsr'))
+    assert.ok(gen, '缺少 image2videomsr 调用')
+    assert.equal(gen.body.prompt, 'p')
+    assert.equal(gen.body.background, 'bg.png')
+    assert.equal(gen.body.width, 1280)
+    assert.equal(gen.body.height, 720)
+    assert.equal(gen.body.duration, 9) // 整数（api.md duration: integer）
+    assert.equal(gen.body.fps, 30)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.md 契约：video_composite 双图 → image2videofl2va 请求体（aspect/megapixels/首尾帧）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.mp4')
+    await generateAsset(stubRegistry([], dir), 'video_composite', 'p1', {
+      prompt: 'p', aspectRatio: '9:16', duration: 6, filenames: ['a.png', 'b.png'],
+    })
+    const gen = calls.find((call) => call.url.includes('image2videofl2va'))
+    assert.ok(gen, '缺少 image2videofl2va 调用')
+    assert.equal(gen.body.aspect, '9:16')
+    assert.equal(gen.body.megapixels, 0.4)
+    assert.equal(gen.body.duration, 6)
+    assert.equal(gen.body.image1, 'a.png')
+    assert.equal(gen.body.image2, 'b.png')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.md 契约：video_composite 多图 → image2videomkr 关键帧（frame_index 整数、末帧 -1）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.mp4')
+    await generateAsset(stubRegistry([], dir), 'video_composite', 'p1', {
+      prompt: 'p', aspectRatio: '16:9', duration: 10, filenames: ['a.png', 'b.png', 'c.png'],
+    })
+    const gen = calls.find((call) => call.url.includes('image2videomkr'))
+    assert.ok(gen, '缺少 image2videomkr 调用')
+    assert.equal(gen.body.duration, 10)
+    assert.equal(gen.body.fps, 30)
+    assert.equal(gen.body.images.length, 3)
+    assert.deepEqual(gen.body.images[0], { image: 'a.png', frame_index: 0 })
+    assert.equal(gen.body.images[1].frame_index, 150)
+    assert.deepEqual(gen.body.images[2], { image: 'c.png', frame_index: -1 })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('api.md 契约：上传表单文件名唯一且不含空格括号（避免后端去重后缀破坏下游）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-generate-'))
+  try {
+    const calls = stubFetch('https://media.example/out.png')
+    await generateAsset(stubRegistry([], dir), 'image_generate', 'p1', { prompt: 'x' })
+    // image_generate 无参考图不上传；直接走 uploadImage 需要参考图下载路径。
+    const { uploadImage } = await import('../lib/generate.js')
+    const filename = await uploadImage('https://ref.example/a.png')
+    assert.match(filename, /^[\w.\-]+$/u, `文件名含不安全字符: ${filename}`)
+    assert.ok(!calls.some((call) => String(call.url).includes('image2videomsr')))
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

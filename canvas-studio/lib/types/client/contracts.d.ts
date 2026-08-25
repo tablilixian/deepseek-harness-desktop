@@ -39,4 +39,12 @@ export interface StudioProjectListInjected {
     steerNode(projectId: string, nodeId: string, prompt: string): Promise<void>;
     /** 打断当前会话的运行中回合（stop 生成）。 */
     cancelCurrentTurn(): Promise<void>;
+    /** P7：拉取某项目的工作流状态进 store（打开项目与审批动作后调用）。 */
+    refreshWorkflow(projectId: string): Promise<void>;
+    /** P7：批准分镜表（awaiting_approval → executing），随后在对话中发送「继续」恢复流程。 */
+    approveStoryboard(projectId: string): Promise<void>;
+    /** P7：驳回分镜表（回到 drafting），agent 需按反馈修改后重新提交。 */
+    rejectStoryboard(projectId: string): Promise<void>;
+    /** P7：切换执行模式（confirm / auto），并同步门禁状态。 */
+    setWorkflowMode(projectId: string, mode: 'confirm' | 'auto'): Promise<void>;
 }

@@ -10,7 +10,8 @@ import { BlockList, isIP } from 'node:net'
 import { extname, join, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
-import type { StudioProject } from './contracts/project.js'
+import type { StudioProject, StudioWorkflowMode } from './contracts/project.js'
+import { normalizeWorkflow } from './contracts/project.js'
 import type { StudioCanvasNode } from './contracts/canvas.js'
 import type { ProjectRegistry } from './projects.js'
 import { generateAsset, type GenerateParams } from './generate.js'
@@ -20,6 +21,7 @@ const ROUTE_PROJECTS = '/canvas-studio/projects'
 const ROUTE_GENERATE = '/canvas-studio/generate'
 const ROUTE_ASSETS = '/canvas-studio/assets'
 const ROUTE_CANVAS = '/canvas-studio/canvas'
+const ROUTE_WORKFLOW = '/canvas-studio/workflow'
 const MAX_BODY_BYTES = 16 * 1024 * 1024
 const MAX_CANVAS_NODES = 2000
 
@@ -450,6 +452,98 @@ export function registerStudioRoutes(ctx: Context, registry: ProjectRegistry): (
       } catch (cause) {
         if (!controller.signal.aborted && !res.destroyed) {
           sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'canvas save failed' })
+        }
+      } finally {
+        stopWatching()
+      }
+    }}),
+
+    // P7: creation-workflow gate face. GET returns a project's workflow
+    // (mode + approval state); POST applies user actions (approve / reject /
+    // setMode) so the approval bar and mode toggle drive the Host-side gate.
+    ctx.webServer.register({ kind: 'exact', path: ROUTE_WORKFLOW, handler: async (req, res) => {
+      if (!requestAllowed(req, expectedPort)) {
+        sendJson(res, 403, { error: 'canvas-studio request authority rejected' })
+        return
+      }
+      if (req.method === 'GET') {
+        const requestUrl = new URL(req.url ?? '/', `http://127.0.0.1:${expectedPort}`)
+        const projectId = requestUrl.searchParams.get('projectId')
+        if (!projectId) {
+          sendJson(res, 400, { error: '缺少 projectId' })
+          return
+        }
+        const project = await registry.getProject(projectId)
+        if (project === null) {
+          sendJson(res, 404, { error: `项目不存在: ${projectId}` })
+          return
+        }
+        if (!res.destroyed) {
+          const workflow = normalizeWorkflow(project.workflow)
+          sendJson(res, 200, { workflow, pendingQuestion: workflow.pendingQuestion ?? null })
+        }
+        return
+      }
+      if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+        sendJson(res, 405, { error: 'workflow changes require a local same-origin POST' })
+        return
+      }
+      const controller = new AbortController()
+      const stopWatching = () => {
+        req.off('aborted', onRequestAbort)
+        res.off('close', onResponseClose)
+      }
+      const onRequestAbort = () => controller.abort()
+      const onResponseClose = () => {
+        if (!res.writableEnded) controller.abort()
+      }
+      req.once('aborted', onRequestAbort)
+      res.once('close', onResponseClose)
+      try {
+        const body = await readJson(req, controller.signal) as {
+          projectId?: unknown
+          action?: unknown
+          mode?: unknown
+          value?: unknown
+        }
+        if (typeof body.projectId !== 'string' || typeof body.action !== 'string') {
+          sendJson(res, 400, { error: '缺少 projectId 或 action' })
+          return
+        }
+        let project
+        if (body.action === 'approve') {
+          project = await registry.updateWorkflow(body.projectId, { state: 'executing' })
+        } else if (body.action === 'reject') {
+          project = await registry.updateWorkflow(body.projectId, { state: 'drafting' })
+        } else if (body.action === 'answer') {
+          if (typeof body.value !== 'string') {
+            sendJson(res, 400, { error: '缺少 value（用户的选择）' })
+            return
+          }
+          await registry.answerPendingQuestion(body.projectId, body.value)
+          // answerPendingQuestion 成功即项目存在。
+          project = (await registry.getProject(body.projectId)) as StudioProject
+        } else if (body.action === 'setMode') {
+          if (body.mode !== 'confirm' && body.mode !== 'auto') {
+            sendJson(res, 400, { error: 'mode 必须是 confirm 或 auto' })
+            return
+          }
+          const patch: { mode: StudioWorkflowMode; state?: 'drafting' | 'executing' } = { mode: body.mode }
+          // 切回逐步确认时，执行中的流程回到澄清态；切到放手跑则解除等待。
+          const current = normalizeWorkflow((await registry.getProject(body.projectId))?.workflow)
+          if (current.state === 'executing') patch.state = body.mode === 'auto' ? 'executing' : 'drafting'
+          if (current.state === 'awaiting_approval' && body.mode === 'auto') patch.state = 'executing'
+          project = await registry.updateWorkflow(body.projectId, patch)
+        } else {
+          sendJson(res, 400, { error: `未知 action: ${body.action}` })
+          return
+        }
+        if (!controller.signal.aborted && !res.destroyed) {
+          sendJson(res, 200, { workflow: normalizeWorkflow(project.workflow) })
+        }
+      } catch (cause) {
+        if (!controller.signal.aborted && !res.destroyed) {
+          sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'workflow update failed' })
         }
       } finally {
         stopWatching()

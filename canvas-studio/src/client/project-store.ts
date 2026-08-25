@@ -21,7 +21,7 @@ import type { StudioCanvasNode, StudioCanvasNodeKind, StudioCanvasView } from '.
 import { VIEW_DEFAULTS } from '../contracts/canvas.js'
 import { clampViewScale, computeArrangeLayout } from '../canvas-view.js'
 import type { StudioCaptureAsset } from '../asset-capture.js'
-import type { StudioProject } from '../contracts/project.js'
+import type { StudioProject, StudioWorkflow } from '../contracts/project.js'
 
 /** Snapshot-history cap (reference: MAX_HISTORY = 20). */
 const MAX_HISTORY = 20
@@ -80,6 +80,8 @@ export interface ProjectStoreState {
   nodes: Readonly<Record<string, readonly StudioCanvasNode[]>>
   /** 每个项目的视口/面板状态（缩放、平移、图层与小地图开关）。 */
   views: Readonly<Record<string, ProjectViewEntry>>
+  /** P7：每个项目的创作工作流（模式 + 审批门禁状态）。 */
+  workflows: Readonly<Record<string, StudioWorkflow>>
   /** Undo/redo snapshot history (global, entries carry their project). */
   history: HistoryEntry[]
   historyIndex: number
@@ -101,6 +103,8 @@ export type ProjectStoreActions = {
    * 来自磁盘（未保存过时客户端应先适配内容一次）。
    */
   setView: (draft: ProjectStoreState, projectId: string, patch: Partial<StudioCanvasView>, saved?: boolean) => void
+  /** P7：写入某项目的工作流状态（打开项目 / 审批动作后调用）。 */
+  setWorkflow: (draft: ProjectStoreState, projectId: string, workflow: StudioWorkflow) => void
   /** 捕获一条 agent 资产 → 自动布局 + 血缘链接后写入节点列表。 */
   addAsset: (draft: ProjectStoreState, projectId: string, asset: StudioCaptureAsset) => void
   /** 选中节点（ctrl/cmd 追加多选；null 清空）。 */
@@ -242,8 +246,9 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
       phase: 'idle',
       error: null,
       creating: false,
-      nodes: {},
-      views: {},
+       nodes: {},
+       views: {},
+       workflows: {},
       history: [],
       historyIndex: -1,
       clipboard: [],
@@ -287,6 +292,9 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
             saved: saved ?? current.saved,
           },
         }
+      },
+      setWorkflow: (draft, projectId, workflow) => {
+        draft.workflows = { ...draft.workflows, [projectId]: workflow }
       },
       addAsset: (draft, projectId, asset) => {
         const existing = draft.nodes[projectId] ?? []

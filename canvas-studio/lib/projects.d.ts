@@ -1,4 +1,4 @@
-import type { StudioProject } from './contracts/project.js';
+import type { StudioPendingQuestion, StudioProject, StudioWorkflow } from './contracts/project.js';
 import type { StudioCanvasDocument, StudioCanvasNode, StudioCanvasView } from './contracts/canvas.js';
 /**
  * Reject names that cannot round-trip through the registry or the filesystem.
@@ -71,6 +71,25 @@ export declare class ProjectRegistry {
      * @param projectId - target project id.
      */
     removeProject(projectId: string): Promise<void>;
+    /**
+     * Read one project record (with its P7 workflow defaulted when absent).
+     * @returns the record, or null when the id is unknown.
+     */
+    getProject(projectId: string): Promise<StudioProject | null>;
+    /**
+     * Patch a project's P7 workflow (mode / gate state) and persist the
+     * registry atomically. Returns the updated record.
+     */
+    updateWorkflow(projectId: string, patch: Partial<StudioWorkflow>): Promise<StudioProject>;
+    /**
+     * 写入 / 清除项目的待回答问题（ask_user_choice 工具与 answer 动作使用）。
+     */
+    setPendingQuestion(projectId: string, question: StudioPendingQuestion | null): Promise<void>;
+    /**
+     * 记录用户对当前问题的选择（画布点选卡片 → workflow 路由调用）。
+     * ask_user_choice 工具轮询读到后负责清空。
+     */
+    answerPendingQuestion(projectId: string, value: string): Promise<void>;
     private readRegistry;
     private writeRegistry;
 }

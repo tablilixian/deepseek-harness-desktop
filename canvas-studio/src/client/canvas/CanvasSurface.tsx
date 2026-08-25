@@ -57,6 +57,8 @@ export interface CanvasSurfaceProps {
   onLinkLayers(sourceIds: string[], targetId: string): void
   /** Inline rename commit. */
   onRename(id: string, title: string): void
+  /** 双击节点：打开详情 / 编辑面板。 */
+  onNodeOpenDetail(node: StudioCanvasNode): void
   /** Context menu request (rendered by the frame). */
   onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void
   /** When set, center this node in the viewport (timeline / review jump). */
@@ -106,6 +108,7 @@ export const CanvasSurface = forwardRef<CanvasSurfaceHandle, CanvasSurfaceProps>
     onRedo,
     onLinkLayers,
     onRename,
+    onNodeOpenDetail,
     onContextMenu,
     focusNodeId,
     minimapVisible = true,
@@ -435,6 +438,7 @@ export const CanvasSurface = forwardRef<CanvasSurfaceHandle, CanvasSurfaceProps>
             onResizePointerDown={onResizePointerDown}
             onLinkPointerDown={onLinkPointerDown}
             onRenameSubmit={onRename}
+            onOpenDetail={onNodeOpenDetail}
             onContextMenu={onContextMenu}
           />
         ))}

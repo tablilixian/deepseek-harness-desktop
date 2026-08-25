@@ -20,6 +20,12 @@ window.__ModuleLoader__.load({
 		function isStudioTool(name) {
 			return Object.prototype.hasOwnProperty.call(STUDIO_TOOL_KINDS, name);
 		}
+		/**
+		* P7 工作流工具：结果会改变审批门禁状态 / 落分镜表节点 / 弹出点选问题。
+		* 它们不产生媒体产物（不放占位节点），但 tool/call 与 tool/result 后客户端
+		* 必须刷新工作流状态与画布，否则审批条与点选卡片永远不出现。
+		*/
+		const WORKFLOW_TOOLS = /* @__PURE__ */ new Set(["submit_storyboard_for_approval", "ask_user_choice"]);
 		/** 从 tool/call 的 arguments 字段解析出参考图 URL（video 工具的 imageUrl）。 */
 		function sourceUrlFromArguments(value) {
 			if (value === void 0 || value === null) return void 0;
@@ -41,10 +47,12 @@ window.__ModuleLoader__.load({
 		function createAssetCaptureDefinition(hooks) {
 			const onToolCall = hooks.onToolCall ?? (() => {});
 			const onToolError = hooks.onToolError ?? (() => {});
+			const onToolFinished = hooks.onToolFinished ?? (() => {});
+			const onWorkflowToolStarted = hooks.onWorkflowToolStarted ?? (() => {});
 			const match = (event) => {
 				if (event.type === "tool/call") {
 					const data = event.data;
-					if (isStudioTool(data.name)) return {
+					if (isStudioTool(data.name) || WORKFLOW_TOOLS.has(data.name)) return {
 						id: String(data.callId),
 						role: "start"
 					};
@@ -67,23 +75,33 @@ window.__ModuleLoader__.load({
 					const data = startMatch.event.data;
 					const toolName = data.name;
 					const rawArguments = typeof data.arguments === "string" ? data.arguments : "";
-					const projectId = hooks.getSelectedProjectId();
-					if (projectId !== null) onToolCall(projectId, {
-						toolName,
-						runId: String(data.callId),
-						kind: STUDIO_TOOL_KINDS[toolName],
-						arguments: rawArguments
-					});
+					const kind = WORKFLOW_TOOLS.has(toolName) ? "workflow" : STUDIO_TOOL_KINDS[toolName];
+					if (kind === "workflow") {
+						const projectId = hooks.getSelectedProjectId();
+						if (projectId !== null) onWorkflowToolStarted(projectId, toolName);
+					} else {
+						const projectId = hooks.getSelectedProjectId();
+						if (projectId !== null) onToolCall(projectId, {
+							toolName,
+							runId: String(data.callId),
+							kind,
+							arguments: rawArguments
+						});
+					}
 					return {
 						toolName,
 						sourceUrl: sourceUrlFromArguments(data.arguments) ?? "",
-						kind: STUDIO_TOOL_KINDS[toolName]
+						kind
 					};
 				},
 				update: (context, updateMatch) => {
 					const state = context.state;
 					const projectId = hooks.getSelectedProjectId();
 					if (updateMatch.event.type === "tool/result" && projectId !== null) {
+						if (state.kind === "workflow") {
+							onToolFinished(projectId, state.toolName);
+							return state;
+						}
 						const data = updateMatch.event.data;
 						if (data.error !== void 0) {
 							const error = data.error;
@@ -97,14 +115,45 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/contracts/project.ts
+		/** 旧记录 / 新建项目的默认工作流。 */
+		const WORKFLOW_DEFAULT = {
+			mode: "confirm",
+			state: "drafting"
+		};
+		/**
+		* Leniently coerce an unknown parsed workflow into a safe value; invalid or
+		* missing fields degrade to their defaults (registry records may predate P7).
+		*/
+		function normalizeWorkflow(value) {
+			if (value === null || typeof value !== "object" || Array.isArray(value)) return { ...WORKFLOW_DEFAULT };
+			const record = value;
+			const workflow = {
+				mode: record.mode === "auto" ? "auto" : "confirm",
+				state: record.state === "awaiting_approval" || record.state === "executing" ? record.state : "drafting"
+			};
+			const pending = record.pendingQuestion;
+			if (pending !== null && pending !== void 0 && typeof pending === "object" && !Array.isArray(pending)) {
+				const question = pending;
+				workflow.pendingQuestion = {
+					id: typeof question.id === "string" ? question.id : "",
+					question: typeof question.question === "string" ? question.question : "",
+					options: Array.isArray(question.options) ? question.options.map(String) : [],
+					...question.allowFreeText === true ? { allowFreeText: true } : {},
+					...typeof question.answer === "string" ? { answer: question.answer } : {}
+				};
+			}
+			return workflow;
+		}
+		//#endregion
 		//#region src/contracts/canvas.ts
 		/** Viewport defaults used when a document predates v3 or a field is invalid. */
 		const VIEW_DEFAULTS = {
 			x: 0,
 			y: 0,
 			scale: 1,
-			layersOpen: true,
-			minimapVisible: true
+			layersOpen: false,
+			minimapVisible: false
 		};
 		//#endregion
 		//#region src/canvas-view.ts
@@ -246,6 +295,42 @@ window.__ModuleLoader__.load({
 				body: JSON.stringify({ id }),
 				...signal === void 0 ? {} : { signal }
 			}));
+		}
+		/** P7：读某项目的创作工作流（模式 + 审批门禁状态），缺失字段降级为默认值。 */
+		async function getStudioWorkflow(projectId, signal) {
+			return normalizeWorkflow((await readJson(await fetch(`/canvas-studio/workflow?projectId=${encodeURIComponent(projectId)}`, {
+				cache: "no-store",
+				...signal === void 0 ? {} : { signal }
+			}))).workflow);
+		}
+		/** P7：工作流动作（批准 / 驳回 / 切换模式），返回更新后的工作流。 */
+		async function postStudioWorkflowAction(projectId, action, mode, signal) {
+			return normalizeWorkflow((await readJson(await fetch("/canvas-studio/workflow", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(mode === void 0 ? {
+					projectId,
+					action
+				} : {
+					projectId,
+					action,
+					mode
+				}),
+				...signal === void 0 ? {} : { signal }
+			}))).workflow);
+		}
+		/** P7 点选式澄清：提交用户对当前问题的选择，返回更新后的工作流（问题已带答案）。 */
+		async function answerStudioQuestion(projectId, value, signal) {
+			return normalizeWorkflow((await readJson(await fetch("/canvas-studio/workflow", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					projectId,
+					action: "answer",
+					value
+				}),
+				...signal === void 0 ? {} : { signal }
+			}))).workflow);
 		}
 		/**
 		* 把历史节点里写死的 `http://127.0.0.1:<port>/canvas-studio/...` 绝对 URL 归一化为
@@ -482,6 +567,7 @@ window.__ModuleLoader__.load({
 					creating: false,
 					nodes: {},
 					views: {},
+					workflows: {},
 					history: [],
 					historyIndex: -1,
 					clipboard: []
@@ -537,6 +623,12 @@ window.__ModuleLoader__.load({
 								},
 								saved: saved ?? current.saved
 							}
+						};
+					},
+					setWorkflow: (draft, projectId, workflow) => {
+						draft.workflows = {
+							...draft.workflows,
+							[projectId]: workflow
 						};
 					},
 					addAsset: (draft, projectId, asset) => {
@@ -971,6 +1063,141 @@ window.__ModuleLoader__.load({
   height: 100%;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
+}
+
+/* P7 创作工作流条：模式开关 + 审批提示，位于工具栏与画布之间。 */
+.csWorkflowBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-l1);
+}
+
+.csWorkflowMode {
+  display: inline-flex;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.csWorkflowMode button {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.csWorkflowMode button + button {
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+.csWorkflowMode button.csActive {
+  background: var(--dsw-alias-bg-l3);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csWorkflowState {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csWorkflowApproval {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.csWorkflowApproval .csWorkflowMessage {
+  font-size: 12px;
+  color: var(--dsw-alias-label-warning, var(--dsw-alias-label-primary));
+}
+
+.csWorkflowApproval button {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.csWorkflowApproval button.csPrimary {
+  background: var(--dsw-alias-bg-l3);
+}
+
+/* P7 点选式澄清卡片：ask_user_choice 弹出的选择题。 */
+.csQuestionCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-l1);
+}
+
+.csQuestionLabel {
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.csQuestionOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.csQuestionOptions button {
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.csQuestionOptions button:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-l3);
+}
+
+.csQuestionOptions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csQuestionOther {
+  opacity: 0.75;
+}
+
+.csQuestionFree {
+  display: flex;
+  gap: 6px;
+}
+
+.csQuestionFree input {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csQuestionFree button {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
 }
 
 .csProjects {
@@ -2695,9 +2922,10 @@ img.csNodeMedia {
 		* nodes are filtered by the surface.
 		*/
 		function CanvasNode(props) {
-			const { node, selected, onNodePointerDown, onResizePointerDown, onLinkPointerDown, onRenameSubmit, onContextMenu } = props;
+			const { node, selected, onNodePointerDown, onResizePointerDown, onLinkPointerDown, onRenameSubmit, onOpenDetail, onContextMenu } = props;
 			const [editingTitle, setEditingTitle] = (0, react.useState)(false);
 			const [titleInput, setTitleInput] = (0, react.useState)("");
+			const [mediaFailed, setMediaFailed] = (0, react.useState)(false);
 			const isMedia = node.kind === "image" || node.kind === "video";
 			const isGroup = node.kind === "group";
 			const opacity = node.opacity ?? 1;
@@ -2722,8 +2950,7 @@ img.csNodeMedia {
 			const handleDoubleClick = (event) => {
 				event.stopPropagation();
 				if (node.locked) return;
-				setTitleInput(node.title ?? "");
-				setEditingTitle(true);
+				onOpenDetail(node);
 			};
 			const handleRenameSubmit = () => {
 				setEditingTitle(false);
@@ -2761,21 +2988,34 @@ img.csNodeMedia {
 							children: node.title ?? "分组"
 						})
 					}) : null,
-					isMedia && node.url !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					isMedia && node.url !== void 0 && !mediaFailed ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: "csNodeMediaBox",
 						style: flipTransform ? { transform: flipTransform } : void 0,
 						children: node.kind === "image" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
 							className: "csNodeMedia",
 							src: node.url,
 							alt: node.title ?? "image",
-							draggable: false
+							draggable: false,
+							onError: () => {
+								setMediaFailed(true);
+							}
 						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
 							className: "csNodeMedia",
 							src: node.url,
 							controls: true,
-							preload: "metadata"
+							preload: "metadata",
+							onError: () => {
+								setMediaFailed(true);
+							}
 						})
 					}) : null,
+					isMedia && mediaFailed && node.isLoading !== true && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csNodeText",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							className: "csNodeBadge csNodeBadgeError",
+							children: ["媒体加载失败：", node.title ?? node.kind]
+						})
+					}),
 					node.kind === "sticky" || node.kind === "text" || node.kind === "prompt" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: "csNodeText",
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -2974,7 +3214,7 @@ img.csNodeMedia {
 		* undo/redo, Ctrl/Cmd+A selects all, Escape clears the selection.
 		*/
 		const CanvasSurface = (0, react.forwardRef)(function CanvasSurface(props, ref) {
-			const { nodes, view, onViewChange, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onContextMenu, focusNodeId, minimapVisible = true } = props;
+			const { nodes, view, onViewChange, selectedNodeIds, onSelectNode, onSelectAllNodes, onMoveNode, onUpdateNode, onBeginEdit, onPersist, onRemoveNodes, onCopy, onPaste, onUndo, onRedo, onLinkLayers, onRename, onNodeOpenDetail, onContextMenu, focusNodeId, minimapVisible = true } = props;
 			const [guides, setGuides] = (0, react.useState)({
 				vertical: [],
 				horizontal: []
@@ -3334,6 +3574,7 @@ img.csNodeMedia {
 							onResizePointerDown,
 							onLinkPointerDown,
 							onRenameSubmit: onRename,
+							onOpenDetail: onNodeOpenDetail,
 							onContextMenu
 						}, node.id)),
 						linkLine !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("svg", {
@@ -3970,7 +4211,7 @@ img.csNodeMedia {
 		* bloodline edges; the timeline lets the user review and jump to any node.
 		*/
 		function StudioFrame(props) {
-			const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, retryNode, steerNode, cancelCurrentTurn, actions } = props;
+			const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, retryNode, steerNode, cancelCurrentTurn, approveStoryboard, rejectStoryboard, setWorkflowMode, actions } = props;
 			const projects = useStudio((store) => store.projects);
 			const selectedProjectId = useStudio((store) => store.selectedProjectId);
 			const selectedNodeId = useStudio((store) => store.selectedNodeId);
@@ -3984,6 +4225,7 @@ img.csNodeMedia {
 			const historyLength = useStudio((store) => store.history.length);
 			const viewEntry = useStudio((store) => viewOf(store, store.selectedProjectId));
 			const view = viewEntry.view;
+			const workflow = useStudio((store) => store.selectedProjectId === null ? void 0 : store.workflows[store.selectedProjectId]);
 			const [focusNodeId, setFocusNodeId] = (0, react.useState)(null);
 			const [detailOpen, setDetailOpen] = (0, react.useState)(false);
 			const surfaceRef = (0, react.useRef)(null);
@@ -4088,6 +4330,21 @@ img.csNodeMedia {
 				setFocusNodeId(id);
 				setDetailOpen(false);
 			};
+			const handleApprove = () => {
+				if (projectId !== null) approveStoryboard(projectId).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "批准失败");
+				});
+			};
+			const handleReject = () => {
+				if (projectId !== null) rejectStoryboard(projectId).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "驳回失败");
+				});
+			};
+			const handleSetMode = (mode) => {
+				if (projectId !== null) setWorkflowMode(projectId, mode).catch((cause) => {
+					actions.setFailed(cause instanceof Error ? cause.message : "模式切换失败");
+				});
+			};
 			const canvasBody = (() => {
 				if (projectId === null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: "csCanvasEmpty",
@@ -4128,6 +4385,10 @@ img.csNodeMedia {
 							persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
 						},
 						onRename: handleRename,
+						onNodeOpenDetail: (node) => {
+							actions.selectNode(node.id);
+							setDetailOpen(true);
+						},
 						onContextMenu: (node, x, y) => {
 							setMenu({
 								node,
@@ -4187,53 +4448,109 @@ img.csNodeMedia {
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
 						className: "csCanvas",
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasToolbar, {
-							canUndo: historyIndex >= 0,
-							canRedo: historyIndex + 1 < historyLength,
-							selectedCount: selectedNodeIds.length,
-							hasSelection: selectedNodeIds.length > 0,
-							onUndo: handleUndo,
-							onRedo: handleRedo,
-							onDelete: () => {
-								handleDelete(selectedNodeIds);
-							},
-							onGroup: () => {
-								if (projectId !== null) persistAfter(() => actions.groupSelected(projectId));
-							},
-							onUngroup: () => {
-								if (selectedNode !== null && selectedNode.kind === "group" && projectId !== null) persistAfter(() => actions.ungroup(projectId, selectedNode.id));
-							},
-							onAutoArrange: () => {
-								if (projectId === null) return;
-								persistAfter(() => actions.autoArrange(projectId));
-								fitPendingRef.current = true;
-								setFitRequestedAt(Date.now());
-							},
-							onAddNode: (kind) => {
-								if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
-							},
-							layersOpen: view.layersOpen,
-							onToggleLayers: () => {
-								handleViewChange({ layersOpen: !view.layersOpen });
-							},
-							scale: view.scale,
-							onZoomOut: () => {
-								surfaceRef.current?.zoomBy(1 / ZOOM_STEP);
-							},
-							onZoomIn: () => {
-								surfaceRef.current?.zoomBy(ZOOM_STEP);
-							},
-							onFitContent: () => {
-								surfaceRef.current?.fitToContent();
-							},
-							onResetZoom: () => {
-								surfaceRef.current?.resetZoom();
-							},
-							minimapVisible: view.minimapVisible,
-							onToggleMinimap: () => {
-								handleViewChange({ minimapVisible: !view.minimapVisible });
-							}
-						}), canvasBody]
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasToolbar, {
+								canUndo: historyIndex >= 0,
+								canRedo: historyIndex + 1 < historyLength,
+								selectedCount: selectedNodeIds.length,
+								hasSelection: selectedNodeIds.length > 0,
+								onUndo: handleUndo,
+								onRedo: handleRedo,
+								onDelete: () => {
+									handleDelete(selectedNodeIds);
+								},
+								onGroup: () => {
+									if (projectId !== null) persistAfter(() => actions.groupSelected(projectId));
+								},
+								onUngroup: () => {
+									if (selectedNode !== null && selectedNode.kind === "group" && projectId !== null) persistAfter(() => actions.ungroup(projectId, selectedNode.id));
+								},
+								onAutoArrange: () => {
+									if (projectId === null) return;
+									persistAfter(() => actions.autoArrange(projectId));
+									fitPendingRef.current = true;
+									setFitRequestedAt(Date.now());
+								},
+								onAddNode: (kind) => {
+									if (projectId !== null) persistAfter(() => actions.addNode(projectId, kind));
+								},
+								layersOpen: view.layersOpen,
+								onToggleLayers: () => {
+									handleViewChange({ layersOpen: !view.layersOpen });
+								},
+								scale: view.scale,
+								onZoomOut: () => {
+									surfaceRef.current?.zoomBy(1 / ZOOM_STEP);
+								},
+								onZoomIn: () => {
+									surfaceRef.current?.zoomBy(ZOOM_STEP);
+								},
+								onFitContent: () => {
+									surfaceRef.current?.fitToContent();
+								},
+								onResetZoom: () => {
+									surfaceRef.current?.resetZoom();
+								},
+								minimapVisible: view.minimapVisible,
+								onToggleMinimap: () => {
+									handleViewChange({ minimapVisible: !view.minimapVisible });
+								}
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csWorkflowBar",
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: "csWorkflowMode",
+										role: "group",
+										"aria-label": "执行模式",
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: workflow?.mode !== "auto" ? "csActive" : "",
+											onClick: () => {
+												handleSetMode("confirm");
+											},
+											children: "逐步确认"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+											type: "button",
+											className: workflow?.mode === "auto" ? "csActive" : "",
+											onClick: () => {
+												handleSetMode("auto");
+											},
+											children: "放手跑"
+										})]
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csWorkflowState",
+										children: workflow?.state === "awaiting_approval" ? "等待批准" : workflow?.state === "executing" ? "制作中" : "需求沟通中"
+									}),
+									workflow?.state === "awaiting_approval" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: "csWorkflowApproval",
+										children: [
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: "csWorkflowMessage",
+												children: "分镜表已提交到画布，请确认后批准"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+												type: "button",
+												className: "csPrimary",
+												onClick: handleApprove,
+												children: "批准并开始制作"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: handleReject,
+												children: "驳回，继续修改"
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: "csWorkflowState",
+												children: "批准后在对话中发送「继续」恢复流程"
+											})
+										]
+									})
+								]
+							}),
+							canvasBody
+						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
 						className: "csChat",
@@ -4314,6 +4631,162 @@ img.csNodeMedia {
 					})
 				]
 			});
+		}
+		//#endregion
+		//#region src/client/question-capture.tsx
+		/**
+		* P7 点选式澄清的对话区内联卡片：conversationEvents 定义把 ask_user_choice
+		* 的 tool/call 组装成 `canvas-studio-question` 聊天节点，渲染器注册进上游
+		* `conversation.chat.node` keyed seat —— 问题与选项按钮直接出现在对话流里，
+		* 用户点选后答案回流给模型（Host 工具轮询 pendingQuestion）。
+		*
+		* 仅客户端使用（JSX + 框架类型），不进 Host tsc 产物。
+		*/
+		/** 从 tool/call 参数解析问题（arguments 是 JSON 字符串）。 */
+		function parseQuestionArguments(raw) {
+			let parsed;
+			try {
+				parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+			} catch {
+				parsed = null;
+			}
+			const record = parsed ?? {};
+			return {
+				question: typeof record.question === "string" ? record.question : "（问题解析失败）",
+				options: Array.isArray(record.options) ? record.options.map(String) : [],
+				allowFreeText: record.allowFreeText === true
+			};
+		}
+		/** 从 renderTextResult 的文本块提取结算说明。 */
+		function extractResultNote(blocks) {
+			if (!Array.isArray(blocks)) return "已结算";
+			for (const block of blocks) if (block !== null && typeof block === "object" && block.type === "text") {
+				const text = block.text;
+				if (typeof text === "string" && text.length > 0) return text;
+			}
+			return "已结算";
+		}
+		/** 对话区内联点选卡片渲染器。 */
+		const QuestionNodeView = (0, react.memo)(function QuestionNodeView(props) {
+			const { node, hooks } = props;
+			const data = node.data;
+			const settled = data.answer !== null || data.note !== null;
+			const handleAnswer = (value) => {
+				if (settled) return;
+				const projectId = hooks.getSelectedProjectId();
+				if (projectId !== null) hooks.onAnswer(projectId, value);
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: "csQuestionCard",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: "csQuestionLabel",
+						children: data.question
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: "csQuestionOptions",
+						children: data.options.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							disabled: settled,
+							onClick: () => {
+								handleAnswer(option);
+							},
+							children: option
+						}, option))
+					}),
+					settled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: "csWorkflowState",
+						children: data.answer !== null ? `已选择：${data.answer}` : data.note
+					})
+				]
+			});
+		});
+		/**
+		* 创建 ask_user_choice 的对话节点定义（纯事件组装；渲染交互见 QuestionNodeView）。
+		* @returns 注册进 `ctx.conversationEvents` 的 definition。
+		*/
+		function createQuestionCaptureDefinition() {
+			return {
+				kind: "canvas-studio-question",
+				target: "chat",
+				match(event) {
+					if (event.type === "tool/call") {
+						const data = event.data;
+						if (data.name === "ask_user_choice") return {
+							id: String(data.callId),
+							role: "start"
+						};
+						return null;
+					}
+					if (event.type === "tool/result") {
+						const source = event.data.message.source;
+						return {
+							id: String(source.callId),
+							role: "update"
+						};
+					}
+					return null;
+				},
+				start: (_context, startMatch) => {
+					const data = startMatch.event.data;
+					return {
+						...parseQuestionArguments(data.arguments),
+						answer: null,
+						note: null
+					};
+				},
+				update: (context, updateMatch) => {
+					if (updateMatch.event.type !== "tool/result") return context.state;
+					const data = updateMatch.event.data;
+					if (data.error !== void 0) {
+						const message = typeof data.error === "string" ? data.error : "提问已取消";
+						return {
+							...context.state,
+							note: message
+						};
+					}
+					return {
+						...context.state,
+						note: extractResultNote(data.message?.content)
+					};
+				},
+				buildViewNode: (context) => {
+					const state = context.state;
+					if (state === void 0) return null;
+					const anchorSeq = context.start?.event.seq ?? context.matches[0]?.event.seq ?? 0;
+					const location = context.start?.location ?? context.matches[0]?.location ?? { kind: "unresolved" };
+					return {
+						key: context.key,
+						kind: "canvas-studio-question",
+						id: context.id,
+						target: "chat",
+						anchorSeq,
+						location,
+						visibility: "visible",
+						data: state
+					};
+				}
+			};
+		}
+		/**
+		* 注册对话区点选卡片：definition（事件组装）+ 渲染器（keyed seat）。
+		* @param ctx - active client context。
+		* @param hooks - 与 apply 世界的接线。
+		* @returns 注销函数。
+		*/
+		function registerQuestionChatNode(ctx, hooks) {
+			const disposeDefinition = ctx.conversationEvents.register(createQuestionCaptureDefinition());
+			const disposeRenderer = ctx.slots.inject("conversation.chat.node", () => ctx.slots.register({
+				name: "conversation.chat.node",
+				key: "canvas-studio-question"
+			}, ((props) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(QuestionNodeView, {
+				...props,
+				hooks
+			}))));
+			return () => {
+				disposeRenderer();
+				disposeDefinition();
+			};
 		}
 		//#endregion
 		//#region src/client/index.ts
@@ -4438,8 +4911,37 @@ img.csNodeMedia {
 				(async () => {
 					try {
 						applyLoadedCanvas(id, await loadStudioCanvas(id));
+						refreshWorkflow(id);
 					} catch {}
 				})();
+			};
+			const PENDING_TIMEOUT_MS = 66e4;
+			const pendingTimers = /* @__PURE__ */ new Map();
+			const clearPendingTimer = (runId) => {
+				const timer = pendingTimers.get(runId);
+				if (timer !== void 0) {
+					clearTimeout(timer);
+					pendingTimers.delete(runId);
+				}
+			};
+			const refreshWorkflow = async (projectId) => {
+				try {
+					storeInstance.actions.setWorkflow(projectId, await getStudioWorkflow(projectId));
+				} catch {}
+			};
+			const applyWorkflowAction = async (projectId, action) => {
+				const workflow = await postStudioWorkflowAction(projectId, action);
+				storeInstance.actions.setWorkflow(projectId, workflow);
+			};
+			const approveStoryboard = (projectId) => applyWorkflowAction(projectId, "approve");
+			const rejectStoryboard = (projectId) => applyWorkflowAction(projectId, "reject");
+			const setWorkflowMode = async (projectId, mode) => {
+				const workflow = await postStudioWorkflowAction(projectId, "setMode", mode);
+				storeInstance.actions.setWorkflow(projectId, workflow);
+			};
+			const answerQuestion = async (projectId, value) => {
+				const workflow = await answerStudioQuestion(projectId, value);
+				storeInstance.actions.setWorkflow(projectId, workflow);
 			};
 			ctx.effect(() => installStudioStyles(), "canvas-studio: studio styles");
 			ctx.effect(() => {
@@ -4451,6 +4953,18 @@ img.csNodeMedia {
 				return ctx.conversationEvents.register(createAssetCaptureDefinition({
 					reloadCanvas,
 					getSelectedProjectId: () => resolveActiveProjectId(),
+					onToolFinished: (projectId) => {
+						reloadCanvas(projectId);
+						refreshWorkflow(projectId);
+					},
+					onWorkflowToolStarted: (projectId) => {
+						setTimeout(() => {
+							refreshWorkflow(projectId);
+						}, 600);
+						setTimeout(() => {
+							refreshWorkflow(projectId);
+						}, 2500);
+					},
 					onToolCall: (projectId, info) => {
 						if (storeInstance.getSnapshot().projects.find((entry) => entry.id === projectId) === void 0) return;
 						const index = (storeInstance.getSnapshot().nodes[projectId] ?? []).length;
@@ -4471,8 +4985,14 @@ img.csNodeMedia {
 							isLoading: true,
 							progress: 0
 						});
+						const timer = setTimeout(() => {
+							pendingTimers.delete(info.runId);
+							storeInstance.actions.markPendingError(projectId, info.runId, "生成超时：等待产物超过上限。请在画布右键该节点选择「重试」，或在对话中让 agent 重新生成。");
+						}, PENDING_TIMEOUT_MS);
+						pendingTimers.set(info.runId, timer);
 					},
 					onToolError: (projectId, runId, message) => {
+						clearPendingTimer(runId);
 						storeInstance.actions.markPendingError(projectId, runId, message);
 					}
 				}));
@@ -4481,6 +5001,12 @@ img.csNodeMedia {
 				syncActiveProject();
 				return ctx.workspaces.list.subscribe(syncActiveProject);
 			}, "canvas-studio: sync canvas to active workspace");
+			ctx.effect(() => registerQuestionChatNode(ctx, {
+				getSelectedProjectId: () => resolveActiveProjectId(),
+				onAnswer: (projectId, value) => {
+					answerQuestion(projectId, value).catch(() => {});
+				}
+			}), "canvas-studio: question chat node");
 			const cancelCurrentTurn = async () => {
 				const current = ctx.sessions.list.getSnapshot().current;
 				if (current === void 0) return;
@@ -4544,6 +5070,7 @@ img.csNodeMedia {
 								ctx.workspaces.startSession(workspace.workspaceId);
 								const loaded = await loadStudioCanvas(project.id);
 								applyLoadedCanvas(project.id, loaded);
+								refreshWorkflow(project.id);
 								if (devSeed && loaded.nodes.length === 0) {
 									const seeded = seedNodes();
 									storeInstance.actions.setNodes(project.id, seeded);
@@ -4588,6 +5115,10 @@ img.csNodeMedia {
 							retryNode,
 							steerNode,
 							cancelCurrentTurn,
+							refreshWorkflow,
+							approveStoryboard,
+							rejectStoryboard,
+							setWorkflowMode,
 							hooks: { studio: storeInstance }
 						};
 					}

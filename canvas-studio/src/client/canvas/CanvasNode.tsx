@@ -55,6 +55,8 @@ export interface CanvasNodeProps {
   onLinkPointerDown(event: React.PointerEvent, node: StudioCanvasNode): void
   /** Commit an inline rename. */
   onRenameSubmit(id: string, title: string): void
+  /** 双击节点：打开详情 / 编辑面板（验收反馈的「重新编辑窗口」入口）。 */
+  onOpenDetail(node: StudioCanvasNode): void
   /** Request the context menu at screen coordinates. */
   onContextMenu(node: StudioCanvasNode, clientX: number, clientY: number): void
 }
@@ -74,9 +76,11 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
  * nodes are filtered by the surface.
  */
 export function CanvasNode(props: CanvasNodeProps) {
-  const { node, selected, onNodePointerDown, onResizePointerDown, onLinkPointerDown, onRenameSubmit, onContextMenu } = props
+  const { node, selected, onNodePointerDown, onResizePointerDown, onLinkPointerDown, onRenameSubmit, onOpenDetail, onContextMenu } = props
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleInput, setTitleInput] = useState('')
+  // 媒体加载失败兜底（验收反馈的「黑图」：URL 失效/产物损坏时不再静默黑块）。
+  const [mediaFailed, setMediaFailed] = useState(false)
 
   const isMedia = node.kind === 'image' || node.kind === 'video'
   const isGroup = node.kind === 'group'
@@ -106,8 +110,7 @@ export function CanvasNode(props: CanvasNodeProps) {
   const handleDoubleClick = (event: React.MouseEvent): void => {
     event.stopPropagation()
     if (node.locked) return
-    setTitleInput(node.title ?? '')
-    setEditingTitle(true)
+    onOpenDetail(node)
   }
 
   const handleRenameSubmit = (): void => {
@@ -145,15 +148,36 @@ export function CanvasNode(props: CanvasNodeProps) {
           </div>
         )
         : null}
-      {isMedia && node.url !== undefined
+      {isMedia && node.url !== undefined && !mediaFailed
         ? (
           <div className="csNodeMediaBox" style={flipTransform ? { transform: flipTransform } : undefined}>
             {node.kind === 'image'
-              ? <img className="csNodeMedia" src={node.url} alt={node.title ?? 'image'} draggable={false} />
-              : <video className="csNodeMedia" src={node.url} controls preload="metadata" />}
+              ? (
+                <img
+                  className="csNodeMedia"
+                  src={node.url}
+                  alt={node.title ?? 'image'}
+                  draggable={false}
+                  onError={() => { setMediaFailed(true) }}
+                />
+              )
+              : (
+                <video
+                  className="csNodeMedia"
+                  src={node.url}
+                  controls
+                  preload="metadata"
+                  onError={() => { setMediaFailed(true) }}
+                />
+              )}
           </div>
         )
         : null}
+      {isMedia && mediaFailed && node.isLoading !== true && (
+        <div className="csNodeText">
+          <span className="csNodeBadge csNodeBadgeError">媒体加载失败：{node.title ?? node.kind}</span>
+        </div>
+      )}
       {node.kind === 'sticky' || node.kind === 'text' || node.kind === 'prompt'
         ? (
           <div className="csNodeText">

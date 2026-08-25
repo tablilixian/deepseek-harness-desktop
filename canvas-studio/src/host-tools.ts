@@ -7,10 +7,14 @@
  * 目录），再调用 Host 的 `generateAsset` —— 外部 API 调用与落盘都在 Host 完成，
  * 既规避浏览器 CORS，也避免跨进程 HTTP 往返。
  */
+import { randomUUID } from 'node:crypto'
 import { sep } from 'node:path'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ProjectRegistry } from './projects.js'
+import { normalizeWorkflow } from './contracts/project.js'
+import type { StudioCanvasNode } from './contracts/canvas.js'
+import { newAssetId } from './config.js'
 import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, type GenerateParams, type GenerateResult } from './generate.js'
 
 /** 产物结果 schema（工具返回给模型的结构）。 */
@@ -85,15 +89,38 @@ function runGeneration(
   signal: AbortSignal,
   cwd: string | undefined,
 ): Promise<GenerateResult> {
-  return resolveProjectId(registry, cwd).then((projectId) =>
-    generateAsset(registry, tool, projectId, params, signal))
+  return resolveProjectId(registry, cwd).then(async (projectId) => {
+    // P7 硬门禁：逐步确认模式下，分镜/视频生成必须先经 submit_storyboard_for_approval
+    // 获得用户批准（state=executing）。放手跑模式（auto）不受限。门禁只约束 agent 的
+    // 工具调用；画布上用户手动发起的节点重试走 /generate 路由，不经此处。
+    const workflow = normalizeWorkflow((await registry.getProject(projectId))?.workflow)
+    if (GATED_TOOLS.has(tool) && workflow.mode === 'confirm' && workflow.state !== 'executing') {
+      throw new Error(workflow.state === 'awaiting_approval'
+        ? '分镜表正在等待用户批准（画布上方审批条）。请停止生成，等待用户点击「批准」并在对话中发送「继续」后再执行；不要自行重试。'
+        : '当前项目为「逐步确认」模式：请先与用户确认需求（时长/画幅/风格/节奏/受众），再用 submit_storyboard_for_approval 提交分镜表；用户批准前不能调用分镜/视频生成工具（概念图 image_generate 允许）。')
+    }
+    return generateAsset(registry, tool, projectId, params, signal)
+  })
+}
+
+/** P7 门禁覆盖的生成类工具：正式流程的入口动作。 */
+const GATED_TOOLS = new Set(['storyboard_generate', 'video_generate', 'video_composite'])
+
+/**
+ * ask_user_choice 的等待上限（毫秒）：比最长视频超时更宽，到点按推荐项继续。
+ */
+const QUESTION_WAIT_MS = 600_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
 }
 
 /**
  * 创建 P3 媒体生成工具集（供 Host 的 `ctx.tools.register` 逐条注册）。
  * @param registry - 项目注册表。
- * @returns 9 个 `defineTool` 定义：image_generate, upload_image, video_generate,
- *   video_composite, prompt_enhance, image2vl, style_transfer, storyboard_generate, deduction。
+ * @returns 11 个 `defineTool` 定义：image_generate, upload_image, video_generate,
+ *   video_composite, prompt_enhance, image2vl, style_transfer, storyboard_generate, deduction，
+ *   P7 的 submit_storyboard_for_approval（分镜表审批门禁）与 ask_user_choice（点选式提问）。
  */
 export function createStudioTools(registry: ProjectRegistry, port: number) {
   return [
@@ -106,15 +133,17 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
         filename: { type: 'string' as const, description: '可选参考图：已上传的 Drama Backend 文件名（来自 upload_image 工具，用于图生图）' },
         negativePrompt: { type: 'string' as const, description: '反向提示词' },
+        sourceUrls: { type: 'array' as const, description: '本图参考的画布产物 URL 数组（此前工具结果里的 url），用于在画布上画出流程箭头；没有参考图可省略' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; aspectRatio?: string; filename?: string; negativePrompt?: string }
+        const a = args as { prompt: string; aspectRatio?: string; filename?: string; negativePrompt?: string; sourceUrls?: string[] }
         return runGeneration(registry, 'image_generate', {
           prompt: a.prompt,
           ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
           ...(a.filename !== undefined ? { filename: a.filename } : {}),
           ...(a.negativePrompt !== undefined ? { negativePrompt: a.negativePrompt } : {}),
+          ...(a.sourceUrls !== undefined ? { sourceUrls: a.sourceUrls } : {}),
         }, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
@@ -150,14 +179,16 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         filename: { type: 'string' as const, required: true, description: '已上传的 Drama Backend 文件名（来自 upload_image 工具）' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
-        duration: { type: 'number' as const, description: '视频时长（秒），默认 5' },
+        duration: { type: 'number' as const, description: '视频时长（秒），默认 5；上限 15，建议 8–10（更长请拆多段）' },
+        sourceUrls: { type: 'array' as const, description: '首帧图对应的画布产物 URL（此前工具结果里的 url），用于画布流程箭头' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; filename: string; aspectRatio?: string; duration?: number }
+        const a = args as { prompt: string; filename: string; aspectRatio?: string; duration?: number; sourceUrls?: string[] }
         const params: GenerateParams = { prompt: a.prompt, filename: a.filename }
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
         if (a.duration !== undefined) params.duration = a.duration
+        if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
         return runGeneration(registry, 'video_generate', params, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
@@ -169,14 +200,16 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         filenames: { type: 'array' as const, required: true, description: '已上传的 Drama Backend 文件名数组（来自 upload_image 工具）' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
-        duration: { type: 'number' as const, description: '视频时长（秒），默认 12' },
+        duration: { type: 'number' as const, description: '视频时长（秒），默认 10；上限 15。两张图走首尾帧插值（fl2va），三张及以上走多关键帧合成' },
+        sourceUrls: { type: 'array' as const, description: '输入图对应的画布产物 URL 数组（按 filenames 同序），用于画布流程箭头' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; filenames: string[]; aspectRatio?: string; duration?: number }
+        const a = args as { prompt: string; filenames: string[]; aspectRatio?: string; duration?: number; sourceUrls?: string[] }
         const params: GenerateParams = { prompt: a.prompt, filenames: a.filenames }
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
         if (a.duration !== undefined) params.duration = a.duration
+        if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
         return runGeneration(registry, 'video_composite', params, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
@@ -300,6 +333,113 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
         return {
           analysis: JSON.stringify(result.analysis ?? ''),
           deduction: JSON.stringify(result.deduction ?? ''),
+        }
+      },
+    }),
+    defineTool({
+      name: 'submit_storyboard_for_approval',
+      description:
+        '把分镜表提交给用户确认。「逐步确认」模式下必须在调用 storyboard_generate / video_generate / video_composite 之前使用：提交后本回合结束，等待用户在画布上方点击「批准」。返回文本会说明下一步；收到批准放行的回复后再开始正式生成。',
+      parameters: {
+        storyboard: { type: 'string' as const, required: true, description: '完整分镜表 markdown 文本（镜号/景别/镜头运动/时长/画面描述/声音）' },
+        summary: { type: 'string' as const, description: '一句话概述（如「8 镜 · 竖屏 · 治愈系」），展示在审批提示里' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' as const, description: '提交结果与下一步指引' },
+          },
+        },
+        render: renderTextResult,
+      },
+      async execute(args, exec) {
+        const a = args as { storyboard: string; summary?: string }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const workflow = normalizeWorkflow((await registry.getProject(projectId))?.workflow)
+        if (workflow.mode === 'auto') {
+          if (workflow.state !== 'executing') await registry.updateWorkflow(projectId, { state: 'executing' })
+          return { text: '放手跑模式：分镜表已记录到画布，无需等待批准，直接开始执行生成流程。' }
+        }
+        await registry.updateWorkflow(projectId, { state: 'awaiting_approval' })
+        // 分镜表落为画布文本节点：审批条之外，用户还能在画布上直接看到并修改内容。
+        const existing = (await registry.readCanvas(projectId)).nodes
+        const index = existing.length
+        const node: StudioCanvasNode = {
+          id: newAssetId(),
+          kind: 'text',
+          title: a.summary ?? '分镜表（待确认）',
+          text: a.storyboard,
+          x: 40 + (index % 4) * 300,
+          y: 40 + Math.floor(index / 4) * 240,
+          width: 360,
+          height: 280,
+          createdAt: Date.now(),
+          toolName: 'submit_storyboard_for_approval',
+          origin: 'agent',
+          sourceIds: [],
+          operationType: 'storyboard',
+        }
+        await registry.appendCanvasNode(projectId, node)
+        return { text: '分镜表已提交并落到画布，本回合到此结束。请等待用户在画布上方点击「批准」并在对话中发送「继续」；未获批准前不要调用任何分镜/视频生成工具。' }
+      },
+    }),
+    defineTool({
+      name: 'ask_user_choice',
+      description:
+        '向用户提出一道点选题：选项卡片会内联显示在对话区（本工具调用卡片下方），用户点击后选择自动作为本工具结果返回（无需用户打字）。需求澄清阶段必须用本工具逐项提问（一次一个问题），不要用文本列表提问。问题会阻塞到用户作答或超时；超时返回提示时，采用带「推荐」标记的选项继续。',
+      parameters: {
+        question: { type: 'string' as const, required: true, description: '问题文本（简短一句话）' },
+        options: {
+          type: 'array' as const,
+          required: true,
+          description: '候选项数组（2–6 个短标签）；推荐的选项末尾加「（推荐）」',
+        },
+        allowFreeText: { type: 'boolean' as const, description: 'true 时卡片额外提供自由输入框（适合品牌名等开放要素）' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' as const, description: '用户的选择 / 超时或取消说明' },
+          },
+        },
+        render: renderTextResult,
+      },
+      async execute(args, exec) {
+        const a = args as { question: string; options: string[]; allowFreeText?: boolean }
+        const options = Array.isArray(a.options) ? a.options.map(String).filter((option) => option.length > 0) : []
+        if (a.question.trim().length === 0) throw new Error('question 不能为空')
+        if (options.length < 2) throw new Error('options 至少需要两个候选项')
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const pending = {
+          id: randomUUID(),
+          question: a.question.trim(),
+          options,
+          ...(a.allowFreeText === true ? { allowFreeText: true } : {}),
+        }
+        await registry.setPendingQuestion(projectId, pending)
+        try {
+          const deadline = Date.now() + QUESTION_WAIT_MS
+          while (Date.now() < deadline) {
+            if (exec.signal.aborted) throw exec.signal.reason ?? new DOMException('aborted', 'AbortError')
+            const current = normalizeWorkflow((await registry.getProject(projectId))?.workflow).pendingQuestion
+            if (current === null || current === undefined) {
+              return { text: '问题已被清除（用户跳过）。请采用推荐项继续，并在回复中说明该要素采用了默认假设。' }
+            }
+            if (current.id === pending.id && typeof current.answer === 'string') {
+              await registry.setPendingQuestion(projectId, null)
+              return { text: `用户的选择：${current.answer}` }
+            }
+            await sleep(1500)
+          }
+          return { text: `用户暂未回答（超过等待上限）。请采用推荐项继续：「${options.find((option) => option.includes('推荐')) ?? options[0]}」，并在回复中说明这是默认假设。` }
+        } catch (cause) {
+          // 打断 / 出错都要把挂起的问题清掉，避免卡片残留。
+          await registry.setPendingQuestion(projectId, null).catch(() => {})
+          throw cause
         }
       },
     }),

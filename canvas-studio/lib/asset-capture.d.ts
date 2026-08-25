@@ -26,6 +26,12 @@ export declare const STUDIO_TOOL_KINDS: Readonly<Record<string, 'image' | 'video
 /** 判断工具名是否属于画布媒体工具。 */
 export declare function isStudioTool(name: string): name is keyof typeof STUDIO_TOOL_KINDS;
 /**
+ * P7 工作流工具：结果会改变审批门禁状态 / 落分镜表节点 / 弹出点选问题。
+ * 它们不产生媒体产物（不放占位节点），但 tool/call 与 tool/result 后客户端
+ * 必须刷新工作流状态与画布，否则审批条与点选卡片永远不出现。
+ */
+export declare const WORKFLOW_TOOLS: ReadonlySet<string>;
+/**
  * 从 tool/result 的内容块中抽取托管 URL。
  * Host 的 renderResult 产出形如 `已生成产物: <url> (WxH...)` 的文本块，产物
  * 是完整 http(s) URL，正则可稳定提取。
@@ -74,14 +80,25 @@ export interface AssetCaptureHooks {
     onToolCall?(projectId: string, info: StudioToolCallInfo): void;
     /** 工具调用失败：占位节点标记错误（tool/result 的 data.error）。 */
     onToolError?(projectId: string, runId: string, message: string): void;
+    /**
+     * P7 工作流工具结算回调（成功或失败都触发）：客户端借此刷新工作流状态
+     * （审批条显隐）并重载画布（分镜表文本节点落盘）。
+     */
+    onToolFinished?(projectId: string, toolName: string): void;
+    /**
+     * P7 工作流工具开始回调：ask_user_choice 在 execute 一开始就写入待回答
+     * 问题，客户端延迟刷新一两次才能把点选卡片拉出来（事件先于写盘到达时
+     * 单次刷新会扑空）。
+     */
+    onWorkflowToolStarted?(projectId: string, toolName: string): void;
 }
 /** definition 自身维护的节点状态：记录发起调用的工具名与参考图 URL。 */
 export interface AssetCaptureState {
     toolName: string;
     /** 参考图 URL；空串表示无参考图（image_generate）。 */
     sourceUrl: string;
-    /** 产物类型。 */
-    kind: 'image' | 'video';
+    /** 产物类型；workflow 表示 P7 工作流工具（无媒体产物）。 */
+    kind: 'image' | 'video' | 'workflow';
 }
 /**
  * conversationEvents 契约的本地结构投影（注册时由结构类型兼容自动匹配

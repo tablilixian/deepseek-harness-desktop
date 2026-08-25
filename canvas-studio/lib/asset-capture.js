@@ -11,6 +11,15 @@ export function isStudioTool(name) {
     return Object.prototype.hasOwnProperty.call(STUDIO_TOOL_KINDS, name);
 }
 /**
+ * P7 工作流工具：结果会改变审批门禁状态 / 落分镜表节点 / 弹出点选问题。
+ * 它们不产生媒体产物（不放占位节点），但 tool/call 与 tool/result 后客户端
+ * 必须刷新工作流状态与画布，否则审批条与点选卡片永远不出现。
+ */
+export const WORKFLOW_TOOLS = new Set([
+    'submit_storyboard_for_approval',
+    'ask_user_choice',
+]);
+/**
  * 从 tool/result 的内容块中抽取托管 URL。
  * Host 的 renderResult 产出形如 `已生成产物: <url> (WxH...)` 的文本块，产物
  * 是完整 http(s) URL，正则可稳定提取。
@@ -53,11 +62,14 @@ function sourceUrlFromArguments(value) {
 export function createAssetCaptureDefinition(hooks) {
     const onToolCall = hooks.onToolCall ?? (() => { });
     const onToolError = hooks.onToolError ?? (() => { });
+    const onToolFinished = hooks.onToolFinished ?? (() => { });
+    const onWorkflowToolStarted = hooks.onWorkflowToolStarted ?? (() => { });
     const match = (event) => {
         if (event.type === 'tool/call') {
             const data = event.data;
-            if (isStudioTool(data.name))
+            if (isStudioTool(data.name) || WORKFLOW_TOOLS.has(data.name)) {
                 return { id: String(data.callId), role: 'start' };
+            }
             return null;
         }
         if (event.type === 'tool/result') {
@@ -77,25 +89,41 @@ export function createAssetCaptureDefinition(hooks) {
             const data = startMatch.event.data;
             const toolName = data.name;
             const rawArguments = typeof data.arguments === 'string' ? data.arguments : '';
-            const projectId = hooks.getSelectedProjectId();
-            if (projectId !== null) {
-                onToolCall(projectId, {
-                    toolName,
-                    runId: String(data.callId),
-                    kind: STUDIO_TOOL_KINDS[toolName],
-                    arguments: rawArguments,
-                });
+            // P7 工作流工具：无媒体产物，不放占位节点；ask_user_choice 需要延迟
+            // 刷新一两次把点选卡片拉出来，其余在结算时刷新。
+            const kind = WORKFLOW_TOOLS.has(toolName) ? 'workflow' : STUDIO_TOOL_KINDS[toolName];
+            if (kind === 'workflow') {
+                const projectId = hooks.getSelectedProjectId();
+                if (projectId !== null)
+                    onWorkflowToolStarted(projectId, toolName);
+            }
+            else {
+                const projectId = hooks.getSelectedProjectId();
+                if (projectId !== null) {
+                    onToolCall(projectId, {
+                        toolName,
+                        runId: String(data.callId),
+                        kind,
+                        arguments: rawArguments,
+                    });
+                }
             }
             return {
                 toolName,
                 sourceUrl: sourceUrlFromArguments(data.arguments) ?? '',
-                kind: STUDIO_TOOL_KINDS[toolName],
+                kind,
             };
         },
         update: (context, updateMatch) => {
             const state = context.state;
             const projectId = hooks.getSelectedProjectId();
             if (updateMatch.event.type === 'tool/result' && projectId !== null) {
+                if (state.kind === 'workflow') {
+                    // P7：工作流工具结算（成功或失败）——刷新工作流状态与画布，
+                    // 让审批条与分镜表节点即时出现。
+                    onToolFinished(projectId, state.toolName);
+                    return state;
+                }
                 const data = updateMatch.event.data;
                 if (data.error !== undefined) {
                     // 工具失败（含用户打断）：占位节点标记错误，保留在画布上供重试。

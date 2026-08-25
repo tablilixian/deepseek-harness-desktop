@@ -18,6 +18,141 @@ const STUDIO_STYLES = `
   color: var(--dsw-alias-label-primary);
 }
 
+/* P7 创作工作流条：模式开关 + 审批提示，位于工具栏与画布之间。 */
+.csWorkflowBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-l1);
+}
+
+.csWorkflowMode {
+  display: inline-flex;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.csWorkflowMode button {
+  padding: 3px 10px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.csWorkflowMode button + button {
+  border-left: 1px solid var(--dsw-alias-border-l2);
+}
+
+.csWorkflowMode button.csActive {
+  background: var(--dsw-alias-bg-l3);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csWorkflowState {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.csWorkflowApproval {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.csWorkflowApproval .csWorkflowMessage {
+  font-size: 12px;
+  color: var(--dsw-alias-label-warning, var(--dsw-alias-label-primary));
+}
+
+.csWorkflowApproval button {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.csWorkflowApproval button.csPrimary {
+  background: var(--dsw-alias-bg-l3);
+}
+
+/* P7 点选式澄清卡片：ask_user_choice 弹出的选择题。 */
+.csQuestionCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-l1);
+}
+
+.csQuestionLabel {
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.csQuestionOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.csQuestionOptions button {
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.csQuestionOptions button:hover:not(:disabled) {
+  background: var(--dsw-alias-bg-l3);
+}
+
+.csQuestionOptions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.csQuestionOther {
+  opacity: 0.75;
+}
+
+.csQuestionFree {
+  display: flex;
+  gap: 6px;
+}
+
+.csQuestionFree input {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+
+.csQuestionFree button {
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
 .csProjects {
   display: flex;
   flex-direction: column;

@@ -11,7 +11,7 @@ test('normalizeCanvasView：缺失/非法输入回退默认值', () => {
   assert.equal(normalizeCanvasView(null), undefined)
   assert.equal(normalizeCanvasView('nope'), undefined)
   const view = normalizeCanvasView({ x: 'bad', y: 12, scale: 999, layersOpen: 'x' })
-  assert.deepEqual(view, { x: 0, y: 12, scale: 5, layersOpen: true, minimapVisible: true })
+  assert.deepEqual(view, { x: 0, y: 12, scale: 5, layersOpen: false, minimapVisible: false })
 })
 
 test('clampViewScale：限制在 0.1–5', () => {

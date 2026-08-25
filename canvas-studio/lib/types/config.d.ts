@@ -16,6 +16,7 @@ export declare const DRAMA_ENDPOINTS: {
     readonly inpaint: "/api/v1/generate/image2inpaint";
     readonly videoMsr: "/api/v1/generate/image2videomsr";
     readonly videoMkr: "/api/v1/generate/image2videomkr";
+    readonly videoFl2va: "/api/v1/generate/image2videofl2va";
     readonly videoMkrGrid: "/api/v1/generate/image2videomkrgrid";
 };
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */

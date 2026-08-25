@@ -9,6 +9,7 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write';
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths';
+import { normalizeWorkflow } from './contracts/project.js';
 import { CANVAS_DOCUMENT_VERSION, NODE_DEFAULTS } from './contracts/canvas.js';
 import { normalizeCanvasView } from './canvas-view.js';
 /** Registry file format version; bump with a migration when the shape changes. */
@@ -185,6 +186,78 @@ export class ProjectRegistry {
         await this.writeRegistry(projects);
         this.cached = projects;
     }
+    /**
+     * Read one project record (with its P7 workflow defaulted when absent).
+     * @returns the record, or null when the id is unknown.
+     */
+    async getProject(projectId) {
+        return (await this.list()).find((entry) => entry.id === projectId) ?? null;
+    }
+    /**
+     * Patch a project's P7 workflow (mode / gate state) and persist the
+     * registry atomically. Returns the updated record.
+     */
+    async updateWorkflow(projectId, patch) {
+        const projects = [...await this.list()];
+        const index = projects.findIndex((entry) => entry.id === projectId);
+        if (index === -1)
+            throw new Error(`项目不存在: ${projectId}`);
+        const current = projects[index];
+        const updated = {
+            ...current,
+            workflow: { ...normalizeWorkflow(current.workflow), ...patch },
+            updatedAt: nowIso(),
+        };
+        projects[index] = updated;
+        await this.writeRegistry(projects);
+        this.cached = projects;
+        return updated;
+    }
+    /**
+     * 写入 / 清除项目的待回答问题（ask_user_choice 工具与 answer 动作使用）。
+     */
+    async setPendingQuestion(projectId, question) {
+        const projects = [...await this.list()];
+        const index = projects.findIndex((entry) => entry.id === projectId);
+        if (index === -1)
+            throw new Error(`项目不存在: ${projectId}`);
+        const current = projects[index];
+        const { pendingQuestion: _omitted, ...workflow } = normalizeWorkflow(current.workflow);
+        const next = {
+            ...current,
+            workflow: question === null ? workflow : { ...workflow, pendingQuestion: question },
+            updatedAt: nowIso(),
+        };
+        projects[index] = next;
+        await this.writeRegistry(projects);
+        this.cached = projects;
+    }
+    /**
+     * 记录用户对当前问题的选择（画布点选卡片 → workflow 路由调用）。
+     * ask_user_choice 工具轮询读到后负责清空。
+     */
+    async answerPendingQuestion(projectId, value) {
+        const projects = [...await this.list()];
+        const index = projects.findIndex((entry) => entry.id === projectId);
+        if (index === -1)
+            throw new Error(`项目不存在: ${projectId}`);
+        const current = projects[index];
+        const workflow = normalizeWorkflow(current.workflow);
+        if (workflow.pendingQuestion === null || workflow.pendingQuestion === undefined) {
+            throw new Error('当前没有待回答的问题');
+        }
+        const trimmed = value.trim();
+        if (trimmed.length === 0)
+            throw new Error('回答不能为空');
+        const next = {
+            ...current,
+            workflow: { ...workflow, pendingQuestion: { ...workflow.pendingQuestion, answer: trimmed } },
+            updatedAt: nowIso(),
+        };
+        projects[index] = next;
+        await this.writeRegistry(projects);
+        this.cached = projects;
+    }
     async readRegistry() {
         let text;
         try {
@@ -215,7 +288,9 @@ export class ProjectRegistry {
                 throw new Error(`canvas-studio: registry file contains an invalid project record: ${this.file}`);
             }
         }
-        return projects;
+        // P7 migration-on-read: records predating the workflow field get the
+        // default (confirm + drafting). Absence stays legal on disk.
+        return projects.map((entry) => (entry.workflow === undefined ? { ...entry, workflow: normalizeWorkflow(undefined) } : entry));
     }
     async writeRegistry(projects) {
         const document = { version: REGISTRY_VERSION, projects: [...projects] };

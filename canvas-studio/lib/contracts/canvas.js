@@ -18,8 +18,9 @@ export const VIEW_DEFAULTS = {
     x: 0,
     y: 0,
     scale: 1,
-    layersOpen: true,
-    minimapVisible: true,
+    // 验收反馈（2026-08-24）：面板默认收起，画布默认最大化内容区。
+    layersOpen: false,
+    minimapVisible: false,
 };
 /** Defaults applied when migrating nodes that predate a field. */
 export const NODE_DEFAULTS = {

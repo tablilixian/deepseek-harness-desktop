@@ -32,7 +32,10 @@ export type StudioFrameProps = PropsRuntime<'root'>
  * bloodline edges; the timeline lets the user review and jump to any node.
  */
 export function StudioFrame(props: StudioFrameProps) {
-  const { renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas, retryNode, steerNode, cancelCurrentTurn, actions } = props
+  const {
+    renderSlot, useStudio, refreshProjects, createProject, openProject, deleteProject, persistCanvas,
+    retryNode, steerNode, cancelCurrentTurn, approveStoryboard, rejectStoryboard, setWorkflowMode, actions,
+  } = props
   const projects = useStudio(store => store.projects)
   const selectedProjectId = useStudio(store => store.selectedProjectId)
   const selectedNodeId = useStudio(store => store.selectedNodeId)
@@ -46,6 +49,8 @@ export function StudioFrame(props: StudioFrameProps) {
   const historyLength = useStudio(store => store.history.length)
   const viewEntry = useStudio(store => viewOf(store, store.selectedProjectId))
   const view = viewEntry.view
+  // P7：当前项目的工作流（模式 + 审批门禁状态），驱动工作流条与审批按钮。
+  const workflow = useStudio(store => store.selectedProjectId === null ? undefined : store.workflows[store.selectedProjectId])
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const surfaceRef = useRef<CanvasSurfaceHandle>(null)
@@ -149,6 +154,22 @@ export function StudioFrame(props: StudioFrameProps) {
     setFocusNodeId(id)
     setDetailOpen(false)
   }
+  // P7：审批动作后无需手动刷新 —— Host 返回的工作流已写回 store。
+  const handleApprove = (): void => {
+    if (projectId !== null) void approveStoryboard(projectId).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '批准失败')
+    })
+  }
+  const handleReject = (): void => {
+    if (projectId !== null) void rejectStoryboard(projectId).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '驳回失败')
+    })
+  }
+  const handleSetMode = (mode: 'confirm' | 'auto'): void => {
+    if (projectId !== null) void setWorkflowMode(projectId, mode).catch((cause) => {
+      actions.setFailed(cause instanceof Error ? cause.message : '模式切换失败')
+    })
+  }
 
   const canvasBody = ((): React.ReactNode => {
     if (projectId === null) {
@@ -176,6 +197,7 @@ export function StudioFrame(props: StudioFrameProps) {
             onRedo={handleRedo}
             onLinkLayers={(sourceIds, targetId) => { persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId)) }}
             onRename={handleRename}
+            onNodeOpenDetail={(node) => { actions.selectNode(node.id); setDetailOpen(true) }}
             onContextMenu={(node, x, y) => { setMenu({ node, x, y }) }}
             focusNodeId={focusNodeId}
             ref={surfaceRef}
@@ -253,6 +275,35 @@ export function StudioFrame(props: StudioFrameProps) {
           minimapVisible={view.minimapVisible}
           onToggleMinimap={() => { handleViewChange({ minimapVisible: !view.minimapVisible }) }}
         />
+        <div className="csWorkflowBar">
+          <div className="csWorkflowMode" role="group" aria-label="执行模式">
+            <button
+              type="button"
+              className={workflow?.mode !== 'auto' ? 'csActive' : ''}
+              onClick={() => { handleSetMode('confirm') }}
+            >
+              逐步确认
+            </button>
+            <button
+              type="button"
+              className={workflow?.mode === 'auto' ? 'csActive' : ''}
+              onClick={() => { handleSetMode('auto') }}
+            >
+              放手跑
+            </button>
+          </div>
+          <span className="csWorkflowState">
+            {workflow?.state === 'awaiting_approval' ? '等待批准' : workflow?.state === 'executing' ? '制作中' : '需求沟通中'}
+          </span>
+          {workflow?.state === 'awaiting_approval' && (
+            <div className="csWorkflowApproval">
+              <span className="csWorkflowMessage">分镜表已提交到画布，请确认后批准</span>
+              <button type="button" className="csPrimary" onClick={handleApprove}>批准并开始制作</button>
+              <button type="button" onClick={handleReject}>驳回，继续修改</button>
+              <span className="csWorkflowState">批准后在对话中发送「继续」恢复流程</span>
+            </div>
+          )}
+        </div>
         {canvasBody}
       </main>
       <aside className="csChat">

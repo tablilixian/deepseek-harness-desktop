@@ -24,6 +24,7 @@ export const DRAMA_ENDPOINTS = {
     inpaint: '/api/v1/generate/image2inpaint',
     videoMsr: '/api/v1/generate/image2videomsr',
     videoMkr: '/api/v1/generate/image2videomkr',
+    videoFl2va: '/api/v1/generate/image2videofl2va',
     videoMkrGrid: '/api/v1/generate/image2videomkrgrid',
 };
 /** 宽高比 → 像素尺寸（简化自 WL `config/sizeConfig.ts`）。 */

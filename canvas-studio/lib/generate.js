@@ -9,6 +9,43 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DRAMA_API_BASE, DRAMA_ENDPOINTS, newAssetId, sizeForAspectRatio, } from './config.js';
 /**
+ * 视频时长上限（秒）：后端长视频生成经常失败，单段必须 ≤15s（建议 ~10s）。
+ * 更长的成片由 P9 本地拼接多段完成，而不是拉长单段。
+ */
+export const MAX_VIDEO_SECONDS = 15;
+/** 钳制视频时长：1–15s 取整；未提供时用各工具的默认值。 */
+export function clampDuration(value, fallback) {
+    return Math.min(MAX_VIDEO_SECONDS, Math.max(1, Math.round(value ?? fallback)));
+}
+/** Drama Backend 调用超时（毫秒）：视频生成最慢，文本类最快。 */
+const DRAMA_TIMEOUT_MS = { image: 360_000, video: 600_000, text: 60_000 };
+/** 带超时与一次性自动重试的 Drama POST（网络错误 / 502/503/504 时重试）。 */
+async function dramaPost(endpoint, init, timeoutMs, signal) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const timeout = AbortSignal.timeout(timeoutMs);
+        const composed = signal ? AbortSignal.any([signal, timeout]) : timeout;
+        try {
+            const response = await fetch(`${DRAMA_API_BASE}${endpoint}`, { ...init, signal: composed });
+            if ((response.status === 502 || response.status === 503 || response.status === 504) && attempt === 0) {
+                lastError = new Error(`Drama Backend 暂时不可用（HTTP ${response.status}），已自动重试一次`);
+                continue;
+            }
+            return response;
+        }
+        catch (cause) {
+            // 用户主动打断不重试、不改写错误。
+            if (signal?.aborted)
+                throw cause;
+            lastError = cause;
+            if (attempt === 0)
+                continue;
+            throw new Error(`Drama Backend 连接失败（已重试一次）：${cause instanceof Error ? cause.message : String(cause)}。请检查服务是否可达。`);
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error('生成失败');
+}
+/**
  * 将相对 URL 解析为 loopback 绝对 URL（Host 端 fetch 用）。
  * 浏览器端 <img src> 能自动解析同源相对路径，但 Node 原生 fetch 不支持，
  * 而 image_generate 返回的产物 URL 是相对路径（/canvas-studio/assets/...），
@@ -24,7 +61,10 @@ async function uploadImage(sourceUrl, signal) {
         throw new Error(`参考图下载失败: ${response.status}`);
     const bytes = Buffer.from(await response.arrayBuffer());
     const form = new FormData();
-    form.append('file', new Blob([bytes]), 'reference.png');
+    // 每次上传用唯一且只含 [A-Za-z0-9._-] 的表单文件名：写死同名会触发后端
+    // 去重后缀（如 "reference (463).png"），带空格括号的文件名传回 ComfyUI
+    // 工作流会导致生成 500。
+    form.append('file', new Blob([bytes]), `ref-${newAssetId().slice(0, 8)}.png`);
     const upload = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.uploadimage}`, {
         method: 'POST',
         body: form,
@@ -42,24 +82,35 @@ async function uploadImage(sourceUrl, signal) {
         throw new Error(`参考图上传成功但未返回 filename（响应: ${JSON.stringify(data)}）`);
     return filename;
 }
+/** 统一解析失败响应：优先结构化字段，否则带出响应体片段（便于定位 500 真因）。 */
+async function describeError(response) {
+    let message = `HTTP ${response.status}`;
+    try {
+        const text = await response.text();
+        if (text.length > 0) {
+            try {
+                const data = JSON.parse(text);
+                message = data.error?.message || data.msg || data.detail || message;
+            }
+            catch {
+                message = text.slice(0, 200);
+            }
+        }
+    }
+    catch {
+        /* keep default */
+    }
+    return message;
+}
 /** 调用 Drama Backend 生成接口，取回产物 URL。 */
-async function callDrama(endpoint, body, signal) {
-    const response = await fetch(`${DRAMA_API_BASE}${endpoint}`, {
+async function callDrama(endpoint, body, signal, kind = 'image') {
+    const response = await dramaPost(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        signal: signal ?? null,
-    });
+    }, DRAMA_TIMEOUT_MS[kind], signal);
     if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        try {
-            const data = await response.json();
-            message = data.error?.message || data.msg || message;
-        }
-        catch {
-            /* keep default */
-        }
-        throw new Error(`生成失败: ${message}`);
+        throw new Error(`生成失败: ${await describeError(response)}`);
     }
     const data = await response.json();
     if (data.full_url)
@@ -87,6 +138,26 @@ export function operationTypeOf(tool, params) {
 export function generationPromptOf(params) {
     const { retryOf: _retryOf, ...rest } = params;
     return JSON.stringify(rest);
+}
+/**
+ * 按画布产物 URL 反查节点 id（血缘 sourceIds 的来源）。URL 兼容两种形态：
+ * 工具结果里的同源相对路径（/canvas-studio/assets/...）与早期版本写死的
+ * http://127.0.0.1:<port> 绝对路径 —— 都归一化到相对路径后精确匹配。
+ */
+export function resolveSourceIds(nodes, urls) {
+    if (urls === undefined || urls.length === 0)
+        return [];
+    const relative = (value) => value.replace(/^https?:\/\/127\.0\.0\.1:\d+(\/canvas-studio\/.*)$/, '$1');
+    const byUrl = new Map(nodes.map((node) => [node.url !== undefined ? relative(node.url) : '', node.id]));
+    const ids = [];
+    for (const url of urls) {
+        if (typeof url !== 'string' || url.length === 0)
+            continue;
+        const id = byUrl.get(relative(url));
+        if (id !== undefined && !ids.includes(id))
+            ids.push(id);
+    }
+    return ids;
 }
 /** 提示词增强：调用 Drama Backend 的 image2promptenhance 接口。 */
 export async function enhancePrompt(prompt, signal) {
@@ -117,22 +188,13 @@ export async function deduction(filename, analysisPrompt, deductionPrompt, analy
 }
 /** 带 raw 响应解析的 callDrama（文本工具用，返回完整 JSON）。 */
 async function callDramaRaw(endpoint, body, signal) {
-    const response = await fetch(`${DRAMA_API_BASE}${endpoint}`, {
+    const response = await dramaPost(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
-        signal: signal ?? null,
-    });
+    }, DRAMA_TIMEOUT_MS.text, signal);
     if (!response.ok) {
-        let message = `HTTP ${response.status}`;
-        try {
-            const data = await response.json();
-            message = data.error?.message || data.msg || message;
-        }
-        catch {
-            /* keep default */
-        }
-        throw new Error(`生成失败: ${message}`);
+        throw new Error(`生成失败: ${await describeError(response)}`);
     }
     return response.json();
 }
@@ -178,32 +240,50 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             prompt: params.prompt,
             width: size.width,
             height: size.height,
-            duration: params.duration ?? 5,
+            // 时长钳制 ≤15s（后端长视频易失败，建议 ~10s）。
+            duration: clampDuration(params.duration, 5),
             fps: 30,
             background: params.filename,
-        }, signal);
+        }, signal, 'video');
     }
     else if (tool === 'video_composite') {
         const filenames = params.filenames ?? [];
         if (filenames.length < 1)
             throw new Error('video_composite 需要提供 filenames（来自 upload_image 工具）');
-        // frame_index 按时间轴均分：API 期望的是帧位置（duration × fps），不是数组下标。
-        // 最后一张图用 -1 标记（文档约定表示结束）。
-        const totalFrames = (params.duration ?? 12) * 30;
-        const images = filenames.map((image, index) => ({
-            image,
-            frame_index: index === filenames.length - 1
-                ? -1
-                : Math.round((index / (filenames.length - 1)) * totalFrames),
-        }));
-        mediaUrl = await callDrama(DRAMA_ENDPOINTS.videoMkr, {
-            prompt: params.prompt,
-            width: size.width,
-            height: size.height,
-            duration: params.duration ?? 12,
-            fps: 30,
-            images,
-        }, signal);
+        if (filenames.length === 2) {
+            // 首尾帧插值优先（image2videofl2va）：两图场景下比 MKR 关键帧插值更稳。
+            // 该接口用 aspect + megapixels 而非 width/height，且只支持 16:9 / 9:16
+            // （1:1 就近落到 16:9）。
+            const aspect = params.aspectRatio === '9:16' ? '9:16' : '16:9';
+            mediaUrl = await callDrama(DRAMA_ENDPOINTS.videoFl2va, {
+                prompt: params.prompt,
+                aspect,
+                megapixels: 0.4,
+                duration: clampDuration(params.duration, 10),
+                image1: filenames[0],
+                image2: filenames[1],
+            }, signal, 'video');
+        }
+        else {
+            // 多关键帧 MKR：frame_index 按时间轴均分（duration × fps 的帧位置，
+            // 不是数组下标）；最后一张图用 -1 标记结束。时长同样钳制 ≤15s。
+            const duration = clampDuration(params.duration, 10);
+            const totalFrames = duration * 30;
+            const images = filenames.map((image, index) => ({
+                image,
+                frame_index: index === filenames.length - 1
+                    ? -1
+                    : Math.round((index / (filenames.length - 1)) * totalFrames),
+            }));
+            mediaUrl = await callDrama(DRAMA_ENDPOINTS.videoMkr, {
+                prompt: params.prompt,
+                width: size.width,
+                height: size.height,
+                duration,
+                fps: 30,
+                images,
+            }, signal, 'video');
+        }
     }
     else if (tool === 'style_transfer') {
         if (!params.filename || !params.styleFilename) {
@@ -244,7 +324,8 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
     // source of truth). The client reloads the canvas document on tool/result,
     // so a successful generation shows on the canvas even if the conversation
     // event's rendered text carries no usable URL.
-    const sourceIds = [];
+    // 血缘：按 params.sourceUrls 反查输入参考图对应的画布节点（流程箭头）。
+    const sourceIds = resolveSourceIds((await registry.readCanvas(projectId)).nodes, params.sourceUrls);
     // 节点级重试（params.retryOf）：原地更新已有节点，保留 id/位置/血缘/编组，
     // 边不增加（plan §7.8 标准 2）。普通生成则追加新节点。
     if (params.retryOf !== undefined) {
@@ -262,7 +343,7 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             operationType: operationTypeOf(tool, params),
             toolName: tool,
             generationPrompt: generationPromptOf(params),
-            ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+            ...(isVideo ? { duration: clampDuration(params.duration, tool === 'video_composite' ? 10 : 5) } : {}),
         };
         await registry.writeCanvas(projectId, existing.map((node) => (node.id === target.id ? updated : node)));
     }
@@ -282,13 +363,13 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             sourceIds,
             operationType: operationTypeOf(tool, params),
             generationPrompt: generationPromptOf(params),
-            ...(isVideo ? { duration: params.duration ?? (tool === 'video_composite' ? 12 : 5) } : {}),
+            ...(isVideo ? { duration: clampDuration(params.duration, tool === 'video_composite' ? 10 : 5) } : {}),
         };
         await registry.appendCanvasNode(projectId, node);
     }
     const result = { url, width: size.width, height: size.height };
     if (isVideo)
-        result.duration = params.duration ?? (tool === 'video_composite' ? 12 : 5);
+        result.duration = clampDuration(params.duration, tool === 'video_composite' ? 10 : 5);
     return result;
 }
 // 导出供 host-tools.ts 中 upload_image 工具使用。

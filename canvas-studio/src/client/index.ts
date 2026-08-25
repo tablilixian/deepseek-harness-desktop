@@ -4,11 +4,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
 import type { StudioProject } from '../contracts/project.js'
 import { createAssetCaptureDefinition } from '../asset-capture.js'
-import { createStudioProject, deleteStudioProject, listStudioProjects, loadStudioCanvas, retryStudioNode, saveStudioCanvas } from './api.js'
+import { answerStudioQuestion, createStudioProject, deleteStudioProject, getStudioWorkflow, listStudioProjects, loadStudioCanvas, postStudioWorkflowAction, retryStudioNode, saveStudioCanvas } from './api.js'
 import { StudioLayoutController } from './layout-controller.js'
 import { createProjectStore, viewOf } from './project-store.js'
 import { installStudioStyles } from './styles.js'
 import { StudioFrame } from './StudioFrame.js'
+import { registerQuestionChatNode } from './question-capture.js'
 
 /**
  * Services required before the studio frame can mount.
@@ -151,10 +152,53 @@ export function apply(ctx: ClientContext): void {
     void (async () => {
       try {
         applyLoadedCanvas(id, await loadStudioCanvas(id))
+        void refreshWorkflow(id)
       } catch {
         /* 载入失败静默：下一次切换 / 重载仍会尝试 */
       }
     })()
+  }
+
+  // 验收反馈（2026-08-24）：占位节点可能因 tool/result 事件丢失而永远
+  // 「生成中」。每个占位放置时起一个宽限超时器（比 Host 侧最长视频超时
+  // 600s 更宽）；正常结算后画布重载会整体替换节点，迟到的触发是空操作。
+  const PENDING_TIMEOUT_MS = 660_000
+  const pendingTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const clearPendingTimer = (runId: string): void => {
+    const timer = pendingTimers.get(runId)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      pendingTimers.delete(runId)
+    }
+  }
+
+  // P7：创作工作流（审批门禁 + 执行模式）。打开项目时随画布一起载入；批准 /
+  // 驳回 / 切模式走 Host workflow 路由，成功后同步进 store 驱动审批条显隐。
+  const refreshWorkflow = async (projectId: string): Promise<void> => {    try {
+      storeInstance.actions.setWorkflow(projectId, await getStudioWorkflow(projectId))
+    } catch {
+      /* 工作流读取失败静默：审批条按默认（隐藏）处理 */
+    }
+  }
+  const applyWorkflowAction = async (
+    projectId: string,
+    action: 'approve' | 'reject',
+  ): Promise<void> => {
+    const workflow = await postStudioWorkflowAction(projectId, action)
+    storeInstance.actions.setWorkflow(projectId, workflow)
+  }
+  const approveStoryboard = (projectId: string): Promise<void> => applyWorkflowAction(projectId, 'approve')
+  const rejectStoryboard = (projectId: string): Promise<void> => applyWorkflowAction(projectId, 'reject')
+  const setWorkflowMode = async (projectId: string, mode: 'confirm' | 'auto'): Promise<void> => {
+    const workflow = await postStudioWorkflowAction(projectId, 'setMode', mode)
+    storeInstance.actions.setWorkflow(projectId, workflow)
+  }
+  // P7 点选式澄清：提交用户选择后，Host 侧 ask_user_choice 工具轮询到答案并
+  // 清空问题；这里把带答案的工作流写回 store（卡片随即消失）。工具结果回流
+  // 会触发一次 tool/result → refreshWorkflow 兜底同步。
+  const answerQuestion = async (projectId: string, value: string): Promise<void> => {
+    const workflow = await answerStudioQuestion(projectId, value)
+    storeInstance.actions.setWorkflow(projectId, workflow)
   }
 
   ctx.effect(() => installStudioStyles(), 'canvas-studio: studio styles')
@@ -173,6 +217,21 @@ export function apply(ctx: ClientContext): void {
     const disposeCapture = ctx.conversationEvents.register(createAssetCaptureDefinition({
       reloadCanvas,
       getSelectedProjectId: () => resolveActiveProjectId(),
+      // P7：工作流工具（submit_storyboard_for_approval / ask_user_choice）结算后
+      // 刷新工作流状态与画布 —— 审批条与分镜表节点即时出现。
+      onToolFinished: (projectId) => {
+        void reloadCanvas(projectId)
+        void refreshWorkflow(projectId)
+      },
+      // P7 点选卡片：ask_user_choice 在 execute 开头才把问题写入 registry，
+      // tool/call 事件可能先到 —— 延迟刷新两次确保卡片拉出来。
+      onWorkflowToolStarted: (projectId) => {
+        setTimeout(() => { void refreshWorkflow(projectId) }, 600)
+        setTimeout(() => { void refreshWorkflow(projectId) }, 2500)
+      },
+      // 验收反馈（2026-08-24）：占位节点可能因事件丢失永远「生成中」。
+      // 放置占位时起一个超时器（比 Host 侧最长视频超时更宽），到点把该
+      // 占位标记为失败；正常结算（重载替换）后触发是空操作，无副作用。
       onToolCall: (projectId, info) => {
         const project = storeInstance.getSnapshot().projects.find((entry) => entry.id === projectId)
         if (project === undefined) return
@@ -195,8 +254,18 @@ export function apply(ctx: ClientContext): void {
           isLoading: true,
           progress: 0,
         })
+        const timer = setTimeout(() => {
+          pendingTimers.delete(info.runId)
+          storeInstance.actions.markPendingError(
+            projectId,
+            info.runId,
+            '生成超时：等待产物超过上限。请在画布右键该节点选择「重试」，或在对话中让 agent 重新生成。',
+          )
+        }, PENDING_TIMEOUT_MS)
+        pendingTimers.set(info.runId, timer)
       },
       onToolError: (projectId, runId, message) => {
+        clearPendingTimer(runId)
         storeInstance.actions.markPendingError(projectId, runId, message)
       },
     }))
@@ -210,6 +279,13 @@ export function apply(ctx: ClientContext): void {
     syncActiveProject()
     return ctx.workspaces.list.subscribe(syncActiveProject)
   }, 'canvas-studio: sync canvas to active workspace')
+
+  // P7 点选式澄清：问题卡片内联在对话区（ask_user_choice 的工具调用下方），
+  // 用户点选后答案回流给模型；画布侧不再重复渲染卡片。
+  ctx.effect(() => registerQuestionChatNode(ctx, {
+    getSelectedProjectId: () => resolveActiveProjectId(),
+    onAnswer: (projectId, value) => { void answerQuestion(projectId, value).catch(() => {}) },
+  }), 'canvas-studio: question chat node')
 
   // 打断当前会话的运行中回合（工具生成时把 Host 侧请求取消）。
   const cancelCurrentTurn = async (): Promise<void> => {
@@ -237,6 +313,7 @@ export function apply(ctx: ClientContext): void {
   }
   const retryNode = (projectId: string, nodeId: string): Promise<void> => rerunNode(projectId, nodeId)
   const steerNode = (projectId: string, nodeId: string, prompt: string): Promise<void> => rerunNode(projectId, nodeId, { prompt })
+
 
   ctx.effect(() => {
     const disposeService = ctx.reflect.provide('layout', layout)
@@ -277,6 +354,8 @@ export function apply(ctx: ClientContext): void {
             // P4+：载入持久化画布（含视口）；dev 模式下若项目为空则注入种子。
             const loaded = await loadStudioCanvas(project.id)
             applyLoadedCanvas(project.id, loaded)
+            // P7：随项目载入工作流状态（审批条显隐依据）。
+            void refreshWorkflow(project.id)
             if (devSeed && loaded.nodes.length === 0) {
               const seeded = seedNodes()
               storeInstance.actions.setNodes(project.id, seeded)
@@ -321,6 +400,10 @@ export function apply(ctx: ClientContext): void {
           retryNode,
           steerNode,
           cancelCurrentTurn,
+          refreshWorkflow,
+          approveStoryboard,
+          rejectStoryboard,
+          setWorkflowMode,
           // 组件经 useStudio 读取同一个实例（hooks 舱绑定为 use<Name>）。
           hooks: { studio: storeInstance },
         }

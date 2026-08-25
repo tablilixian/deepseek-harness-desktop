@@ -1,5 +1,5 @@
 import type { ProjectRegistry } from './projects.js';
-import type { StudioCanvasOperationType } from './contracts/canvas.js';
+import type { StudioCanvasNode, StudioCanvasOperationType } from './contracts/canvas.js';
 /** 一次生成的请求参数（来自客户端工具）。 */
 export interface GenerateParams {
     prompt: string;
@@ -21,6 +21,12 @@ export interface GenerateParams {
      * 而不是追加新节点 —— 重试不产生新边（plan §7.8 标准 2）。
      */
     retryOf?: string;
+    /**
+     * 输入参考图对应的画布产物 URL（工具结果里的 url 字段）。落盘时按 URL
+     * 反查画布节点并写入 sourceIds —— 血缘边（流程箭头）的唯一来源；缺省
+     * 时新节点没有边（历史行为）。
+     */
+    sourceUrls?: string[];
 }
 /** 一次生成的产物描述（返回给模型）。 */
 export interface GenerateResult {
@@ -29,6 +35,13 @@ export interface GenerateResult {
     height: number;
     duration?: number;
 }
+/**
+ * 视频时长上限（秒）：后端长视频生成经常失败，单段必须 ≤15s（建议 ~10s）。
+ * 更长的成片由 P9 本地拼接多段完成，而不是拉长单段。
+ */
+export declare const MAX_VIDEO_SECONDS = 15;
+/** 钳制视频时长：1–15s 取整；未提供时用各工具的默认值。 */
+export declare function clampDuration(value: number | undefined, fallback: number): number;
 /**
  * 将相对 URL 解析为 loopback 绝对 URL（Host 端 fetch 用）。
  * 浏览器端 <img src> 能自动解析同源相对路径，但 Node 原生 fetch 不支持，
@@ -42,6 +55,12 @@ declare function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<s
 export declare function operationTypeOf(tool: string, params: GenerateParams): StudioCanvasOperationType;
 /** 把生成参数序列化为 generationPrompt（节点重试时原样重放；retryOf 不入档）。 */
 export declare function generationPromptOf(params: GenerateParams): string;
+/**
+ * 按画布产物 URL 反查节点 id（血缘 sourceIds 的来源）。URL 兼容两种形态：
+ * 工具结果里的同源相对路径（/canvas-studio/assets/...）与早期版本写死的
+ * http://127.0.0.1:<port> 绝对路径 —— 都归一化到相对路径后精确匹配。
+ */
+export declare function resolveSourceIds(nodes: readonly StudioCanvasNode[], urls: readonly string[] | undefined): string[];
 /** 提示词增强：调用 Drama Backend 的 image2promptenhance 接口。 */
 export declare function enhancePrompt(prompt: string, signal?: AbortSignal): Promise<string>;
 /** 图像分析（VLM）：调用 Drama Backend 的 image2vl 接口，使用已上传的文件名。 */
