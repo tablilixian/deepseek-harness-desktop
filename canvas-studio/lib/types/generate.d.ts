@@ -34,6 +34,8 @@ export interface GenerateResult {
     width: number;
     height: number;
     duration?: number;
+    /** Drama Backend 服务器文件名（storyboard_generate 透出，供 storyboard_split 链式调用）。 */
+    filename?: string;
 }
 /**
  * 视频时长上限（秒）：后端长视频生成经常失败，单段必须 ≤15s（建议 ~10s）。
@@ -90,3 +92,16 @@ export declare function deduction(filename: string, analysisPrompt?: string, ded
  */
 export declare function generateAsset(registry: ProjectRegistry, tool: string, projectId: string, params: GenerateParams, signal?: AbortSignal): Promise<GenerateResult>;
 export { uploadImage, resolveImageUrl };
+export interface SplitStoryboardParams {
+    /** 分镜网格图在 Drama Backend 的服务器文件名（来自 storyboard_generate 的 filename）。 */
+    filename: string;
+    /** 格子数量，默认 4；仅支持 4 / 6 / 9。 */
+    gridnum?: number;
+    /** 分镜网格图的画布产物 URL（用于反查节点、画血缘箭头）。 */
+    sourceUrls?: string[];
+}
+export interface SplitStoryboardResult extends GenerateResult {
+    /** 拆分出的单镜数量。 */
+    count: number;
+}
+export declare function splitStoryboard(registry: ProjectRegistry, projectId: string, params: SplitStoryboardParams, signal?: AbortSignal): Promise<SplitStoryboardResult>;

@@ -61,11 +61,12 @@ export const CREATION_SKILL_CONTENT = `# Canvas Studio 创作规范
 | ask_user_choice | 点选式提问（澄清阶段必用） | question、options[]（推荐项加「（推荐）」）、allowFreeText? |
 | submit_storyboard_for_approval | 分镜表提交审批（逐步确认模式必经） | storyboard（分镜表 markdown）、summary? |
 | storyboard_generate | 文本 → 格子分镜图 | prompt（每行一个场景）、gridnum、filename? |
-| image_generate | 文生图 / 图生图 | prompt、aspectRatio、filename?（参考图）、negativePrompt? |
+| storyboard_split | 格子分镜图 → 单镜（每个镜头一张独立图） | filename（storyboard_generate 返回的 Drama 文件名）、gridnum（4/6/9）、sourceUrls? |
+| image_generate | 文生图 / 图生图（单参考或多参考） | prompt、aspectRatio、filename?（单参考图）、filenames?（最多 3 张多参考图）、negativePrompt? |
 | style_transfer | 风格迁移 | filename（目标图）、styleFilename（风格图）、prompt?、enhance? |
 | image2vl | 画面分析（VLM） | filename、prompt |
-| video_generate | 图生视频（MSR） | prompt、filename、duration（默认 5s） |
-| video_composite | 多图合成视频（MKR 首尾帧插值） | prompt、filenames[]（按时间顺序）、duration（默认 12s） |
+| video_generate | 图生视频（FL2VA：文生 / 首帧图生视频） | prompt、filename?（首帧图）、duration（默认 5s） |
+| video_composite | 多图合成视频（FL2VA 首尾帧 / REF2VA 多参考） | prompt、filenames[]（按时间顺序，2 张首尾帧、≥3 张多参考最多 6 张）、duration（默认 10s） |
 
 ## 视频提示词写法（MiniMax H3 官方规范，必须遵守）
 

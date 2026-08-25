@@ -278,3 +278,151 @@ test('P8.1 契约：uploadLocalImage 落盘返回同源 URL + Drama filename', a
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('P8.2 契约：image_generate 多参考（3 张）→ image2image 端点映射 image1~image3', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-imgref-'))
+  try {
+    const calls = stubFetch('https://media.example/out.png')
+    await generateAsset(stubRegistry([], dir), 'image_generate', 'p1', {
+      prompt: '融合三张参考图',
+      aspectRatio: '1:1',
+      filenames: ['r1.png', 'r2.png', 'r3.png'],
+    })
+    const gen = calls.find((call) => call.url.includes('image2image'))
+    assert.ok(gen, '缺少 image2image 调用')
+    assert.equal(gen.body.prompt, '融合三张参考图')
+    assert.equal(gen.body.image1, 'r1.png')
+    assert.equal(gen.body.image2, 'r2.png')
+    assert.equal(gen.body.image3, 'r3.png')
+    assert.ok(gen.body.width > 0 && gen.body.height > 0, '缺少尺寸参数')
+    // 多参考走图生图，绝对不应落入文生图端点。
+    assert.ok(!calls.some((call) => call.url.includes('txt2image')), '多参考误走 txt2image')
+    // 单 filename 仍兼容：应与 filenames 互斥回退。
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P8.2 契约：image_generate filenames 超过 3 张只取前 3 张', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-imgref2-'))
+  try {
+    const calls = stubFetch('https://media.example/out.png')
+    await generateAsset(stubRegistry([], dir), 'image_generate', 'p1', {
+      prompt: 'p',
+      filenames: ['a.png', 'b.png', 'c.png', 'd.png', 'e.png'],
+    })
+    const gen = calls.find((call) => call.url.includes('image2image'))
+    assert.ok(gen, '缺少 image2image 调用')
+    assert.equal(gen.body.image1, 'a.png')
+    assert.equal(gen.body.image2, 'b.png')
+    assert.equal(gen.body.image3, 'c.png')
+    assert.equal(gen.body.image4, undefined, '超出 3 张应被截断')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P8.2 契约：image_generate 单 filename 仍走 image2image（image1），不触发 txt2image', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-imgref3-'))
+  try {
+    const calls = stubFetch('https://media.example/out.png')
+    await generateAsset(stubRegistry([], dir), 'image_generate', 'p1', {
+      prompt: 'p',
+      filename: 'solo.png',
+    })
+    const gen = calls.find((call) => call.url.includes('image2image'))
+    assert.ok(gen, '单 filename 应走 image2image')
+    assert.equal(gen.body.image1, 'solo.png')
+    assert.equal(gen.body.image2, undefined)
+    assert.ok(!calls.some((call) => call.url.includes('txt2image')))
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P8.3 契约：storyboard_split 调 splitegrid 并按 gridnum 推导行列，拆出 N 个本地单镜节点', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-split-'))
+  try {
+    const splitUrls = [
+      'http://view.example/s1.png',
+      'http://view.example/s2.png',
+      'http://view.example/s3.png',
+      'http://view.example/s4.png',
+    ]
+    const calls = []
+    globalThis.fetch = async (url, init = {}) => {
+      const text = String(url)
+      if (init?.method === 'POST' && text.includes('image2splitegrid')) {
+        let body = null
+        if (typeof init.body === 'string') body = JSON.parse(init.body)
+        calls.push({ url: text, body })
+        return { ok: true, json: async () => ({ images: splitUrls.map((u, i) => ({ filename: `sp_${i}.png`, url: u })), total_count: splitUrls.length }) }
+      }
+      if (text.startsWith('http://view.example/')) {
+        return { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]) }
+      }
+      return { ok: false, status: 404 }
+    }
+
+    const registry = stubRegistry([], dir)
+    const { splitStoryboard } = await import('../lib/generate.js')
+    const result = await splitStoryboard(registry, 'p1', { filename: 'grid.png', gridnum: 4 }, undefined)
+
+    assert.equal(result.count, 4, '应拆出 4 张单镜')
+    const gen = calls.find((call) => call.url.includes('image2splitegrid'))
+    assert.ok(gen, '缺少 image2splitegrid 调用')
+    assert.equal(gen.body.row, 2, 'gridnum=4 → row=2')
+    assert.equal(gen.body.column, 2, 'gridnum=4 → column=2')
+    assert.equal(gen.body.image, 'grid.png')
+
+    const writes = registry.getWrites()
+    assert.equal(writes.length, 4, '应追加 4 个单镜节点')
+    for (const w of writes) {
+      const node = w.nodes[0]
+      assert.equal(node.kind, 'image')
+      assert.equal(node.operationType, 'storyboard-split')
+      assert.ok(node.url.startsWith('/canvas-studio/assets/p1/'), `非本地 URL: ${node.url}`)
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P8.3 契约：storyboard_split gridnum 推导 6→2×3、9→3×3', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-split2-'))
+  try {
+    async function runSplit(gridnum) {
+      const calls = []
+      globalThis.fetch = async (url, init = {}) => {
+        const text = String(url)
+        if (init?.method === 'POST' && text.includes('image2splitegrid')) {
+          let body = null
+          if (typeof init.body === 'string') body = JSON.parse(init.body)
+          calls.push({ url: text, body })
+          const n = gridnum
+          return { ok: true, json: async () => ({ images: Array.from({ length: n }, (_, i) => ({ filename: `sp_${i}.png`, url: `http://view.example/s${i}.png` })), total_count: n }) }
+        }
+        if (text.startsWith('http://view.example/')) return { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]) }
+        return { ok: false, status: 404 }
+      }
+      const registry = stubRegistry([], dir)
+      const { splitStoryboard } = await import('../lib/generate.js')
+      const result = await splitStoryboard(registry, 'p1', { filename: 'grid.png', gridnum }, undefined)
+      return { result, calls }
+    }
+
+    const six = await runSplit(6)
+    const sixGen = six.calls.find((call) => call.url.includes('image2splitegrid'))
+    assert.equal(sixGen.body.row, 2, 'gridnum=6 → row=2')
+    assert.equal(sixGen.body.column, 3, 'gridnum=6 → column=3')
+    assert.equal(six.result.count, 6)
+
+    const nine = await runSplit(9)
+    const nineGen = nine.calls.find((call) => call.url.includes('image2splitegrid'))
+    assert.equal(nineGen.body.row, 3, 'gridnum=9 → row=3')
+    assert.equal(nineGen.body.column, 3, 'gridnum=9 → column=3')
+    assert.equal(nine.result.count, 9)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

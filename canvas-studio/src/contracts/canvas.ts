@@ -34,6 +34,7 @@ export type StudioCanvasOperationType =
   | 'import'
   | 'drawing'
   | 'storyboard'
+  | 'storyboard-split'
   | 'character-sheet'
   | 'scene-concept'
   | 'video-clip'

@@ -15,7 +15,7 @@ import type { ProjectRegistry } from './projects.js'
 import { normalizeWorkflow } from './contracts/project.js'
 import type { StudioCanvasNode } from './contracts/canvas.js'
 import { newAssetId } from './config.js'
-import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, type GenerateParams, type GenerateResult } from './generate.js'
+import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, splitStoryboard, type GenerateParams, type GenerateResult } from './generate.js'
 
 /** 产物结果 schema（工具返回给模型的结构）。 */
 const resultSchema = {
@@ -99,12 +99,20 @@ function runGeneration(
         ? '分镜表正在等待用户批准（画布上方审批条）。请停止生成，等待用户点击「批准」并在对话中发送「继续」后再执行；不要自行重试。'
         : '当前项目为「逐步确认」模式：请先与用户确认需求（时长/画幅/风格/节奏/受众），再用 submit_storyboard_for_approval 提交分镜表；用户批准前不能调用分镜/视频生成工具（概念图 image_generate 允许）。')
     }
+    if (tool === 'storyboard_split') {
+      const sp = params as GenerateParams & { filename?: string; gridnum?: number; sourceUrls?: string[] }
+      return splitStoryboard(registry, projectId, {
+        filename: sp.filename ?? '',
+        ...(sp.gridnum !== undefined ? { gridnum: sp.gridnum } : {}),
+        ...(sp.sourceUrls !== undefined ? { sourceUrls: sp.sourceUrls } : {}),
+      }, signal)
+    }
     return generateAsset(registry, tool, projectId, params, signal)
   })
 }
 
 /** P7 门禁覆盖的生成类工具：正式流程的入口动作。 */
-const GATED_TOOLS = new Set(['storyboard_generate', 'video_generate', 'video_composite'])
+const GATED_TOOLS = new Set(['storyboard_generate', 'video_generate', 'video_composite', 'storyboard_split'])
 
 /**
  * ask_user_choice 的等待上限（毫秒）：比最长视频超时更宽，到点按推荐项继续。
@@ -127,24 +135,25 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
     defineTool({
       name: 'image_generate',
       description:
-        '根据提示词生成一张图片。如果传入 filename（upload_image 返回的 Drama Backend 文件名），则基于该参考图进行图生图。返回图片的托管 URL 与尺寸。',
+        '根据提示词生成一张图片。可传 filename（单参考图生图）或 filenames（最多 3 张参考图，多参考融合图生图），两者都来自 upload_image 拿到的 Drama Backend 文件名；都不传则为纯文生图。返回图片的托管 URL 与尺寸。',
       parameters: {
         prompt: { type: 'string' as const, required: true, description: '生成提示词' },
         aspectRatio: { type: 'string' as const, enum: ['16:9', '9:16', '1:1'], description: '宽高比，默认 16:9' },
-        filename: { type: 'string' as const, description: '可选参考图：已上传的 Drama Backend 文件名（来自 upload_image 工具，用于图生图）' },
+        filename: { type: 'string' as const, description: '可选单参考图：已上传的 Drama Backend 文件名（来自 upload_image 工具，用于图生图）' },
+        filenames: { type: 'array' as const, description: '可选多参考图（最多 3 张，来自 upload_image 工具）；与 filename 二选一，多参考融合图生图' },
         negativePrompt: { type: 'string' as const, description: '反向提示词' },
         sourceUrls: { type: 'array' as const, description: '本图参考的画布产物 URL 数组（此前工具结果里的 url），用于在画布上画出流程箭头；没有参考图可省略' },
       },
       output: { schema: resultSchema, render: renderResult },
       async execute(args, exec) {
-        const a = args as { prompt: string; aspectRatio?: string; filename?: string; negativePrompt?: string; sourceUrls?: string[] }
-        return runGeneration(registry, 'image_generate', {
-          prompt: a.prompt,
-          ...(a.aspectRatio !== undefined ? { aspectRatio: a.aspectRatio } : {}),
-          ...(a.filename !== undefined ? { filename: a.filename } : {}),
-          ...(a.negativePrompt !== undefined ? { negativePrompt: a.negativePrompt } : {}),
-          ...(a.sourceUrls !== undefined ? { sourceUrls: a.sourceUrls } : {}),
-        }, exec.signal, exec.agent?.session.header.cwd)
+        const a = args as { prompt: string; aspectRatio?: string; filename?: string; filenames?: string[]; negativePrompt?: string; sourceUrls?: string[] }
+        const params: GenerateParams = { prompt: a.prompt }
+        if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
+        if (a.filename !== undefined) params.filename = a.filename
+        if (Array.isArray(a.filenames) && a.filenames.length > 0) params.filenames = a.filenames
+        if (a.negativePrompt !== undefined) params.negativePrompt = a.negativePrompt
+        if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
+        return runGeneration(registry, 'image_generate', params, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
     defineTool({
@@ -303,6 +312,24 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
         if (a.filename !== undefined) params.filename = a.filename
         if (a.aspectRatio !== undefined) params.aspectRatio = a.aspectRatio
         return runGeneration(registry, 'storyboard_generate', params, exec.signal, exec.agent?.session.header.cwd)
+      },
+    }),
+    defineTool({
+      name: 'storyboard_split',
+      description:
+        '将一张格子分镜图拆分为若干单镜（每个镜头一张独立图）。传入 storyboard_generate 返回的 filename（Drama Backend 文件名）作为分镜网格图，按 gridnum 推导行列（4→2×2、6→2×3、9→3×3）调用 image2splitegrid。拆分后的每张单镜会作为独立 image 节点落到画布，并画出指向原分镜网格节点的血缘箭头。返回首张单镜的 URL 与单镜总数。',
+      parameters: {
+        filename: { type: 'string' as const, required: true, description: '分镜网格图：storyboard_generate 返回的 Drama Backend 文件名（filename 字段）' },
+        gridnum: { type: 'number' as const, description: '格子数量（决定行列拆分），默认 4，仅支持 4 / 6 / 9' },
+        sourceUrls: { type: 'array' as const, description: '分镜网格图对应的画布产物 URL（storyboard_generate 结果里的 url），用于画血缘箭头指向该网格节点' },
+      },
+      output: { schema: resultSchema, render: renderResult },
+      async execute(args, exec) {
+        const a = args as { filename: string; gridnum?: number; sourceUrls?: string[] }
+        const params: GenerateParams = { prompt: '', filename: a.filename }
+        if (a.gridnum !== undefined) params.gridnum = a.gridnum
+        if (a.sourceUrls !== undefined) params.sourceUrls = a.sourceUrls
+        return runGeneration(registry, 'storyboard_split', params, exec.signal, exec.agent?.session.header.cwd)
       },
     }),
     defineTool({

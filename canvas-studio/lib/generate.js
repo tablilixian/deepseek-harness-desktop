@@ -276,13 +276,24 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
     const size = sizeForAspectRatio(params.aspectRatio);
     const isVideo = tool === 'video_generate' || tool === 'video_composite';
     let mediaUrl;
+    // storyboard_generate 时捕获 Drama 文件名，透出给 storyboard_split 链式拆分。
+    let storyboardName;
     if (tool === 'image_generate') {
-        if (params.filename) {
+        // 多参考图生图：filenames（≤3）映射到 image1~imageN；否则回退单 filename（image1）。
+        const refs = (params.filenames ?? []).slice(0, 3);
+        const imageKeys = {};
+        if (refs.length > 0) {
+            refs.forEach((image, i) => { imageKeys[`image${i + 1}`] = image; });
+        }
+        else if (params.filename !== undefined) {
+            imageKeys.image1 = params.filename;
+        }
+        if (refs.length > 0 || params.filename !== undefined) {
             mediaUrl = await callDrama(DRAMA_ENDPOINTS.image2image, {
                 prompt: params.prompt,
                 width: size.width,
                 height: size.height,
-                image1: params.filename,
+                ...imageKeys,
                 ...(params.negativePrompt ? { negative_prompt: params.negativePrompt } : {}),
             }, signal);
         }
@@ -351,12 +362,23 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
         }, signal);
     }
     else if (tool === 'storyboard_generate') {
-        mediaUrl = await callDrama(DRAMA_ENDPOINTS.storyboard, {
-            prompt: params.prompt,
-            gridnum: params.gridnum ?? 4,
-            width: size.width,
-            ...(params.filename ? { image: params.filename } : {}),
-        }, signal);
+        const response = await dramaPost(DRAMA_ENDPOINTS.storyboard, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                prompt: params.prompt,
+                gridnum: params.gridnum ?? 4,
+                width: size.width,
+                ...(params.filename ? { image: params.filename } : {}),
+            }),
+        }, DRAMA_TIMEOUT_MS.image, signal);
+        if (!response.ok)
+            throw new Error(`生成失败: ${await describeError(response)}`);
+        const data = await response.json();
+        if (!data.full_url)
+            throw new Error('生成响应中未找到产物 URL');
+        mediaUrl = data.full_url;
+        storyboardName = data.filename;
     }
     else {
         throw new Error(`未知的生成工具: ${tool}`);
@@ -424,7 +446,66 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
     const result = { url, width: size.width, height: size.height };
     if (isVideo)
         result.duration = clampDuration(params.duration, tool === 'video_composite' ? 10 : 5);
+    if (storyboardName !== undefined)
+        result.filename = storyboardName;
     return result;
 }
 // 导出供 host-tools.ts 中 upload_image 工具使用。
 export { uploadImage, resolveImageUrl };
+/**
+ * P8.3：把一张格子分镜图（storyboard_generate 产物）拆分为若干单镜。
+ * 调用 Drama `image2splitegrid`，按 gridnum 推导行列（4→2×2、6→2×3、9→3×3），
+ * 把返回的每个单镜图下载到本地 assets，并逐个 appendCanvasNode 为独立 image
+ * 节点，sourceIds 指向传入的分镜网格节点（血缘箭头）。
+ */
+function gridDims(gridnum) {
+    if (gridnum === 6)
+        return { row: 2, column: 3 };
+    if (gridnum === 9)
+        return { row: 3, column: 3 };
+    return { row: 2, column: 2 }; // 4 及其它默认 2×2
+}
+export async function splitStoryboard(registry, projectId, params, signal) {
+    const grid = params.gridnum ?? 4;
+    const { row, column } = gridDims(grid);
+    const data = await callDramaRaw(DRAMA_ENDPOINTS.spliteGrid, { row, column, target_width: 1024, target_height: 768, image: params.filename }, signal);
+    const images = data.images ?? [];
+    if (images.length === 0)
+        throw new Error('分镜拆分未返回任何单镜图像');
+    const sourceIds = resolveSourceIds((await registry.readCanvas(projectId)).nodes, params.sourceUrls);
+    const directory = registry.assetsDir(projectId);
+    await mkdir(directory, { recursive: true });
+    let firstUrl = '';
+    for (let i = 0; i < images.length; i += 1) {
+        const img = images[i];
+        // 下载单镜到本地 assets，与 storyboard_generate 一致（避免依赖远端 view 服务稳定性）。
+        const download = await fetch(img.url, { signal: signal ?? null });
+        if (!download.ok)
+            throw new Error(`分镜单镜下载失败: ${download.status}`);
+        const bytes = Buffer.from(await download.arrayBuffer());
+        const assetId = newAssetId();
+        const file = `${assetId}.png`;
+        await writeFile(join(directory, file), bytes);
+        const url = `/canvas-studio/assets/${projectId}/${file}`;
+        if (i === 0)
+            firstUrl = url;
+        const node = {
+            id: assetId,
+            kind: 'image',
+            url,
+            x: 0,
+            y: 0,
+            width: 260,
+            height: 180,
+            createdAt: Date.now(),
+            toolName: 'storyboard_split',
+            runId: assetId,
+            origin: 'agent',
+            sourceIds,
+            operationType: 'storyboard-split',
+            generationPrompt: JSON.stringify({ filename: params.filename, gridnum: grid, index: i + 1, total: images.length }),
+        };
+        await registry.appendCanvasNode(projectId, node);
+    }
+    return { url: firstUrl, width: 260, height: 180, count: images.length };
+}
