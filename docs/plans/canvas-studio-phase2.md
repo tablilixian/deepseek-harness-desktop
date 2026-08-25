@@ -277,7 +277,7 @@ interface StudioWorkflow {
 
 ### 11.3 P9 成片合成与导出 🟨（开发中，2026-08-25 启动；实施步骤定稿见 §5.1）
 
-1. ⬜ P9.1 时间轴片段拖拽排序 + `view.timeline` 持久化（normalizeCanvasView 兼容旧文档）
+1. ✅ P9.1 时间轴片段拖拽排序 + `view.timeline` 持久化（normalizeCanvasView 兼容旧文档；`deriveTimelineOrder` 纯函数派生有效顺序：持久化优先 → 剔除已删 → 新节点按 createdAt 补齐；时间轴条目 HTML5 拖拽重排，落点虚线提示）—— 待桌面验收
 2. ⬜ P9.2 合成路由 `POST /canvas-studio/compose`：ffmpeg 统一转码 → concat → 可选 BGM amix → 项目 assets 根目录 `export-<uuid>.mp4`（兼容现有两段式资产路由）
    - 同步等待（上限 120s），耗时异步化列后续优化
 3. ⬜ P9.3 一键导出：产物回写画布（video-composite 终节点，origin=manual，sourceIds=clipIds）；srt 字幕旁路导出
@@ -287,7 +287,7 @@ interface StudioWorkflow {
 
 - ✅ 超时（图 360s / 视频 600s / 文本 60s）+ 一次性重试；错误体透出（含 detail 字段）
 - ✅ 视频时长钳制 ≤15s；上传文件名唯一安全化
-- 🟨 `/health` 前置探针（结果缓存 30s）+ 宕机中文提示（不再挂起）—— **下一个开发项（2026-08-25 决策，先于 P9 合成落地）**
+- ✅ `/health` 前置探针（结果缓存 30s）+ 宕机中文提示：`ensureDramaReachable` 前置于 `dramaPost` 与两条上传路径，宕机时秒级报「Drama Backend 不可达，请检查服务」，不再吃满长超时；`resetDramaProbeCache` 测试钩子；3 个探针契约测试
 - ⬜ API key 处置：迁 `$DSH_HOME/canvas-studio/config.json`（0600）；鉴权去留待后端确认（§8-3）—— **优先级后置（2026-08-25 用户决策，不着急）**
 - ⬜ sessionId 持久化（StudioProject.sessionId，工具执行命中后回写）
 - ⬜ rename 失败降级；「打断仅本地中断」tooltip 标注
@@ -325,3 +325,4 @@ interface StudioWorkflow {
 - 2026-08-25（验收反馈修复四连）：① 「生成中」黑块残留 —— 占位节点此前会随整表保存落盘，载入只剥标志保留本体；现在持久化前剔除瞬态节点（isLoading / pending-* / 无 url 的 agent 媒体节点），载入时同样丢弃（自动治愈已污染项目）。② 重试无反应 —— rerunNode 失败走 markPendingError 只作用于占位，真实节点的错误被静默吞掉；现在发起即进入加载态（进度遮罩），失败把错误写回节点本体（详情面板可见），无参数的节点给出明确提示。③ 删除后重开复现 —— 删除保存（POST）与 tool/result 重载（GET 整表替换 store）并发竞争；画布读写统一进串行 Promise 链且保存取执行时刻快照，最后一次保存必为最新状态。④ 对话区 380px → 480px。
 - 2026-08-25（会话恢复修复）：openProject 此前每次调 startSession，而上游 connectWorkspace 只复用工作区下的**空白**会话 —— 原会话一旦聊过（非 blank），再次打开项目就会新开一个空会话并跳过去，表现为「切换后历史对话消失」（旧对话仍在 Host，仅不再展示）。现改为从会话镜像里挑该工作区 updatedAt 最新的**非空**会话直接 `sessions.open` 恢复（排除 archived）；确实没有历史会话才回退 startSession 建空白，首次使用行为不变。（commit aa88c02b5c）
 - 2026-08-25（验收收口与排期决策）：Drama Backend 恢复，P7 + P8 端到端验收**全部通过**（M1/M2 关闭；少量非阻塞小问题转入后续优化清单，待补录）。用户排期决策：① P10 `/health` 探针为下一个开发项（先于 P9 落地）；② API key 处置优先级后置；③ P9 成片合成正式启动，实施步骤定稿见 §5.1（P9.1 时间轴 → P9.2 compose 路由 → P9.3 导出入口，按 commit 分步）；④ 其余增强项（sessionId 持久化、P11 池、画布 8 项）先挂文档排队。推进顺序更新为：health 探针 → P9.1→P9.2→P9.3 → sessionId → P11 裁剪。
+- 2026-08-25（health 探针 + P9.1）：① `/health` 前置探针落地——`ensureDramaReachable` 前置于 dramaPost 与 uploadImage/uploadBytesToDrama，结果正负双向缓存 30s，宕机秒级中文报错并阻断后续调用；测试桩统一放行 `/api/v1/health`。② P9.1 时间轴排序持久化落地——`view.timeline?: string[]` 入契约，normalize 兼容旧文档（非法整体丢弃），`deriveTimelineOrder` 纯函数（持久化优先/剔已删/新节点 createdAt 补齐），时间轴 HTML5 拖拽重排 + 落点虚线样式，经视口防抖保存链路持久化。测试 62/62 绿（+3 探针 +4 时间轴）。待桌面验收。下一步：P9.2 compose 路由。

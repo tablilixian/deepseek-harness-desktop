@@ -18,6 +18,12 @@ export declare function clampViewScale(scale: number): number;
  */
 export declare function normalizeCanvasView(value: unknown): StudioCanvasView | undefined;
 /**
+ * P9.1 时间轴的有效顺序：优先持久化的 `timeline`（自动剔除已删除的节点 id），
+ * 没入过列的节点（新建/旧文档）按 createdAt 追加在后。纯函数 —— Host 单测
+ * 可直接跑，客户端渲染与 compose 的 clipIds 都以它为准。
+ */
+export declare function deriveTimelineOrder(nodes: readonly StudioCanvasNode[], timeline: readonly string[] | undefined): StudioCanvasNode[];
+/**
  * Compute the auto-arrange layout: an overlap-free grid over top-level units
  * (nodes without a live parent), ordered by bloodline depth then creation
  * time. Group nodes travel with their children (relative offsets inside the

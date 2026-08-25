@@ -12,6 +12,7 @@ export const DRAMA_API_BASE = process.env.CANVAS_STUDIO_DRAMA_API_BASE ?? 'http:
 export const DRAMA_API_KEY = process.env.CANVAS_STUDIO_DRAMA_API_KEY ?? 'REPLACE_WITH_YOUR_KEY';
 /** 生成接口端点（与 WL 适配器对齐）。 */
 export const DRAMA_ENDPOINTS = {
+    health: '/api/v1/health',
     txt2image: '/api/v1/generate/txt2image',
     txt2imageanime: '/api/v1/generate/txt2imageanime',
     image2image: '/api/v1/generate/image2image',

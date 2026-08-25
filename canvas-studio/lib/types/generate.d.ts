@@ -44,6 +44,13 @@ export interface GenerateResult {
 export declare const MAX_VIDEO_SECONDS = 15;
 /** 钳制视频时长：1–15s 取整；未提供时用各工具的默认值。 */
 export declare function clampDuration(value: number | undefined, fallback: number): number;
+/** 清空探针缓存（测试钩子；生产代码不需要主动失效）。 */
+export declare function resetDramaProbeCache(): void;
+/**
+ * 确认 Drama Backend 可达：GET /api/v1/health（5s 超时），成功与失败都缓存
+ * 30s —— 缓存窗口内的后续请求零开销快速通过/快速失败。
+ */
+export declare function ensureDramaReachable(signal?: AbortSignal): Promise<void>;
 /**
  * 将相对 URL 解析为 loopback 绝对 URL（Host 端 fetch 用）。
  * 浏览器端 <img src> 能自动解析同源相对路径，但 Node 原生 fetch 不支持，

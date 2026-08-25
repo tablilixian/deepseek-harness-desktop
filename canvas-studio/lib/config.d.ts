@@ -4,6 +4,7 @@ export declare const DRAMA_API_BASE: string;
 export declare const DRAMA_API_KEY: string;
 /** 生成接口端点（与 WL 适配器对齐）。 */
 export declare const DRAMA_ENDPOINTS: {
+    readonly health: "/api/v1/health";
     readonly txt2image: "/api/v1/generate/txt2image";
     readonly txt2imageanime: "/api/v1/generate/txt2imageanime";
     readonly image2image: "/api/v1/generate/image2image";

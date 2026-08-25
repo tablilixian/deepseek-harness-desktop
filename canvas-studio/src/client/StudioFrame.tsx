@@ -12,6 +12,7 @@ import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
 import { ReferenceTray } from './canvas/ReferenceTray.js'
 import { uploadLocalStudioImage, uploadStudioVideo, bytesToBase64 } from './api.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
+import { deriveTimelineOrder } from '../canvas-view.js'
 import { formatRefToken } from '../reference-token.js'
 
 // Zoom step for the toolbar +/− buttons (matches the surface wheel step).
@@ -216,6 +217,12 @@ export function StudioFrame(props: StudioFrameProps) {
     })
   }
 
+  // P9.1：时间轴有效顺序（持久化 timeline → 过滤已删节点 → 新节点按 createdAt 补齐）。
+  const timelineOrder = deriveTimelineOrder(nodes, view.timeline)
+  const handleTimelineReorder = (ids: string[]): void => {
+    handleViewChange({ timeline: ids })
+  }
+
   const canvasBody = ((): React.ReactNode => {
     if (projectId === null) {
       return <div className="csCanvasEmpty">打开或新建一个项目，开始创作</div>
@@ -262,7 +269,12 @@ export function StudioFrame(props: StudioFrameProps) {
             </aside>
           )}
         </div>
-        <CanvasTimeline nodes={nodes} selectedNodeId={selectedNodeId} onSelect={handleTimelineSelect} />
+        <CanvasTimeline
+          ordered={timelineOrder}
+          selectedNodeId={selectedNodeId}
+          onSelect={handleTimelineSelect}
+          onReorder={handleTimelineReorder}
+        />
       </>
     )
   })()

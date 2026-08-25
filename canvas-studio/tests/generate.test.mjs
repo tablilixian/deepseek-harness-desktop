@@ -16,6 +16,10 @@ import { generateAsset, clampDuration } from '../lib/generate.js'
 function stubFetch(mediaUrl = 'https://media.example/out.png') {
   const calls = []
   globalThis.fetch = async (url, init = {}) => {
+    // P10 health 探针前置：所有 Drama 请求前会探测一次，桩里直接放行。
+    if (String(url).includes('/api/v1/health')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }), text: async () => '' }
+    }
     let body = null
     if (typeof init.body === 'string') {
       try { body = JSON.parse(init.body) } catch { body = init.body }
@@ -381,6 +385,9 @@ test('P8.3 契约：storyboard_split 调 splitegrid 并按 gridnum 推导行列�
     const calls = []
     globalThis.fetch = async (url, init = {}) => {
       const text = String(url)
+      if (text.includes('/api/v1/health')) {
+        return { ok: true, status: 200, json: async () => ({ status: 'ok' }), text: async () => '' }
+      }
       if (init?.method === 'POST' && text.includes('image2splitegrid')) {
         let body = null
         if (typeof init.body === 'string') body = JSON.parse(init.body)
@@ -424,6 +431,9 @@ test('P8.3 契约：storyboard_split gridnum 推导 6→2×3、9→3×3', async 
       const calls = []
       globalThis.fetch = async (url, init = {}) => {
         const text = String(url)
+        if (text.includes('/api/v1/health')) {
+          return { ok: true, status: 200, json: async () => ({ status: 'ok' }), text: async () => '' }
+        }
         if (init?.method === 'POST' && text.includes('image2splitegrid')) {
           let body = null
           if (typeof init.body === 'string') body = JSON.parse(init.body)

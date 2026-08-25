@@ -114,6 +114,12 @@ export interface StudioCanvasView {
     scale: number;
     layersOpen: boolean;
     minimapVisible: boolean;
+    /**
+     * P9.1 时间轴条目的有序节点 id 列表（拖拽排序结果，随视口一起持久化）。
+     * 缺省/部分失效时客户端按 createdAt 派生补齐；成片导出取其中 kind=video
+     * 的片段作为 clipIds。
+     */
+    timeline?: string[];
 }
 /** Current canvas document version (3: persisted viewport/panel state). */
 export declare const CANVAS_DOCUMENT_VERSION = 3;

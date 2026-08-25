@@ -174,13 +174,38 @@ window.__ModuleLoader__.load({
 			const raw = value;
 			const numberOr = (candidate, fallback) => typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
 			const boolOr = (candidate, fallback) => typeof candidate === "boolean" ? candidate : fallback;
+			const timeline = Array.isArray(raw.timeline) && raw.timeline.every((id) => typeof id === "string") ? raw.timeline : void 0;
 			return {
 				x: numberOr(raw.x, VIEW_DEFAULTS.x),
 				y: numberOr(raw.y, VIEW_DEFAULTS.y),
 				scale: clampViewScale(numberOr(raw.scale, VIEW_DEFAULTS.scale)),
 				layersOpen: boolOr(raw.layersOpen, VIEW_DEFAULTS.layersOpen),
-				minimapVisible: boolOr(raw.minimapVisible, VIEW_DEFAULTS.minimapVisible)
+				minimapVisible: boolOr(raw.minimapVisible, VIEW_DEFAULTS.minimapVisible),
+				...timeline !== void 0 ? { timeline } : {}
 			};
+		}
+		/**
+		* P9.1 时间轴的有效顺序：优先持久化的 `timeline`（自动剔除已删除的节点 id），
+		* 没入过列的节点（新建/旧文档）按 createdAt 追加在后。纯函数 —— Host 单测
+		* 可直接跑，客户端渲染与 compose 的 clipIds 都以它为准。
+		*/
+		function deriveTimelineOrder(nodes, timeline) {
+			const byId = new Map(nodes.map((node) => [node.id, node]));
+			const ordered = [];
+			const seen = /* @__PURE__ */ new Set();
+			if (timeline !== void 0) for (const id of timeline) {
+				if (seen.has(id)) continue;
+				const node = byId.get(id);
+				if (node !== void 0) {
+					ordered.push(node);
+					seen.add(id);
+				}
+			}
+			for (const node of [...nodes].sort((left, right) => left.createdAt - right.createdAt)) if (!seen.has(node.id)) {
+				ordered.push(node);
+				seen.add(node.id);
+			}
+			return ordered;
 		}
 		/** Arrange-grid gaps between cells (canvas-space pixels). */
 		const ARRANGE_GAP_X = 48;
@@ -1726,6 +1751,12 @@ img.csNodeMedia {
 .csTimelineItemActive {
   border-color: var(--dsw-alias-interactive-bg-active);
   background: var(--dsw-alias-interactive-bg-active);
+}
+
+/* P9.1 拖拽排序的插入落点提示。 */
+.csTimelineItemTarget {
+  outline: 2px dashed var(--dsw-alias-interactive-bg-active);
+  outline-offset: 1px;
 }
 
 .csTimelineThumb {
@@ -3937,26 +3968,63 @@ img.csNodeMedia {
 			return date.toLocaleTimeString();
 		}
 		/**
-		* The review strip: every node of the project, ordered by creation time, as a
-		* thumbnail chip. Clicking a chip selects the node and (via the parent) centers
-		* it on the surface — this is the "回看" entry point.
+		* The review strip: every node of the project as a thumbnail chip. Clicking a
+		* chip selects the node and (via the parent) centers it on the surface — this
+		* is the "回看" entry point. P9.1: chips are drag-reorderable; the resulting
+		* order persists via view.timeline and later feeds compose 的 clipIds。
 		*/
 		function CanvasTimeline(props) {
-			const { nodes, selectedNodeId, onSelect } = props;
-			const ordered = [...nodes].sort((left, right) => left.createdAt - right.createdAt);
+			const { ordered, selectedNodeId, onSelect, onReorder } = props;
+			const [dragIndex, setDragIndex] = (0, react.useState)(null);
+			const [hoverIndex, setHoverIndex] = (0, react.useState)(null);
 			if (ordered.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				className: "csTimeline csTimelineEmpty",
 				children: "尚无产物 —— 在右侧对话让 agent 生成后，按时间线回看"
 			});
+			const handleDrop = (targetIndex) => {
+				if (dragIndex === null || dragIndex === targetIndex) {
+					setDragIndex(null);
+					setHoverIndex(null);
+					return;
+				}
+				const ids = ordered.map((node) => node.id);
+				const [moved] = ids.splice(dragIndex, 1);
+				if (moved !== void 0) ids.splice(targetIndex, 0, moved);
+				onReorder(ids);
+				setDragIndex(null);
+				setHoverIndex(null);
+			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				className: "csTimeline",
-				children: ordered.map((node) => {
+				children: ordered.map((node, index) => {
 					return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 						type: "button",
-						className: node.id === selectedNodeId ? "csTimelineItem csTimelineItemActive" : "csTimelineItem",
+						className: [
+							"csTimelineItem",
+							node.id === selectedNodeId ? "csTimelineItemActive" : "",
+							index === hoverIndex && dragIndex !== null && dragIndex !== index ? "csTimelineItemTarget" : ""
+						].filter(Boolean).join(" "),
+						draggable: true,
+						onDragStart: () => {
+							setDragIndex(index);
+						},
+						onDragOver: (event) => {
+							if (dragIndex === null) return;
+							event.preventDefault();
+							setHoverIndex(index);
+						},
+						onDrop: (event) => {
+							event.preventDefault();
+							handleDrop(index);
+						},
+						onDragEnd: () => {
+							setDragIndex(null);
+							setHoverIndex(null);
+						},
 						onClick: () => {
 							onSelect(node.id);
 						},
+						title: `${node.title ?? KIND_LABEL[node.kind]} · 拖拽排序`,
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							className: "csTimelineThumb",
 							children: [
@@ -4882,6 +4950,10 @@ img.csNodeMedia {
 					actions.setFailed(cause instanceof Error ? cause.message : "模式切换失败");
 				});
 			};
+			const timelineOrder = deriveTimelineOrder(nodes, view.timeline);
+			const handleTimelineReorder = (ids) => {
+				handleViewChange({ timeline: ids });
+			};
 			const canvasBody = (() => {
 				if (projectId === null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: "csCanvasEmpty",
@@ -4953,9 +5025,10 @@ img.csNodeMedia {
 						})
 					})]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasTimeline, {
-					nodes,
+					ordered: timelineOrder,
 					selectedNodeId,
-					onSelect: handleTimelineSelect
+					onSelect: handleTimelineSelect,
+					onReorder: handleTimelineReorder
 				})] });
 			})();
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {

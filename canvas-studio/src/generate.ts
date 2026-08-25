@@ -78,6 +78,48 @@ function sliceToMax(images: string[], max: number): string[] {
 /** Drama Backend 调用超时（毫秒）：视频生成最慢，文本类最快。 */
 const DRAMA_TIMEOUT_MS = { image: 360_000, video: 600_000, text: 60_000 }
 
+/**
+ * P10 `/health` 前置探针：所有 Drama 请求先确认后端可达（结果缓存 30s），
+ * 宕机时立刻给出中文提示，而不是让用户在长超时里干等。
+ */
+const HEALTH_CACHE_MS = 30_000
+const HEALTH_TIMEOUT_MS = 5_000
+let healthCache: { ok: boolean; checkedAt: number } | null = null
+
+/** 清空探针缓存（测试钩子；生产代码不需要主动失效）。 */
+export function resetDramaProbeCache(): void {
+  healthCache = null
+}
+
+/** 探测失败时的统一中文错误（可操作：指向服务状态而非参数）。 */
+function dramaUnreachableError(cause?: unknown): Error {
+  const detail = cause instanceof Error ? `（${cause.message}）` : ''
+  return new Error(`Drama Backend 不可达，请检查服务是否已启动后再试${detail}。`)
+}
+
+/**
+ * 确认 Drama Backend 可达：GET /api/v1/health（5s 超时），成功与失败都缓存
+ * 30s —— 缓存窗口内的后续请求零开销快速通过/快速失败。
+ */
+export async function ensureDramaReachable(signal?: AbortSignal): Promise<void> {
+  const now = Date.now()
+  if (healthCache !== null && now - healthCache.checkedAt < HEALTH_CACHE_MS) {
+    if (healthCache.ok) return
+    throw dramaUnreachableError()
+  }
+  let ok = false
+  try {
+    const timeout = AbortSignal.timeout(HEALTH_TIMEOUT_MS)
+    const composed = signal !== undefined ? AbortSignal.any([signal, timeout]) : timeout
+    const response = await fetch(`${DRAMA_API_BASE}${DRAMA_ENDPOINTS.health}`, { signal: composed })
+    ok = response.ok
+  } catch {
+    ok = false
+  }
+  healthCache = { ok, checkedAt: Date.now() }
+  if (!ok) throw dramaUnreachableError()
+}
+
 /** 带超时与一次性自动重试的 Drama POST（网络错误 / 502/503/504 时重试）。 */
 async function dramaPost(
   endpoint: string,
@@ -85,6 +127,8 @@ async function dramaPost(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<Response> {
+  // 探针前置：宕机时在这里就抛中文错误，不进入生成请求的长超时。
+  await ensureDramaReachable(signal)
   let lastError: unknown
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const timeout = AbortSignal.timeout(timeoutMs)
@@ -121,6 +165,7 @@ function resolveImageUrl(url: string, port: number): string {
 
 /** 上传一张图（本地/远程 URL）到 Drama Backend，返回服务器 filename。 */
 async function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<string> {
+  await ensureDramaReachable(signal)
   const response = await fetch(sourceUrl, { signal: signal ?? null })
   if (!response.ok) throw new Error(`参考图下载失败: ${response.status}`)
   const bytes = Buffer.from(await response.arrayBuffer())
@@ -152,6 +197,8 @@ async function uploadImage(sourceUrl: string, signal?: AbortSignal): Promise<str
  * （只含 [A-Za-z0-9._-]），避免触发后端去重后缀破坏下游。
  */
 export async function uploadBytesToDrama(bytes: Uint8Array, ext: string, signal?: AbortSignal): Promise<string> {
+  // 上传走的是裸 fetch（multipart），同样前置探针。
+  await ensureDramaReachable(signal)
   const assetId = newAssetId()
   const form = new FormData()
   // new Uint8Array(...) 拷贝进全新 ArrayBuffer（BlobPart 要求非 SharedArrayBuffer 视图）。

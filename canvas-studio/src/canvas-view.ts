@@ -29,13 +29,50 @@ export function normalizeCanvasView(value: unknown): StudioCanvasView | undefine
     typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : fallback
   const boolOr = (candidate: unknown, fallback: boolean): boolean =>
     typeof candidate === 'boolean' ? candidate : fallback
+  // P9.1 时间轴顺序：仅接受全字符串数组；非法（含混入非字符串）整体丢弃，
+  // 客户端回退 createdAt 派生。
+  const timeline = Array.isArray(raw.timeline) && raw.timeline.every(id => typeof id === 'string')
+    ? raw.timeline as string[]
+    : undefined
   return {
     x: numberOr(raw.x, VIEW_DEFAULTS.x),
     y: numberOr(raw.y, VIEW_DEFAULTS.y),
     scale: clampViewScale(numberOr(raw.scale, VIEW_DEFAULTS.scale)),
     layersOpen: boolOr(raw.layersOpen, VIEW_DEFAULTS.layersOpen),
     minimapVisible: boolOr(raw.minimapVisible, VIEW_DEFAULTS.minimapVisible),
+    ...(timeline !== undefined ? { timeline } : {}),
   }
+}
+
+/**
+ * P9.1 时间轴的有效顺序：优先持久化的 `timeline`（自动剔除已删除的节点 id），
+ * 没入过列的节点（新建/旧文档）按 createdAt 追加在后。纯函数 —— Host 单测
+ * 可直接跑，客户端渲染与 compose 的 clipIds 都以它为准。
+ */
+export function deriveTimelineOrder(
+  nodes: readonly StudioCanvasNode[],
+  timeline: readonly string[] | undefined,
+): StudioCanvasNode[] {
+  const byId = new Map(nodes.map(node => [node.id, node] as const))
+  const ordered: StudioCanvasNode[] = []
+  const seen = new Set<string>()
+  if (timeline !== undefined) {
+    for (const id of timeline) {
+      if (seen.has(id)) continue
+      const node = byId.get(id)
+      if (node !== undefined) {
+        ordered.push(node)
+        seen.add(id)
+      }
+    }
+  }
+  for (const node of [...nodes].sort((left, right) => left.createdAt - right.createdAt)) {
+    if (!seen.has(node.id)) {
+      ordered.push(node)
+      seen.add(node.id)
+    }
+  }
+  return ordered
 }
 
 /** Arrange-grid gaps between cells (canvas-space pixels). */

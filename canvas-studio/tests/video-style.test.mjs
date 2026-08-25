@@ -111,6 +111,10 @@ function stubDramaFetch() {
   const original = globalThis.fetch
   globalThis.fetch = async (url, init = {}) => {
     const target = String(url)
+    // P10 health 探针前置：放行探测。
+    if (target.includes('/api/v1/health')) {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok' }), text: async () => '' }
+    }
     if (target.includes('/generate/uploadimage')) {
       uploadCount += 1
       calls.push({ url: target, kind: 'upload' })

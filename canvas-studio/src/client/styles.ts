@@ -522,6 +522,12 @@ img.csNodeMedia {
   background: var(--dsw-alias-interactive-bg-active);
 }
 
+/* P9.1 拖拽排序的插入落点提示。 */
+.csTimelineItemTarget {
+  outline: 2px dashed var(--dsw-alias-interactive-bg-active);
+  outline-offset: 1px;
+}
+
 .csTimelineThumb {
   display: grid;
   place-items: center;
