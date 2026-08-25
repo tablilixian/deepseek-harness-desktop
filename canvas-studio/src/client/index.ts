@@ -6,7 +6,7 @@ import type { StudioProject } from '../contracts/project.js'
 import { createAssetCaptureDefinition } from '../asset-capture.js'
 import { answerStudioQuestion, createStudioProject, deleteStudioProject, getStudioWorkflow, listStudioProjects, loadStudioCanvas, postStudioWorkflowAction, retryStudioNode, saveStudioCanvas } from './api.js'
 import { StudioLayoutController } from './layout-controller.js'
-import { createProjectStore, viewOf } from './project-store.js'
+import { createProjectStore, isTransientNode, viewOf } from './project-store.js'
 import { installStudioStyles } from './styles.js'
 import { StudioFrame } from './StudioFrame.js'
 import { registerQuestionChatNode } from './question-capture.js'
@@ -127,6 +127,26 @@ export function apply(ctx: ClientContext): void {
     storeInstance.actions.setView(projectId, loaded.view ?? {}, loaded.view !== undefined)
   }
 
+  // 画布读写串行化（验收反馈 2026-08-25「删除后重开又出现」）：删除的保存
+  // （POST）与 tool/result 触发的画布重载（GET → 整表替换 store）并发时，
+  // GET 可能先带回旧磁盘状态覆盖 store，随后的保存再把旧状态写回盘 —— 删除
+  // 就丢了。所有画布读改写都排进同一条 Promise 链，严格按触发顺序执行；
+  // 保存永远取执行时刻的最新快照，因此队列里最后一次保存就是最终真相。
+  let canvasIoChain: Promise<unknown> = Promise.resolve()
+  const enqueueCanvasIo = <T>(job: () => Promise<T>): Promise<T> => {
+    const next = canvasIoChain.then(job, job)
+    canvasIoChain = next.catch(() => {})
+    return next
+  }
+  /** 从磁盘重载某项目画布进 store（排队执行，避免与保存交错）。 */
+  const reloadCanvasQueued = (projectId: string): Promise<void> => enqueueCanvasIo(async () => {
+    try {
+      applyLoadedCanvas(projectId, await loadStudioCanvas(projectId))
+    } catch {
+      /* 重载失败静默：下一次打开项目仍会载入 */
+    }
+  })
+
   // 会话级项目归属：画布应跟随「当前会话绑定的 workspace」，而非仅用户手动点击
   // 的项目行。Host 写入产物时用的是会话 cwd（workspace 目录）解析出的 projectId；
   // 应用重启后会话会自动恢复到某 workspace，但 selectedProjectId 是内存态会丢失，
@@ -150,12 +170,8 @@ export function apply(ctx: ClientContext): void {
     if (storeInstance.getSnapshot().selectedProjectId === id) return
     storeInstance.actions.select(id)
     void (async () => {
-      try {
-        applyLoadedCanvas(id, await loadStudioCanvas(id))
-        void refreshWorkflow(id)
-      } catch {
-        /* 载入失败静默：下一次切换 / 重载仍会尝试 */
-      }
+      await reloadCanvasQueued(id)
+      void refreshWorkflow(id)
     })()
   }
 
@@ -207,13 +223,7 @@ export function apply(ctx: ClientContext): void {
     // 真相源）；这里只在该项目被选中时触发画布重载，不再依赖解析事件渲染文本
     // 里的 URL（后端异常 / 渲染差异时不可靠）。工具调用开始先放一个「生成中」
     // 占位节点，失败时经 tool/result 的 data.error 标记错误。
-    const reloadCanvas = async (projectId: string): Promise<void> => {
-      try {
-        applyLoadedCanvas(projectId, await loadStudioCanvas(projectId))
-      } catch {
-        /* 重载失败静默：下一次打开项目仍会载入 */
-      }
-    }
+    const reloadCanvas = (projectId: string): Promise<void> => reloadCanvasQueued(projectId)
     const disposeCapture = ctx.conversationEvents.register(createAssetCaptureDefinition({
       reloadCanvas,
       getSelectedProjectId: () => resolveActiveProjectId(),
@@ -297,18 +307,28 @@ export function apply(ctx: ClientContext): void {
   }
 
   // 节点级重试 / 修改提示词：走 Host 生成路由，结果写回原节点（retryOf）。
+  // 验收反馈 2026-08-25「点重试没反应」：此前失败经 markPendingError 只作用于
+  // isLoading 的占位节点，对真实节点是空操作 —— 错误被静默吞掉。现在发起时
+  // 立即进入加载态（画布出现进度遮罩），失败把错误写回节点本体（详情面板与
+  // 节点徽标都会显示）；成功后排队重载画布，产物原地更新。
   const rerunNode = async (projectId: string, nodeId: string, overrides?: { prompt?: string }): Promise<void> => {
     const node = storeInstance.getSnapshot().nodes[projectId]?.find((entry) => entry.id === nodeId)
     if (node === undefined) return
+    if (node.toolName === undefined || node.generationPrompt === undefined) {
+      storeInstance.actions.updateNode(projectId, nodeId, {
+        error: '该节点没有可重放的生成参数（仅 agent 生成的媒体节点支持重试）',
+      })
+      return
+    }
+    storeInstance.actions.updateNode(projectId, nodeId, { isLoading: true, progress: 0, error: undefined })
     try {
       await retryStudioNode(projectId, node, overrides)
-      applyLoadedCanvas(projectId, await loadStudioCanvas(projectId))
+      await reloadCanvasQueued(projectId)
     } catch (cause) {
-      storeInstance.actions.markPendingError(
-        projectId,
-        node.runId ?? nodeId,
-        cause instanceof Error ? cause.message : '重试失败',
-      )
+      storeInstance.actions.updateNode(projectId, nodeId, {
+        isLoading: false,
+        error: cause instanceof Error ? cause.message : '重试失败',
+      })
     }
   }
   const retryNode = (projectId: string, nodeId: string): Promise<void> => rerunNode(projectId, nodeId)
@@ -336,10 +356,14 @@ export function apply(ctx: ClientContext): void {
             storeInstance.actions.setFailed(cause instanceof Error ? cause.message : '项目列表加载失败')
           }
         }
-        const persistCanvas = async (projectId: string): Promise<void> => {
+        // 持久化走同一条串行队列：快照在执行时刻取（而非调用时刻），
+        // 并剔除瞬态占位节点 —— 生成中的占位绝不落盘（「黑色生成中图残留」
+        // 的根因），队列保证最后一次保存写的永远是最新状态。
+        const persistCanvas = (projectId: string): Promise<void> => enqueueCanvasIo(async () => {
           const snapshot = storeInstance.getSnapshot()
-          await saveStudioCanvas(projectId, snapshot.nodes[projectId] ?? [], viewOf(snapshot, projectId).view)
-        }
+          const nodes = (snapshot.nodes[projectId] ?? []).filter(node => !isTransientNode(node))
+          await saveStudioCanvas(projectId, nodes, viewOf(snapshot, projectId).view)
+        })
         const openProject = async (project: StudioProject): Promise<void> => {
           storeInstance.actions.select(project.id)
           try {
@@ -352,14 +376,15 @@ export function apply(ctx: ClientContext): void {
             await ctx.workspaces.rename(workspace.workspaceId, project.name)
             ctx.workspaces.startSession(workspace.workspaceId)
             // P4+：载入持久化画布（含视口）；dev 模式下若项目为空则注入种子。
-            const loaded = await loadStudioCanvas(project.id)
-            applyLoadedCanvas(project.id, loaded)
-            // P7：随项目载入工作流状态（审批条显隐依据）。
+            await reloadCanvasQueued(project.id)
             void refreshWorkflow(project.id)
-            if (devSeed && loaded.nodes.length === 0) {
-              const seeded = seedNodes()
-              storeInstance.actions.setNodes(project.id, seeded)
-              await saveStudioCanvas(project.id, seeded, viewOf(storeInstance.getSnapshot(), project.id).view)
+            if (devSeed) {
+              const loaded = storeInstance.getSnapshot().nodes[project.id] ?? []
+              if (loaded.length === 0) {
+                const seeded = seedNodes()
+                storeInstance.actions.setNodes(project.id, seeded)
+                await persistCanvas(project.id)
+              }
             }
           } catch (cause) {
             storeInstance.actions.setFailed(cause instanceof Error ? cause.message : '项目会话绑定失败')

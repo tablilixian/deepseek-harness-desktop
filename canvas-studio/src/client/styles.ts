@@ -12,7 +12,8 @@ const STUDIO_STYLES = `
 
 .csFrame {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 380px;
+  /* 验收反馈（2026-08-25）：对话区从 380px 加宽到 480px。 */
+  grid-template-columns: 280px minmax(0, 1fr) 480px;
   height: 100%;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);

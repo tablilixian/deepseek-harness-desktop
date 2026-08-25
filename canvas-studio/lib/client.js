@@ -545,6 +545,14 @@ window.__ModuleLoader__.load({
 			if (cryptoObj !== void 0 && typeof cryptoObj.randomUUID === "function") return cryptoObj.randomUUID();
 			return `n-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 		}
+		/**
+		* 客户端瞬态节点判定：生成中的占位（isLoading / `pending-*` id）以及没有产物
+		* URL 的 agent 媒体节点。它们只应存在于内存 —— 持久化前必须剔除，载入时也要
+		* 丢弃（否则一次生成中途的保存就会让画布永久残留「黑块」节点）。
+		*/
+		function isTransientNode(node) {
+			return node.isLoading === true || node.id.startsWith("pending-") || (node.kind === "image" || node.kind === "video") && node.url === void 0;
+		}
 		/** 取某项目的全部节点（未绑定或空时返回空数组）。 */
 		function nodesOf(state, projectId) {
 			if (projectId === null) return [];
@@ -652,7 +660,7 @@ window.__ModuleLoader__.load({
 						draft.creating = creating;
 					},
 					setNodes: (draft, projectId, nodes) => {
-						const clean = nodes.map((node) => {
+						const clean = nodes.filter((node) => !isTransientNode(node)).map((node) => {
 							const { isLoading: _isLoading, progress: _progress, error: _error, ...rest } = node;
 							return rest;
 						});
@@ -1210,7 +1218,8 @@ window.__ModuleLoader__.load({
 
 .csFrame {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) 380px;
+  /* 验收反馈（2026-08-25）：对话区从 380px 加宽到 480px。 */
+  grid-template-columns: 280px minmax(0, 1fr) 480px;
   height: 100%;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
@@ -5464,6 +5473,18 @@ img.csNodeMedia {
 				storeInstance.actions.setNodes(projectId, loaded.nodes);
 				storeInstance.actions.setView(projectId, loaded.view ?? {}, loaded.view !== void 0);
 			};
+			let canvasIoChain = Promise.resolve();
+			const enqueueCanvasIo = (job) => {
+				const next = canvasIoChain.then(job, job);
+				canvasIoChain = next.catch(() => {});
+				return next;
+			};
+			/** 从磁盘重载某项目画布进 store（排队执行，避免与保存交错）。 */
+			const reloadCanvasQueued = (projectId) => enqueueCanvasIo(async () => {
+				try {
+					applyLoadedCanvas(projectId, await loadStudioCanvas(projectId));
+				} catch {}
+			});
 			const resolveActiveProjectId = () => {
 				const manual = storeInstance.getSnapshot().selectedProjectId;
 				if (manual !== null) return manual;
@@ -5481,10 +5502,8 @@ img.csNodeMedia {
 				if (storeInstance.getSnapshot().selectedProjectId === id) return;
 				storeInstance.actions.select(id);
 				(async () => {
-					try {
-						applyLoadedCanvas(id, await loadStudioCanvas(id));
-						refreshWorkflow(id);
-					} catch {}
+					await reloadCanvasQueued(id);
+					refreshWorkflow(id);
 				})();
 			};
 			const PENDING_TIMEOUT_MS = 66e4;
@@ -5517,11 +5536,7 @@ img.csNodeMedia {
 			};
 			ctx.effect(() => installStudioStyles(), "canvas-studio: studio styles");
 			ctx.effect(() => {
-				const reloadCanvas = async (projectId) => {
-					try {
-						applyLoadedCanvas(projectId, await loadStudioCanvas(projectId));
-					} catch {}
-				};
+				const reloadCanvas = (projectId) => reloadCanvasQueued(projectId);
 				return ctx.conversationEvents.register(createAssetCaptureDefinition({
 					reloadCanvas,
 					getSelectedProjectId: () => resolveActiveProjectId(),
@@ -5589,11 +5604,23 @@ img.csNodeMedia {
 			const rerunNode = async (projectId, nodeId, overrides) => {
 				const node = storeInstance.getSnapshot().nodes[projectId]?.find((entry) => entry.id === nodeId);
 				if (node === void 0) return;
+				if (node.toolName === void 0 || node.generationPrompt === void 0) {
+					storeInstance.actions.updateNode(projectId, nodeId, { error: "该节点没有可重放的生成参数（仅 agent 生成的媒体节点支持重试）" });
+					return;
+				}
+				storeInstance.actions.updateNode(projectId, nodeId, {
+					isLoading: true,
+					progress: 0,
+					error: void 0
+				});
 				try {
 					await retryStudioNode(projectId, node, overrides);
-					applyLoadedCanvas(projectId, await loadStudioCanvas(projectId));
+					await reloadCanvasQueued(projectId);
 				} catch (cause) {
-					storeInstance.actions.markPendingError(projectId, node.runId ?? nodeId, cause instanceof Error ? cause.message : "重试失败");
+					storeInstance.actions.updateNode(projectId, nodeId, {
+						isLoading: false,
+						error: cause instanceof Error ? cause.message : "重试失败"
+					});
 				}
 			};
 			const retryNode = (projectId, nodeId) => rerunNode(projectId, nodeId);
@@ -5630,23 +5657,24 @@ img.csNodeMedia {
 								storeInstance.actions.setFailed(cause instanceof Error ? cause.message : "项目列表加载失败");
 							}
 						};
-						const persistCanvas = async (projectId) => {
+						const persistCanvas = (projectId) => enqueueCanvasIo(async () => {
 							const snapshot = storeInstance.getSnapshot();
-							await saveStudioCanvas(projectId, snapshot.nodes[projectId] ?? [], viewOf(snapshot, projectId).view);
-						};
+							await saveStudioCanvas(projectId, (snapshot.nodes[projectId] ?? []).filter((node) => !isTransientNode(node)), viewOf(snapshot, projectId).view);
+						});
 						const openProject = async (project) => {
 							storeInstance.actions.select(project.id);
 							try {
 								const workspace = await ctx.workspaces.create({ path: project.dir });
 								await ctx.workspaces.rename(workspace.workspaceId, project.name);
 								ctx.workspaces.startSession(workspace.workspaceId);
-								const loaded = await loadStudioCanvas(project.id);
-								applyLoadedCanvas(project.id, loaded);
+								await reloadCanvasQueued(project.id);
 								refreshWorkflow(project.id);
-								if (devSeed && loaded.nodes.length === 0) {
-									const seeded = seedNodes();
-									storeInstance.actions.setNodes(project.id, seeded);
-									await saveStudioCanvas(project.id, seeded, viewOf(storeInstance.getSnapshot(), project.id).view);
+								if (devSeed) {
+									if ((storeInstance.getSnapshot().nodes[project.id] ?? []).length === 0) {
+										const seeded = seedNodes();
+										storeInstance.actions.setNodes(project.id, seeded);
+										await persistCanvas(project.id);
+									}
 								}
 							} catch (cause) {
 								storeInstance.actions.setFailed(cause instanceof Error ? cause.message : "项目会话绑定失败");

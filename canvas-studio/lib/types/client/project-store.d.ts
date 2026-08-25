@@ -22,6 +22,19 @@ import type { StudioCaptureAsset } from '../asset-capture.js';
 import type { StudioProject, StudioWorkflow } from '../contracts/project.js';
 /** Mint a node id in the browser (secure context over loopback). */
 export declare function newNodeId(): string;
+/**
+ * 客户端瞬态节点判定：生成中的占位（isLoading / `pending-*` id）以及没有产物
+ * URL 的 agent 媒体节点。它们只应存在于内存 —— 持久化前必须剔除，载入时也要
+ * 丢弃（否则一次生成中途的保存就会让画布永久残留「黑块」节点）。
+ */
+export declare function isTransientNode(node: StudioCanvasNode): boolean;
+/**
+ * 节点字段补丁：与 Partial 不同，允许显式传 undefined 来清除可选字段
+ * （exactOptionalPropertyTypes 下 `Partial<T>` 不接受 undefined 值）。
+ */
+export type NodePatch = {
+    [K in keyof StudioCanvasNode]?: StudioCanvasNode[K] | undefined;
+};
 /** One undo/redo history entry: a full node-list snapshot of one project. */
 export interface HistoryEntry {
     projectId: string;
@@ -79,8 +92,8 @@ export type ProjectStoreActions = {
     selectAllNodes: (draft: ProjectStoreState) => void;
     /** 移动节点（拖拽逐帧调用；不写历史）。group 节点联动子图层。 */
     moveNode: (draft: ProjectStoreState, projectId: string, id: string, x: number, y: number) => void;
-    /** 增量更新节点字段（拖拽 resize 逐帧；不写历史）。 */
-    updateNode: (draft: ProjectStoreState, projectId: string, id: string, updates: Partial<StudioCanvasNode>) => void;
+    /** 增量更新节点字段（拖拽 resize 逐帧；不写历史）。补丁可传 undefined 清除字段。 */
+    updateNode: (draft: ProjectStoreState, projectId: string, id: string, updates: NodePatch) => void;
     /** 删除节点并清理指向它的血缘（写历史）。 */
     removeNodes: (draft: ProjectStoreState, projectId: string, ids: string[]) => void;
     /** 快照当前项目节点列表进历史（拖拽/缩放开始时调用）。 */
