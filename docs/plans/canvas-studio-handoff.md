@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-**截至 2026-08-25 晚:一期(P1–P6)+ 二期 P7(门控/澄清)、P8(参考素材 1→4)、P9.1(时间轴排序持久化)、P10(health 探针)全部代码完成并已推送 `origin canvas-studio`(HEAD=`95ecd74dc8`)。验收反馈四连、会话历史恢复、启动会话对齐均已修复并推送。剩余 P9.2 合成路由 / P9.3 导出 UI / 会话去重(sessionId 入注册表) / P11 裁剪执行未做。**
+**截至 2026-08-25 晚:一期(P1–P6)+ 二期 P7(门控/澄清)、P8(参考素材 1→4)、P9.1(时间轴排序持久化)、P10(health 探针)全部代码完成并已推送 `origin canvas-studio`。验收反馈四连、会话历史恢复、启动会话对齐均已修复并推送。P9.2 合成路由(2026-08-25 收尾,代码完成待桌面核验)已完成:ffmpeg 基建抽 `src/ffmpeg-run.ts`(video-style 改 re-export)、新增 `src/compose.ts`(clip 收集/统一转码/concat/BGM amix/落 `export-<uuid>.mp4`)、`routes.ts` 注册 `POST /canvas-studio/compose`、单测 72/72 绿(含 compose 9 + 真实 ffmpeg testsrc 冒烟)。剩余 P9.3 导出 UI / 会话去重(sessionId 入注册表) / P11 裁剪执行未做。**
 
 - 仓库根 `canvas-studio/` 独立包,桌面 profile 已集成(`corepack yarn dev` 三栏工作台)。
 - 布局:左栏项目列表,中间无限画布(顶部固定工具栏 + 底部分镜时间线),右栏为官方对话区。图层列表是画布右上角可开关浮窗;小地图支持工具条显隐。
@@ -198,12 +198,12 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 - 参考画布 S1–S7 集成:`9a314b6e88`;布局微调:`e38e329cbb` / `1a81a9ebd4`
 - **2026-08-21(9 工具扩展 + 画布体验修复):本轮提交(见 git log;含 tools 文档、v3 视图持久化、视频播放修复、整理布局重写、跳动/悬停 bug 修复)**
 - **2026-08-25(二期推进):P7 门控与点选澄清 `1dad2b7c6a`;接口收敛(fl2va/ref2va)`e35bc715e7`;P8.1–P8.3 素材入口 `36d094cc31`/`7004ac0986`/`ef1258a3a8`;P9 参考闭环(@ref + list_references)`2cde9e8474`;P8.4 参考视频抽帧提风格 `a1a1abaa91`;验收修复四连(黑块残留/重试反馈/删除复活/对话区加宽)`9d3f48f010`;会话恢复(打开项目回到最近非空会话)`aa88c02b5c`。细节见 phase2 §11–§12。**
-- **2026-08-25(二期收口):文档验收收口 + 排期决策与 P9 实施步骤定稿 `f70f66bbe8`;health 前置探针 + P9.1 时间轴排序持久化 `4be84e64b4`;启动会话对齐(打开客户端自动恢复最近非空会话,无需手动点项目)`95ecd74dc8`。当前 HEAD=`95ecd74dc8`,全部已推 `origin canvas-studio`。细节见 phase2 §11.3/§11.4/§11.8。**
+  - **2026-08-25(二期收口):文档验收收口 + 排期决策与 P9 实施步骤定稿 `f70f66bbe8`;health 前置探针 + P9.1 时间轴排序持久化 `4be84e64b4`;启动会话对齐(打开客户端自动恢复最近非空会话,无需手动点项目)`95ecd74dc8`;P9.2 合成路由(`src/ffmpeg-run.ts` 抽公共 + `src/compose.ts` + `POST /canvas-studio/compose` + 单测 72/72)代码完成待桌面核验。细节见 phase2 §11.3/§11.4/§11.8。**
 
 ## 10. 下一步
 
 1. **桌面可视化验收(待核验)**:重启 `corepack yarn dev`(兼容模式)→ 对照 phase2 §11.8 验收清单逐项核验:视频节点可播放、视图持久化、整理布局、时间线不拉走视口、悬停不跟随、验收四连(黑块/重试/删除复活/对话 480px)、点击项目与启动后均恢复历史对话、时间轴拖拽重排持久化、Drama 宕机秒级中文报错。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`。
-2. **P9.2 合成路由(下一步主任务)**:见 phase2 §5.1 步骤② —— 抽取 `src/ffmpeg-run.ts`(`resolveFfmpegPath`/`runFfmpeg`,video-style 改为 re-export);新增 `src/compose.ts`(收集分镜视频 clip → ffmpeg `-r -i img -i audio` 统一帧率 + 时间线 `concat` → 可选 BGM `amix` → 落 `assets 根/export-<uuid>.mp4`);`routes.ts` 注册 `POST /canvas-studio/compose`(stream-json 渐进回报);测试三档:mock-Drama + fake-ffmpeg / `FFMPEG_PATH=fake` / 真实 ffmpeg。**前置**:先确认本地 ffmpeg 是否安装(`which ffmpeg`),否则合成需联网后端。
+2. **P9.2 合成路由(已完成,待桌面核验)**:见 phase2 §5.1 步骤② —— 已抽取 `src/ffmpeg-run.ts`(`resolveFfmpegPath`/`runFfmpeg`/`parseFfmpegStreams`/`parseFfmpegDuration`,video-style 改为 re-export);新增 `src/compose.ts`(收集分镜视频 clip → 逐段统一转码 1280x720@25 → 时间线 `concat` → 可选 BGM `amix` → 落 `assets 根/export-<uuid>.mp4`);`routes.ts` 注册 `POST /canvas-studio/compose`,返回 `{ url, duration }`;测试 72/72 绿(含 compose 9 用例 + 真实 ffmpeg testsrc 双段冒烟)。下一步 **P9.3 导出 UI** 调该路由并回写画布节点。
 3. **P9.3 导出 UI**:`StudioFrame` 顶部「导出成片」按钮 → 调 `/compose` → 进度 Modal → 完成后本地预览/打开文件/复制路径。
 4. **会话去重(技术债)**:项目注册表持久化 `sessionId`,打开项目优先复用,遏制 workspace 会话堆积(与当前「恢复最近非空会话」互补)。
 5. **P11 裁剪执行**:交付前裁掉未接端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 等)、未启用 UI 与 dead code;最终 `check` 全绿。

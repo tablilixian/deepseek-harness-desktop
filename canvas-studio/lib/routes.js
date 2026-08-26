@@ -4,6 +4,7 @@ import { extname, join, sep } from 'node:path';
 import { normalizeWorkflow } from './contracts/project.js';
 import { generateAsset, uploadLocalImage } from './generate.js';
 import { extractVideoStyle } from './video-style.js';
+import { composeStudioVideo } from './compose.js';
 import { normalizeCanvasView } from './canvas-view.js';
 const ROUTE_PROJECTS = '/canvas-studio/projects';
 const ROUTE_GENERATE = '/canvas-studio/generate';
@@ -12,6 +13,7 @@ const ROUTE_CANVAS = '/canvas-studio/canvas';
 const ROUTE_WORKFLOW = '/canvas-studio/workflow';
 const ROUTE_UPLOAD = '/canvas-studio/upload';
 const ROUTE_UPLOAD_VIDEO = '/canvas-studio/upload-video';
+const ROUTE_COMPOSE = '/canvas-studio/compose';
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 /** P8.4 参考视频上限：短参考片为主，128MB 已远超风格采样所需。 */
 const MAX_VIDEO_BODY_BYTES = 128 * 1024 * 1024;
@@ -701,6 +703,55 @@ export function registerStudioRoutes(ctx, registry) {
                 catch (cause) {
                     if (!controller.signal.aborted && !res.destroyed) {
                         sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'video upload failed' });
+                    }
+                }
+                finally {
+                    stopWatching();
+                }
+            } }),
+        // P9.2: 成片合成。客户端 POST 选中的分镜视频片段 id（与可选 BGM 节点
+        // id）；Host 统一转码 → concat 拼接 → 可选 BGM 混音 → 落 assets 根目录
+        // export-<uuid>.mp4，返回同源 URL + 成片时长，由 P9.3 前端回写画布节点。
+        ctx.webServer.register({ kind: 'exact', path: ROUTE_COMPOSE, handler: async (req, res) => {
+                if (!requestAllowed(req, expectedPort)) {
+                    sendJson(res, 403, { error: 'canvas-studio request authority rejected' });
+                    return;
+                }
+                if (req.method !== 'POST' || !mutationAllowed(req, expectedPort)) {
+                    sendJson(res, 405, { error: 'compose requires a local same-origin POST' });
+                    return;
+                }
+                const controller = new AbortController();
+                const stopWatching = () => {
+                    req.off('aborted', onRequestAbort);
+                    res.off('close', onResponseClose);
+                };
+                const onRequestAbort = () => controller.abort();
+                const onResponseClose = () => {
+                    if (!res.writableEnded)
+                        controller.abort();
+                };
+                req.once('aborted', onRequestAbort);
+                res.once('close', onResponseClose);
+                try {
+                    const body = await readJson(req, controller.signal);
+                    if (typeof body.projectId !== 'string') {
+                        sendJson(res, 400, { error: '缺少 projectId' });
+                        return;
+                    }
+                    if (!Array.isArray(body.clipIds) || !body.clipIds.every((id) => typeof id === 'string')) {
+                        sendJson(res, 400, { error: 'clipIds 必须是字符串数组' });
+                        return;
+                    }
+                    const bgmNodeId = typeof body.bgmNodeId === 'string' ? body.bgmNodeId : undefined;
+                    const result = await composeStudioVideo(registry, body.projectId, body.clipIds, bgmNodeId, {}, controller.signal);
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 200, { url: result.url, duration: result.duration });
+                    }
+                }
+                catch (cause) {
+                    if (!controller.signal.aborted && !res.destroyed) {
+                        sendJson(res, 400, { error: cause instanceof Error ? cause.message : 'compose failed' });
                     }
                 }
                 finally {

@@ -1,4 +1,7 @@
 import type { ProjectRegistry } from './projects.js';
+import { resolveFfmpegPath, parseFfmpegDuration } from './ffmpeg-run.js';
+/** ffmpeg 解析顺序与运行基础设施已抽到 ffmpeg-run（P9 复用）；API 保持不变。 */
+export { resolveFfmpegPath, parseFfmpegDuration };
 /** 单帧产物：同源 URL + Drama 文件名 + 采样时间点（秒）。 */
 export interface VideoFrameImport {
     url: string;
@@ -23,16 +26,6 @@ export interface VideoStyleOptions {
     maxFrames?: number;
     styleSamples?: number;
 }
-/**
- * 解析本机可用的 ffmpeg 可执行路径：显式参数 → FFMPEG_PATH → ffmpeg-static
- * （仅当二进制真实存在）→ PATH。全部落空抛中文可操作错误。
- */
-export declare function resolveFfmpegPath(explicit?: string): string;
-/**
- * 从 `ffmpeg -i` 的 stderr 里解析 `Duration: HH:MM:SS.frac` 为秒。
- * 解析失败返回 0（调用方按「未知时长只取第 0 帧」处理）。
- */
-export declare function parseFfmpegDuration(stderr: string): number;
 /**
  * 规划抽帧时间点（纯函数）：
  * - 时长未知/非法：只取第 0 帧；

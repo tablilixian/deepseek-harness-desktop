@@ -12,14 +12,16 @@
  * enableScripts: false，ffmpeg-static 的 postinstall 二进制下载会被跳过，
  * 此时自动回退系统 ffmpeg；两者都不可用时抛可操作的中文错误。
  */
-import { spawn } from 'node:child_process'
-import { accessSync, constants as fsConstants, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { createRequire } from 'node:module'
 import type { ProjectRegistry } from './projects.js'
 import { newAssetId } from './config.js'
 import { analyzeImage, uploadBytesToDrama } from './generate.js'
+import { resolveFfmpegPath, runFfmpeg, parseFfmpegDuration } from './ffmpeg-run.js'
+
+/** ffmpeg 解析顺序与运行基础设施已抽到 ffmpeg-run（P9 复用）；API 保持不变。 */
+export { resolveFfmpegPath, parseFfmpegDuration }
 
 /** 抽帧默认间隔（秒）。 */
 const FRAME_EVERY_SECONDS = 2
@@ -63,99 +65,6 @@ export interface VideoStyleOptions {
   everySeconds?: number
   maxFrames?: number
   styleSamples?: number
-}
-
-function isExecutableFile(path: string): boolean {
-  try {
-    accessSync(path, fsConstants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** 按 PATH 约定枚举候选可执行文件（win32 补 .exe）。 */
-function pathCandidates(): string[] {
-  const base = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-  return (process.env.PATH ?? '')
-    .split(process.platform === 'win32' ? ';' : ':')
-    .filter((dir) => dir.length > 0)
-    .map((dir) => join(dir, base))
-}
-
-/**
- * 解析本机可用的 ffmpeg 可执行路径：显式参数 → FFMPEG_PATH → ffmpeg-static
- * （仅当二进制真实存在）→ PATH。全部落空抛中文可操作错误。
- */
-export function resolveFfmpegPath(explicit?: string): string {
-  const candidates: string[] = []
-  if (explicit !== undefined && explicit.length > 0) candidates.push(explicit)
-  const envPath = process.env.FFMPEG_PATH
-  if (envPath !== undefined && envPath.length > 0) candidates.push(envPath)
-  try {
-    // 动态解析避免硬依赖：包缺失/未构建二进制时静默跳过，不阻塞系统回退。
-    const required = createRequire(import.meta.url)('ffmpeg-static') as unknown
-    if (typeof required === 'string' && required.length > 0) candidates.push(required)
-  } catch {
-    /* ffmpeg-static 未安装则跳过 */
-  }
-  for (const candidate of [...candidates, ...pathCandidates()]) {
-    if (isExecutableFile(candidate)) return candidate
-  }
-  throw new Error(
-    '未找到可用的 ffmpeg。请安装 ffmpeg（macOS: brew install ffmpeg / Ubuntu: apt install ffmpeg）'
-    + '或设置环境变量 FFMPEG_PATH 指向可执行文件后重试。',
-  )
-}
-
-/** 运行一次 ffmpeg，收集 stdout/stderr；超时强杀并报错。 */
-function runFfmpeg(
-  ffmpegPath: string,
-  args: readonly string[],
-  timeoutMs: number,
-  signal?: AbortSignal,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stdout = ''
-    let stderr = ''
-    const finish = (callback: () => void) => {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      callback()
-    }
-    const onAbort = () => {
-      child.kill('SIGKILL')
-      finish(() => rejectPromise(signal?.reason ?? new DOMException('aborted', 'AbortError')))
-    }
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL')
-      finish(() => rejectPromise(new Error(`ffmpeg 执行超时（${Math.round(timeoutMs / 1000)}s）`)))
-    }, timeoutMs)
-    signal?.addEventListener('abort', onAbort, { once: true })
-    child.stdout?.on('data', (chunk: Buffer) => { stdout += String(chunk) })
-    child.stderr?.on('data', (chunk: Buffer) => { stderr += String(chunk) })
-    child.on('error', (cause) => {
-      finish(() => rejectPromise(new Error(`ffmpeg 启动失败: ${cause instanceof Error ? cause.message : String(cause)}`)))
-    })
-    child.on('close', (code) => {
-      finish(() => resolvePromise({ code: code ?? -1, stdout, stderr }))
-    })
-  })
-}
-
-/**
- * 从 `ffmpeg -i` 的 stderr 里解析 `Duration: HH:MM:SS.frac` 为秒。
- * 解析失败返回 0（调用方按「未知时长只取第 0 帧」处理）。
- */
-export function parseFfmpegDuration(stderr: string): number {
-  const match = /Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)/u.exec(stderr)
-  if (match === null) return 0
-  const hours = Number(match[1])
-  const minutes = Number(match[2])
-  const seconds = Number(match[3])
-  const fraction = Number(`0.${match[4]}`)
-  return hours * 3600 + minutes * 60 + seconds + fraction
 }
 
 /**
