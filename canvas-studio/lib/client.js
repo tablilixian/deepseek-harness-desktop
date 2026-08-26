@@ -449,6 +449,22 @@ window.__ModuleLoader__.load({
 				...signal === void 0 ? {} : { signal }
 			}));
 		}
+		/** P9.2/P9.3：合成成片。提交选中的分镜视频 clip id（与可选 BGM 节点 id），返回成片同源 URL + 时长。 */
+		async function composeStudioVideo(projectId, clipIds, bgmNodeId, signal) {
+			return await readJson(await fetch("/canvas-studio/compose", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(bgmNodeId === void 0 ? {
+					projectId,
+					clipIds
+				} : {
+					projectId,
+					clipIds,
+					bgmNodeId
+				}),
+				...signal === void 0 ? {} : { signal }
+			}));
+		}
 		/**
 		* 解析节点上保存的生成参数（generationPrompt 是原参数 JSON）；无法解析或缺失时
 		* 返回 null。重试 / 修改提示词都基于它重放原参数（plan §7.8）。
@@ -1194,6 +1210,37 @@ window.__ModuleLoader__.load({
 						draft.selectedNodeIds = [stickyNode.id];
 						draft.selectedNodeId = stickyNode.id;
 					},
+					addComposedVideo: (draft, projectId, asset) => {
+						const existing = draft.nodes[projectId];
+						if (existing === void 0) return;
+						const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing);
+						draft.history = history.history;
+						draft.historyIndex = history.historyIndex;
+						const index = existing.length;
+						const size = NODE_SIZE.video;
+						const node = {
+							id: newNodeId(),
+							kind: "video",
+							title: asset.title,
+							url: asset.url,
+							...typeof asset.duration === "number" ? { duration: asset.duration } : {},
+							x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
+							y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+							width: size.width,
+							height: size.height,
+							createdAt: Date.now(),
+							toolName: "compose",
+							origin: "manual",
+							sourceIds: asset.sourceIds,
+							operationType: "video-composite"
+						};
+						draft.nodes = {
+							...draft.nodes,
+							[projectId]: [...existing, node]
+						};
+						draft.selectedNodeIds = [node.id];
+						draft.selectedNodeId = node.id;
+					},
 					removePendingByRunId: (draft, projectId, runId) => {
 						const existing = draft.nodes[projectId];
 						if (existing === void 0) return;
@@ -1714,13 +1761,34 @@ img.csNodeMedia {
 
 .csTimeline {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   padding: 8px 12px;
   border-top: 1px solid var(--dsw-alias-border-l2);
-  overflow-x: auto;
   background: var(--dsw-alias-bg-base);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+/* P9.3 合成工具条：片段计数 + 导出按钮。 */
+.csTimelineToolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.csTimelineCount {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 片段条横向滚动（工具条固定不滚）。 */
+.csTimelineStrip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .csTimelineEmpty {
@@ -3974,13 +4042,10 @@ img.csNodeMedia {
 		* order persists via view.timeline and later feeds compose 的 clipIds。
 		*/
 		function CanvasTimeline(props) {
-			const { ordered, selectedNodeId, onSelect, onReorder } = props;
+			const { ordered, selectedNodeId, onSelect, onReorder, onCompose, composeBusy } = props;
 			const [dragIndex, setDragIndex] = (0, react.useState)(null);
 			const [hoverIndex, setHoverIndex] = (0, react.useState)(null);
-			if (ordered.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-				className: "csTimeline csTimelineEmpty",
-				children: "尚无产物 —— 在右侧对话让 agent 生成后，按时间线回看"
-			});
+			const clipCount = ordered.filter((node) => node.kind === "video").length;
 			const handleDrop = (targetIndex) => {
 				if (dragIndex === null || dragIndex === targetIndex) {
 					setDragIndex(null);
@@ -3994,61 +4059,83 @@ img.csNodeMedia {
 				setDragIndex(null);
 				setHoverIndex(null);
 			};
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			if (ordered.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				className: "csTimeline csTimelineEmpty",
+				children: "尚无产物 —— 在右侧对话让 agent 生成后，按时间线回看"
+			});
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: "csTimeline",
-				children: ordered.map((node, index) => {
-					return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: "csTimelineToolbar",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+						className: "csTimelineCount",
+						children: ["视频片段 ", clipCount]
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 						type: "button",
-						className: [
-							"csTimelineItem",
-							node.id === selectedNodeId ? "csTimelineItemActive" : "",
-							index === hoverIndex && dragIndex !== null && dragIndex !== index ? "csTimelineItemTarget" : ""
-						].filter(Boolean).join(" "),
-						draggable: true,
-						onDragStart: () => {
-							setDragIndex(index);
-						},
-						onDragOver: (event) => {
-							if (dragIndex === null) return;
-							event.preventDefault();
-							setHoverIndex(index);
-						},
-						onDrop: (event) => {
-							event.preventDefault();
-							handleDrop(index);
-						},
-						onDragEnd: () => {
-							setDragIndex(null);
-							setHoverIndex(null);
-						},
+						className: "csPrimary",
+						disabled: clipCount < 2 || composeBusy,
+						title: clipCount < 2 ? "至少排列 2 个视频片段才能导出成片" : "选中的视频片段将按顺序拼接成片",
 						onClick: () => {
-							onSelect(node.id);
+							onCompose();
 						},
-						title: `${node.title ?? KIND_LABEL[node.kind]} · 拖拽排序`,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							className: "csTimelineThumb",
-							children: [
-								node.kind === "image" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
-									src: node.url,
-									alt: node.title ?? "image",
-									draggable: false
-								}) : null,
-								node.kind === "video" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
-									src: node.url,
-									muted: true,
-									preload: "metadata"
-								}) : null,
-								node.kind !== "image" && node.kind !== "video" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: "csTimelineKind",
-									children: KIND_LABEL[node.kind]
-								}) : null
-							]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: "csTimelineTime",
-							children: timeLabel(node.createdAt)
-						})]
-					}, node.id);
-				})
+						children: composeBusy ? "合成中…" : "合成导出成片"
+					})]
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: "csTimelineStrip",
+					children: ordered.map((node, index) => {
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+							type: "button",
+							className: [
+								"csTimelineItem",
+								node.id === selectedNodeId ? "csTimelineItemActive" : "",
+								index === hoverIndex && dragIndex !== null && dragIndex !== index ? "csTimelineItemTarget" : ""
+							].filter(Boolean).join(" "),
+							draggable: true,
+							onDragStart: () => {
+								setDragIndex(index);
+							},
+							onDragOver: (event) => {
+								if (dragIndex === null) return;
+								event.preventDefault();
+								setHoverIndex(index);
+							},
+							onDrop: (event) => {
+								event.preventDefault();
+								handleDrop(index);
+							},
+							onDragEnd: () => {
+								setDragIndex(null);
+								setHoverIndex(null);
+							},
+							onClick: () => {
+								onSelect(node.id);
+							},
+							title: `${node.title ?? KIND_LABEL[node.kind]} · 拖拽排序`,
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: "csTimelineThumb",
+								children: [
+									node.kind === "image" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+										src: node.url,
+										alt: node.title ?? "image",
+										draggable: false
+									}) : null,
+									node.kind === "video" && node.url ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("video", {
+										src: node.url,
+										muted: true,
+										preload: "metadata"
+									}) : null,
+									node.kind !== "image" && node.kind !== "video" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: "csTimelineKind",
+										children: KIND_LABEL[node.kind]
+									}) : null
+								]
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: "csTimelineTime",
+								children: timeLabel(node.createdAt)
+							})]
+						}, node.id);
+					})
+				})]
 			});
 		}
 		//#endregion
@@ -4808,6 +4895,7 @@ img.csNodeMedia {
 			const fitPendingRef = (0, react.useRef)(false);
 			const fittedProjectRef = (0, react.useRef)(null);
 			const [fitRequestedAt, setFitRequestedAt] = (0, react.useState)(0);
+			const [composeBusy, setComposeBusy] = (0, react.useState)(false);
 			(0, react.useEffect)(() => {
 				refreshProjects();
 			}, [refreshProjects]);
@@ -4954,6 +5042,30 @@ img.csNodeMedia {
 			const handleTimelineReorder = (ids) => {
 				handleViewChange({ timeline: ids });
 			};
+			const handleComposeExport = async () => {
+				if (projectId === null || composeBusy) return;
+				const clipIds = timelineOrder.filter((node) => node.kind === "video").map((node) => node.id);
+				if (clipIds.length < 2) {
+					window.alert("请先在时间轴上排列至少 2 个视频片段，再导出成片");
+					return;
+				}
+				setComposeBusy(true);
+				try {
+					const { url, duration } = await composeStudioVideo(projectId, clipIds);
+					persistAfter(() => actions.addComposedVideo(projectId, {
+						url,
+						title: `成片 ${(/* @__PURE__ */ new Date()).toLocaleString("zh-CN")}`,
+						duration,
+						sourceIds: clipIds
+					}));
+					window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布，可在时间轴或画布播放。`);
+				} catch (cause) {
+					const message = cause instanceof Error ? cause.message : String(cause);
+					window.alert(`成片合成失败：${message}`);
+				} finally {
+					setComposeBusy(false);
+				}
+			};
 			const canvasBody = (() => {
 				if (projectId === null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: "csCanvasEmpty",
@@ -5028,7 +5140,9 @@ img.csNodeMedia {
 					ordered: timelineOrder,
 					selectedNodeId,
 					onSelect: handleTimelineSelect,
-					onReorder: handleTimelineReorder
+					onReorder: handleTimelineReorder,
+					onCompose: handleComposeExport,
+					composeBusy
 				})] });
 			})();
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {

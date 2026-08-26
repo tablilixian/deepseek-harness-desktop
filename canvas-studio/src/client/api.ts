@@ -189,6 +189,22 @@ export async function saveStudioCanvas(
   }))
 }
 
+/** P9.2/P9.3：合成成片。提交选中的分镜视频 clip id（与可选 BGM 节点 id），返回成片同源 URL + 时长。 */
+export async function composeStudioVideo(
+  projectId: string,
+  clipIds: readonly string[],
+  bgmNodeId?: string,
+  signal?: AbortSignal,
+): Promise<{ url: string; duration: number }> {
+  const response = await readJson<{ url: string; duration: number }>(await fetch('/canvas-studio/compose', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(bgmNodeId === undefined ? { projectId, clipIds } : { projectId, clipIds, bgmNodeId }),
+    ...(signal === undefined ? {} : { signal }),
+  }))
+  return response
+}
+
 /**
  * 解析节点上保存的生成参数（generationPrompt 是原参数 JSON）；无法解析或缺失时
  * 返回 null。重试 / 修改提示词都基于它重放原参数（plan §7.8）。

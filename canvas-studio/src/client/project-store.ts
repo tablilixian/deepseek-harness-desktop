@@ -168,6 +168,13 @@ export type ProjectStoreActions = {
    * 指向全部帧，形成血缘边）。选中 sticky 便于用户立刻看到归纳文本。
    */
   addVideoStyleNodes: (draft: ProjectStoreState, projectId: string, payload: StudioVideoStylePayload & { name: string }) => void
+  /** P9.3：成片合成结果回写画布（video-composite 终节点，manual origin，血缘指向全部源 clip）。 */
+  addComposedVideo: (draft: ProjectStoreState, projectId: string, asset: {
+    url: string
+    title: string
+    duration?: number
+    sourceIds: string[]
+  }) => void
   /** 移除 runId 匹配的占位节点（重载/完成时）。 */
   removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void
   /** 占位节点标记失败（tool/result 的 data.error）。 */
@@ -773,6 +780,34 @@ export function createProjectStore(): EngineStoreHandle<ProjectStoreState, Proje
         }
         draft.selectedNodeIds = [stickyNode.id]
         draft.selectedNodeId = stickyNode.id
+      },
+      addComposedVideo: (draft, projectId, asset) => {
+        const existing = draft.nodes[projectId]
+        if (existing === undefined) return
+        const history = snapshotHistory(draft.history, draft.historyIndex, projectId, existing)
+        draft.history = history.history
+        draft.historyIndex = history.historyIndex
+        const index = existing.length
+        const size = NODE_SIZE.video
+        const node: StudioCanvasNode = {
+          id: newNodeId(),
+          kind: 'video',
+          title: asset.title,
+          url: asset.url,
+          ...(typeof asset.duration === 'number' ? { duration: asset.duration } : {}),
+          x: LAYOUT.origin + (index % LAYOUT.columns) * LAYOUT.stepX,
+          y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
+          width: size.width,
+          height: size.height,
+          createdAt: Date.now(),
+          toolName: 'compose',
+          origin: 'manual',
+          sourceIds: asset.sourceIds,
+          operationType: 'video-composite',
+        }
+        draft.nodes = { ...draft.nodes, [projectId]: [...existing, node] }
+        draft.selectedNodeIds = [node.id]
+        draft.selectedNodeId = node.id
       },
       removePendingByRunId: (draft, projectId, runId) => {
         const existing = draft.nodes[projectId]

@@ -483,13 +483,34 @@ img.csNodeMedia {
 
 .csTimeline {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   padding: 8px 12px;
   border-top: 1px solid var(--dsw-alias-border-l2);
-  overflow-x: auto;
   background: var(--dsw-alias-bg-base);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
   --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+/* P9.3 合成工具条：片段计数 + 导出按钮。 */
+.csTimelineToolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.csTimelineCount {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 片段条横向滚动（工具条固定不滚）。 */
+.csTimelineStrip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .csTimelineEmpty {

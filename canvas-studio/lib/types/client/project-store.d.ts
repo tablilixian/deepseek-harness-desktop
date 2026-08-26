@@ -132,6 +132,13 @@ export type ProjectStoreActions = {
     addVideoStyleNodes: (draft: ProjectStoreState, projectId: string, payload: StudioVideoStylePayload & {
         name: string;
     }) => void;
+    /** P9.3：成片合成结果回写画布（video-composite 终节点，manual origin，血缘指向全部源 clip）。 */
+    addComposedVideo: (draft: ProjectStoreState, projectId: string, asset: {
+        url: string;
+        title: string;
+        duration?: number;
+        sourceIds: string[];
+    }) => void;
     /** 移除 runId 匹配的占位节点（重载/完成时）。 */
     removePendingByRunId: (draft: ProjectStoreState, projectId: string, runId: string) => void;
     /** 占位节点标记失败（tool/result 的 data.error）。 */

@@ -10,7 +10,7 @@ import { LayerPanel } from './canvas/LayerPanel.js'
 import { LayerDetailPanel } from './canvas/LayerDetailPanel.js'
 import { CanvasContextMenu } from './canvas/CanvasContextMenu.js'
 import { ReferenceTray } from './canvas/ReferenceTray.js'
-import { uploadLocalStudioImage, uploadStudioVideo, bytesToBase64 } from './api.js'
+import { uploadLocalStudioImage, uploadStudioVideo, bytesToBase64, composeStudioVideo } from './api.js'
 import type { StudioCanvasNode, StudioCanvasView } from '../contracts/canvas.js'
 import { deriveTimelineOrder } from '../canvas-view.js'
 import { formatRefToken } from '../reference-token.js'
@@ -66,6 +66,8 @@ export function StudioFrame(props: StudioFrameProps) {
   const fittedProjectRef = useRef<string | null>(null)
   // 整理布局后等新坐标渲染完成再适配视野（imperative fit 读的是渲染后的节点表）。
   const [fitRequestedAt, setFitRequestedAt] = useState(0)
+  // P9.3：成片合成进行中标记（禁用按钮 + 文案「合成中…」）。
+  const [composeBusy, setComposeBusy] = useState(false)
 
   // 首次挂载即拉取项目列表，无需手动点「刷新」。
   useEffect(() => { void refreshProjects() }, [refreshProjects])
@@ -222,6 +224,32 @@ export function StudioFrame(props: StudioFrameProps) {
   const handleTimelineReorder = (ids: string[]): void => {
     handleViewChange({ timeline: ids })
   }
+  // P9.3：一键导出成片。取时间轴上 kind=video 的片段（按当前顺序）作为 clipIds，
+  // 调 Host 合成路由，成功回写画布 video-composite 节点；BGM 第一版从简（无选择器）。
+  const handleComposeExport = async (): Promise<void> => {
+    if (projectId === null || composeBusy) return
+    const clipIds = timelineOrder.filter(node => node.kind === 'video').map(node => node.id)
+    if (clipIds.length < 2) {
+      window.alert('请先在时间轴上排列至少 2 个视频片段，再导出成片')
+      return
+    }
+    setComposeBusy(true)
+    try {
+      const { url, duration } = await composeStudioVideo(projectId, clipIds)
+      persistAfter(() => actions.addComposedVideo(projectId, {
+        url,
+        title: `成片 ${new Date().toLocaleString('zh-CN')}`,
+        duration,
+        sourceIds: clipIds,
+      }))
+      window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布，可在时间轴或画布播放。`)
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      window.alert(`成片合成失败：${message}`)
+    } finally {
+      setComposeBusy(false)
+    }
+  }
 
   const canvasBody = ((): React.ReactNode => {
     if (projectId === null) {
@@ -274,6 +302,8 @@ export function StudioFrame(props: StudioFrameProps) {
           selectedNodeId={selectedNodeId}
           onSelect={handleTimelineSelect}
           onReorder={handleTimelineReorder}
+          onCompose={handleComposeExport}
+          composeBusy={composeBusy}
         />
       </>
     )

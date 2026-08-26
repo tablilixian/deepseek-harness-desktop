@@ -49,6 +49,11 @@ export declare function uploadLocalStudioImage(projectId: string, name: string, 
 export declare function uploadStudioVideo(projectId: string, file: File, signal?: AbortSignal): Promise<StudioVideoStylePayload>;
 /** Persist a project's full canvas node list plus the current viewport state. */
 export declare function saveStudioCanvas(projectId: string, nodes: readonly StudioCanvasNode[], view: StudioCanvasView, signal?: AbortSignal): Promise<void>;
+/** P9.2/P9.3：合成成片。提交选中的分镜视频 clip id（与可选 BGM 节点 id），返回成片同源 URL + 时长。 */
+export declare function composeStudioVideo(projectId: string, clipIds: readonly string[], bgmNodeId?: string, signal?: AbortSignal): Promise<{
+    url: string;
+    duration: number;
+}>;
 /**
  * 节点级重试 / 修改提示词：按原参数（可带 overrides）重新请求 Host 生成，
  * 并把结果写回原节点（retryOf，不产生新边）。成功后返回新的产物 URL。

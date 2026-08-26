@@ -8,6 +8,10 @@ export interface CanvasTimelineProps {
     onSelect(id: string): void;
     /** P9.1：拖拽重排完成，回调整条的完整 id 顺序（由父级写入 view.timeline）。 */
     onReorder(ids: string[]): void;
+    /** P9.3：调合成路由导出成片（需 ≥2 个视频片段）。 */
+    onCompose(): void;
+    /** P9.3：合成进行中（禁用按钮 + 文案）。 */
+    composeBusy: boolean;
 }
 /**
  * The review strip: every node of the project as a thumbnail chip. Clicking a
