@@ -4,7 +4,7 @@
 
 ## 1. 当前状态
 
-**P1–P4+ 与参考画布 S1–S7 集成已完成并推送;2026-08-21 会话完成了 9 工具扩展(未提交)与一轮画布体验修复(视频播放/视图持久化 v3/工具栏精简/跳动与悬停 bug,未提交)。**
+**截至 2026-08-25 晚:一期(P1–P6)+ 二期 P7(门控/澄清)、P8(参考素材 1→4)、P9.1(时间轴排序持久化)、P10(health 探针)全部代码完成并已推送 `origin canvas-studio`(HEAD=`95ecd74dc8`)。验收反馈四连、会话历史恢复、启动会话对齐均已修复并推送。剩余 P9.2 合成路由 / P9.3 导出 UI / 会话去重(sessionId 入注册表) / P11 裁剪执行未做。**
 
 - 仓库根 `canvas-studio/` 独立包,桌面 profile 已集成(`corepack yarn dev` 三栏工作台)。
 - 布局:左栏项目列表,中间无限画布(顶部固定工具栏 + 底部分镜时间线),右栏为官方对话区。图层列表是画布右上角可开关浮窗;小地图支持工具条显隐。
@@ -198,11 +198,13 @@ git submodule update --init --recursive   # 若上游更新了子模块 pin
 - 参考画布 S1–S7 集成:`9a314b6e88`;布局微调:`e38e329cbb` / `1a81a9ebd4`
 - **2026-08-21(9 工具扩展 + 画布体验修复):本轮提交(见 git log;含 tools 文档、v3 视图持久化、视频播放修复、整理布局重写、跳动/悬停 bug 修复)**
 - **2026-08-25(二期推进):P7 门控与点选澄清 `1dad2b7c6a`;接口收敛(fl2va/ref2va)`e35bc715e7`;P8.1–P8.3 素材入口 `36d094cc31`/`7004ac0986`/`ef1258a3a8`;P9 参考闭环(@ref + list_references)`2cde9e8474`;P8.4 参考视频抽帧提风格 `a1a1abaa91`;验收修复四连(黑块残留/重试反馈/删除复活/对话区加宽)`9d3f48f010`;会话恢复(打开项目回到最近非空会话)`aa88c02b5c`。细节见 phase2 §11–§12。**
+- **2026-08-25(二期收口):文档验收收口 + 排期决策与 P9 实施步骤定稿 `f70f66bbe8`;health 前置探针 + P9.1 时间轴排序持久化 `4be84e64b4`;启动会话对齐(打开客户端自动恢复最近非空会话,无需手动点项目)`95ecd74dc8`。当前 HEAD=`95ecd74dc8`,全部已推 `origin canvas-studio`。细节见 phase2 §11.3/§11.4/§11.8。**
 
 ## 10. 下一步
 
-1. **桌面可视化验收**:重启 `corepack yarn dev`(兼容模式)→ 验证:视频节点可播放(控制条可点、可拖进度条)、缩放/平移/图层/小地图开关重启后恢复、「整理布局」无重叠且自动适配视野、时间线点击后拖拽/生成不再拉走视口、悬停画布不再跟随移动。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`(绕过 Privoxy)。
-2. **P6 创作规范 skill(✅ 2026-08-21 代码落地)**:`src/skills/creation-spec.ts`(`canvas-studio-creation`,内联 markdown:核心规则/9 工具链/标准工作流/分镜表格式/镜头词汇/一致性要点)+ Host inject `['webServer','tools','skills']` + `ctx.effect(registerCreationSkill)`;`tests/skill.test.mjs` 3 用例(kebab-case/描述上限/九工具与 upload 规则/分镜词汇);`test:smoke` **24/24**;studio profile 启动冒烟 0 错误。**待桌面人工验收**:对话中让 agent 做分镜创作,确认模型加载了 skill(会话出现 `skill` 工具调用)。
-3. **P6 收尾(✅ 2026-08-21 全部完成)**:`scripts/dev-install.mjs` 重写 —— 构建 + 改 profile manifest(`dsh.profile.bundles` 插到 web-app 后 + `link:` 依赖)+ `corepack pnpm@11.7.0 install`,幂等,支持 `--remove`/`--skip-build`/`DSH_HOME`;临时 DSH_HOME 自测 add/remove 通过,真实 desktop profile 端到端幂等验证通过。双面兼容:dsh web(studio profile)启动冒烟 0 错误 ✅、桌面 profile 验收 1–8 全过 ✅(2026-08-21)。**P1–P6 全部关闭;剩余为技术债与可选增强(P2–P4 档)及 P7 内置化。**
-4. **技术债(文档既有记录)**:明文 API key → 加密/配置中心;`rename` 失败降级为尽力改名;项目注册表持久化 sessionId 防 workspace 堆积;store 单测补强(undo/redo/吸附,经 tsx 在 React 外跑)。
-5. **可选增强**:已声明未接工具的端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 九宫格);多参考图(image1~3 / image1~4);P4.5 项(手绘标注/独立 edge 层/缩略图 LOD);P7 内置化。
+1. **桌面可视化验收(待核验)**:重启 `corepack yarn dev`(兼容模式)→ 对照 phase2 §11.8 验收清单逐项核验:视频节点可播放、视图持久化、整理布局、时间线不拉走视口、悬停不跟随、验收四连(黑块/重试/删除复活/对话 480px)、点击项目与启动后均恢复历史对话、时间轴拖拽重排持久化、Drama 宕机秒级中文报错。真实生成验收需 drama-api 可达 + 桌面启动设 `NO_PROXY=localhost,127.0.0.1`。
+2. **P9.2 合成路由(下一步主任务)**:见 phase2 §5.1 步骤② —— 抽取 `src/ffmpeg-run.ts`(`resolveFfmpegPath`/`runFfmpeg`,video-style 改为 re-export);新增 `src/compose.ts`(收集分镜视频 clip → ffmpeg `-r -i img -i audio` 统一帧率 + 时间线 `concat` → 可选 BGM `amix` → 落 `assets 根/export-<uuid>.mp4`);`routes.ts` 注册 `POST /canvas-studio/compose`(stream-json 渐进回报);测试三档:mock-Drama + fake-ffmpeg / `FFMPEG_PATH=fake` / 真实 ffmpeg。**前置**:先确认本地 ffmpeg 是否安装(`which ffmpeg`),否则合成需联网后端。
+3. **P9.3 导出 UI**:`StudioFrame` 顶部「导出成片」按钮 → 调 `/compose` → 进度 Modal → 完成后本地预览/打开文件/复制路径。
+4. **会话去重(技术债)**:项目注册表持久化 `sessionId`,打开项目优先复用,遏制 workspace 会话堆积(与当前「恢复最近非空会话」互补)。
+5. **P11 裁剪执行**:交付前裁掉未接端点(`txt2imageanime`/`inpaint`/`videoMkrGrid` 等)、未启用 UI 与 dead code;最终 `check` 全绿。
+6. **优化池**:实时进度条(现仅首帧占位 + 完整结算)、`Error: [object Object]` 工具错误渲染、store 单测补强(undo/redo/吸附)、多参考图扩展。
