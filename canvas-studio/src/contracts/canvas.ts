@@ -80,6 +80,19 @@ export interface StudioCanvasNode {
   thumbnail?: string
   /** Video duration in seconds. */
   duration?: number
+  /**
+   * 媒体原始分辨率宽（像素）。区别于画布显示尺寸 `width/height`：导入节点的
+   * 显示尺寸是默认 260×180，而真实媒体分辨率未知（落盘时不探测）；生成/合成
+   * 节点把真实产物分辨率写入此字段，详情面板据此展示「分辨率」。
+   */
+  mediaWidth?: number
+  /** 媒体原始分辨率高（像素）。 */
+  mediaHeight?: number
+  /**
+   * 成片文案：广告词 / 对白 / 背景音乐 / 音效 / 字幕等结构化脚本文本（来自
+   * `write_script` 工具或画布「文案」节点），随成片节点落盘，详情面板展示。
+   */
+  script?: string
   /** Group this node belongs to (group nodes reference children via parentId). */
   parentId?: string
   /** Locked nodes refuse drag/resize. */

@@ -6,6 +6,10 @@ export interface ComposeResult {
     url: string;
     /** 合成后成片时长（秒；探测失败为 0）。 */
     duration: number;
+    /** 合成后成片分辨率宽（像素；探测失败为 undefined）。 */
+    width?: number;
+    /** 合成后成片分辨率高（像素；探测失败为 undefined）。 */
+    height?: number;
 }
 /** 合成可选覆盖项（测试注入 / 高级用法）。 */
 export interface ComposeOptions {
@@ -65,3 +69,20 @@ export declare function buildAmixArgs(concatOutput: string, bgmInput: string, ou
  * 整体受 120s 超时与调用方 `signal` 双重约束，超时/中断即抛中文错误。
  */
 export declare function composeStudioVideo(registry: ProjectRegistry, projectId: string, clipIds: readonly string[], bgmNodeId?: string, options?: ComposeOptions, signal?: AbortSignal): Promise<ComposeResult>;
+/** Host 侧把成片结果落为画布 video-composite 节点（供模型工具 compose_video 直接回写）。 */
+export interface ComposedNodeInput {
+    url: string;
+    duration?: number;
+    width?: number;
+    height?: number;
+    /** 源片段节点 id（血缘边指向它们）。 */
+    sourceIds: string[];
+    /** 成片文案（广告词/对白/字幕等），来自 write_script 节点。 */
+    script?: string;
+}
+/**
+ * 把合成结果写为画布节点（video-composite，origin=agent，血缘指向源片段），
+ * 返回新建节点。位置沿用 4 列网格；真实分辨率写入 mediaWidth/mediaHeight，
+ * 文案写入 `script`，使详情面板可展示。客户端工具/结果重载后即出现在画布。
+ */
+export declare function appendComposedVideoNode(registry: ProjectRegistry, projectId: string, input: ComposedNodeInput): Promise<StudioCanvasNode>;

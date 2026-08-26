@@ -17,6 +17,7 @@ import type { StudioCanvasNode } from './contracts/canvas.js'
 import { parseRefTokens } from './reference-token.js'
 import { newAssetId } from './config.js'
 import { generateAsset, uploadImage, resolveImageUrl, enhancePrompt, analyzeImage, deduction, splitStoryboard, type GenerateParams, type GenerateResult } from './generate.js'
+import { composeStudioVideo, appendComposedVideoNode } from './compose.js'
 
 /** 产物结果 schema（工具返回给模型的结构）。 */
 const resultSchema = {
@@ -162,6 +163,9 @@ function runGeneration(
 
 /** P7 门禁覆盖的生成类工具：正式流程的入口动作。 */
 const GATED_TOOLS = new Set(['storyboard_generate', 'video_generate', 'video_composite', 'storyboard_split'])
+
+/** renderResult 在无真实分辨率时的兜底尺寸（成片探测失败时）。 */
+const COMPOSED_FALLBACK = { width: 1280, height: 720 }
 
 /**
  * ask_user_choice 的等待上限（毫秒）：比最长视频超时更宽，到点按推荐项继续。
@@ -552,6 +556,81 @@ export function createStudioTools(registry: ProjectRegistry, port: number) {
           await registry.setPendingQuestion(projectId, null).catch(() => {})
           throw cause
         }
+      },
+    }),
+    defineTool({
+      name: 'write_script',
+      description:
+        '把成片文案落为画布节点（标题「文案」，kind=text），文案须覆盖：广告词、对白、背景音乐（BGM 说明）、音效（SFX）、字幕等。先写文案，再用其中的对白/BGM/音效去驱动各镜头的 H3 视频提示词（对白→<d>[语言]…</d>，BGM→non_diegetic_music:，音效→overall_soundscape:）；合成成片时把本节点 id 作为 scriptId 传入 compose_video，成片详情即展示该文案。返回节点 id 供后续引用。',
+      parameters: {
+        script: { type: 'string' as const, required: true, description: '完整文案：广告词 / 对白 / 背景音乐 / 音效 / 字幕等（可分段标题）' },
+      },
+      output: {
+        schema: {
+          type: 'object' as const,
+          additionalProperties: false,
+          properties: {
+            text: { type: 'string' as const, description: '落盘结果说明（含节点 id）' },
+          },
+        },
+        render: renderTextResult,
+      },
+      async execute(args, exec) {
+        const a = args as { script: string }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const existing = (await registry.readCanvas(projectId)).nodes
+        const index = existing.length
+        const node: StudioCanvasNode = {
+          id: newAssetId(),
+          kind: 'text',
+          title: '文案',
+          text: a.script,
+          x: 40 + (index % 4) * 300,
+          y: 40 + Math.floor(index / 4) * 240,
+          width: 360,
+          height: 280,
+          createdAt: Date.now(),
+          toolName: 'write_script',
+          origin: 'agent',
+          sourceIds: [],
+        }
+        await registry.appendCanvasNode(projectId, node)
+        return { text: `文案已落到画布（节点 id=${node.id}），合成成片时可作为 scriptId 传入 compose_video。` }
+      },
+    }),
+    defineTool({
+      name: 'compose_video',
+      description:
+        '把画布上已有的视频片段拼接成最终成片（Host 侧 ffmpeg concat，可选混 BGM）。这是「成片合成」步骤——严禁再用 video_generate / video_composite 从图片关键帧重新生成视频。clipIds 缺省取时间轴上全部视频片段（按生成顺序）；bgmNodeId 指定 BGM 视频/音频节点；scriptId 指定 write_script 写的「文案」节点，成片详情里展示广告词/对白/字幕。成片会作为 video-composite 节点落到画布（血缘指向各源片段）。返回成片 url / 时长 / 分辨率。',
+      parameters: {
+        clipIds: { type: 'array' as const, description: '可选：参与拼接的视频片段节点 id；缺省取时间轴全部视频（≥2 段）' },
+        bgmNodeId: { type: 'string' as const, description: '可选：BGM 节点 id（视频/音频文件）' },
+        scriptId: { type: 'string' as const, description: '可选：文案节点 id（write_script 产物），成片详情展示广告词/对白/字幕' },
+      },
+      output: { schema: resultSchema, render: renderResult },
+      async execute(args, exec) {
+        const a = args as { clipIds?: string[]; bgmNodeId?: string; scriptId?: string }
+        const projectId = await resolveProjectId(registry, exec.agent?.session.header.cwd)
+        const doc = await registry.readCanvas(projectId)
+        const clipIds = Array.isArray(a.clipIds) && a.clipIds.length > 0
+          ? a.clipIds
+          : doc.nodes.filter(node => node.kind === 'video').sort((left, right) => left.createdAt - right.createdAt).map(node => node.id)
+        if (clipIds.length < 2) {
+          throw new Error('至少需要 2 个视频片段才能合成成片；请先用 video_generate / video_composite 生成逐镜视频片段（不要再回头用图片重新生成）。')
+        }
+        const script = a.scriptId !== undefined
+          ? doc.nodes.find(node => node.id === a.scriptId)?.text
+          : undefined
+        const result = await composeStudioVideo(registry, projectId, clipIds, a.bgmNodeId, {}, exec.signal)
+        await appendComposedVideoNode(registry, projectId, {
+          url: result.url,
+          duration: result.duration,
+          ...(result.width !== undefined ? { width: result.width } : {}),
+          ...(result.height !== undefined ? { height: result.height } : {}),
+          sourceIds: clipIds,
+          ...(script !== undefined ? { script } : {}),
+        })
+        return { url: result.url, width: result.width ?? COMPOSED_FALLBACK.width, height: result.height ?? COMPOSED_FALLBACK.height, duration: result.duration }
       },
     }),
   ]

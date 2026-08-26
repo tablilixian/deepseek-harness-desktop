@@ -1282,7 +1282,18 @@ img.csNodeMedia {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-/* ---- Reference tray (left column) ---- */
+/* ---- Reference tray (floating overlay on the canvas, not the project list) ---- */
+.csReferenceFloat {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 20;
+  width: 260px;
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+}
 .csReferenceTray {
   margin: 8px;
   border: 1px solid var(--dsw-alias-border-l2);

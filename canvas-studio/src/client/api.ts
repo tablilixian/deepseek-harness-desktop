@@ -195,8 +195,8 @@ export async function composeStudioVideo(
   clipIds: readonly string[],
   bgmNodeId?: string,
   signal?: AbortSignal,
-): Promise<{ url: string; duration: number }> {
-  const response = await readJson<{ url: string; duration: number }>(await fetch('/canvas-studio/compose', {
+): Promise<{ url: string; duration: number; width?: number; height?: number }> {
+  const response = await readJson<{ url: string; duration: number; width?: number; height?: number }>(await fetch('/canvas-studio/compose', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(bgmNodeId === undefined ? { projectId, clipIds } : { projectId, clipIds, bgmNodeId }),

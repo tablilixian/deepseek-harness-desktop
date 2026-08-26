@@ -746,7 +746,7 @@ export function registerStudioRoutes(ctx, registry) {
                     const bgmNodeId = typeof body.bgmNodeId === 'string' ? body.bgmNodeId : undefined;
                     const result = await composeStudioVideo(registry, body.projectId, body.clipIds, bgmNodeId, {}, controller.signal);
                     if (!controller.signal.aborted && !res.destroyed) {
-                        sendJson(res, 200, { url: result.url, duration: result.duration });
+                        sendJson(res, 200, { url: result.url, duration: result.duration, width: result.width, height: result.height });
                     }
                 }
                 catch (cause) {

@@ -472,6 +472,8 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             url,
             width: size.width,
             height: size.height,
+            mediaWidth: size.width,
+            mediaHeight: size.height,
             operationType: operationTypeOf(tool, params),
             toolName: tool,
             generationPrompt: generationPromptOf(params),
@@ -498,6 +500,8 @@ export async function generateAsset(registry, tool, projectId, params, signal) {
             sourceIds,
             operationType: operationTypeOf(tool, params),
             generationPrompt: generationPromptOf(params),
+            mediaWidth: size.width,
+            mediaHeight: size.height,
             ...(isVideo ? { duration: clampDuration(params.duration, tool === 'video_composite' ? 10 : 5) } : {}),
         };
         await registry.appendCanvasNode(projectId, node);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { InjectFace, PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StudioProjectListInjected } from './contracts.js'
-import { nodesOf, selectedNodeOf, viewOf } from './project-store.js'
+import { nodesOf, selectedNodeOf, viewOf, newNodeId } from './project-store.js'
 import { ProjectList } from './ProjectList.js'
 import { CanvasToolbar } from './canvas/CanvasToolbar.js'
 import { CanvasSurface, type CanvasSurfaceHandle } from './canvas/CanvasSurface.js'
@@ -178,10 +178,49 @@ export function StudioFrame(props: StudioFrameProps) {
   const handleUpdateNode = (id: string, updates: Partial<StudioCanvasNode>): void => {
     if (projectId !== null) persistAfter(() => actions.updateNode(projectId, id, updates))
   }
-  // 引用到对话：把 @ref[显示名] 复制到剪贴板，提示用户粘贴到聊天框。
-  // 上游 InputBar 限制直接注入，故走「复制 + 提示」的稳健退化方案（plan §4.1 ③）。
+  // 引用到对话：把 @ref[显示名] 直接插入右侧聊天输入框光标处；上游 InputBar 是
+  // 外部结构，找不到输入框时回退「复制 + 提示」（plan §4.1 ③ 的稳健退化）。
+  const setNativeValue = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
+    if (setter !== undefined) setter.call(el, value)
+    else el.value = value
+  }
+  const insertReferenceToken = (input: HTMLElement, token: string): boolean => {
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+      const start = input.selectionStart ?? input.value.length
+      const end = input.selectionEnd ?? start
+      const next = input.value.slice(0, start) + token + input.value.slice(end)
+      setNativeValue(input, next)
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.focus()
+      const caret = start + token.length
+      try { input.setSelectionRange(caret, caret) } catch { /* 非文本选择控件忽略 */ }
+      return true
+    }
+    if (input.isContentEditable) {
+      input.focus()
+      const sel = window.getSelection()
+      if (sel !== null && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0)
+        range.deleteContents()
+        const textNode = document.createTextNode(token)
+        range.insertNode(textNode)
+        range.setStartAfter(textNode)
+        range.collapse(true)
+        sel.removeAllRanges()
+        sel.addRange(range)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      }
+    }
+    return false
+  }
   const handleReferenceToChat = (node: StudioCanvasNode): void => {
     const token = formatRefToken(node.title ?? node.id)
+    const input = document.querySelector(
+      '.csConversation textarea, .csConversation [contenteditable="true"], .csConversation input[type="text"]',
+    )
+    if (input instanceof HTMLElement && insertReferenceToken(input, token)) return
     void navigator.clipboard?.writeText(token).catch(() => {})
     window.alert(`已复制引用标记：${token}\n在右侧聊天框粘贴，并补充说明（如「用这张角色图生成分镜」）。`)
   }
@@ -235,14 +274,27 @@ export function StudioFrame(props: StudioFrameProps) {
     }
     setComposeBusy(true)
     try {
-      const { url, duration } = await composeStudioVideo(projectId, clipIds)
+      const { url, duration, width, height } = await composeStudioVideo(projectId, clipIds)
+      const composedId = newNodeId()
+      // 若画布上存在「文案」节点（write_script 产物），把其正文随成片一起落盘展示。
+      const scriptNode = nodes.find(node =>
+        (node.kind === 'text' || node.kind === 'prompt') && /文案/.test(node.title ?? ''))
+      const script = scriptNode?.text
       persistAfter(() => actions.addComposedVideo(projectId, {
+        id: composedId,
         url,
         title: `成片 ${new Date().toLocaleString('zh-CN')}`,
         duration,
+        ...(typeof width === 'number' ? { mediaWidth: width } : {}),
+        ...(typeof height === 'number' ? { mediaHeight: height } : {}),
+        ...(typeof script === 'string' && script.length > 0 ? { script } : {}),
         sourceIds: clipIds,
       }))
-      window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布，可在时间轴或画布播放。`)
+      // F1：成片回写后自动居中并适配视野，确保用户立刻在画布上看到，无需手动寻找。
+      setFocusNodeId(composedId)
+      fitPendingRef.current = true
+      setFitRequestedAt(Date.now())
+      window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布并自动定位到视图中心，可在时间轴或画布播放。`)
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
       window.alert(`成片合成失败：${message}`)
@@ -283,6 +335,15 @@ export function StudioFrame(props: StudioFrameProps) {
             ref={surfaceRef}
             minimapVisible={view.minimapVisible}
           />
+          {referenceNodes.length > 0 && (
+            <div className="csReferenceFloat">
+              <ReferenceTray
+                nodes={referenceNodes}
+                onUpdateNode={handleUpdateNode}
+                onReferenceToChat={handleReferenceToChat}
+              />
+            </div>
+          )}
           {view.layersOpen && (
             <aside className="csCanvasLayers">
               <LayerPanel
@@ -329,13 +390,6 @@ export function StudioFrame(props: StudioFrameProps) {
           onOpen={openProject}
           onDelete={deleteProject}
         />
-        {referenceNodes.length > 0 && (
-          <ReferenceTray
-            nodes={referenceNodes}
-            onUpdateNode={handleUpdateNode}
-            onReferenceToChat={handleReferenceToChat}
-          />
-        )}
       </aside>
       <main
         className="csCanvas"
@@ -484,6 +538,10 @@ export function StudioFrame(props: StudioFrameProps) {
           onSteer={id => { actions.selectNode(id); setDetailOpen(true) }}
           onCancel={() => { void cancelCurrentTurn() }}
           onUngroup={id => { if (projectId !== null) persistAfter(() => actions.ungroup(projectId, id)) }}
+          onReferenceToChat={id => {
+            const target = nodes.find(candidate => candidate.id === id)
+            if (target !== undefined) handleReferenceToChat(target)
+          }}
         />
       )}
       <div className="csOverlay" data-cs-overlay>

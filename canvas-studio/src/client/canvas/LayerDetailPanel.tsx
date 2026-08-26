@@ -51,6 +51,13 @@ export function LayerDetailPanel(props: LayerDetailPanelProps) {
   const operation = node.operationType !== undefined ? (OPERATION_LABELS[node.operationType] ?? node.operationType) : null
   const generationPrompt: string | null = node.generationPrompt !== undefined ? node.generationPrompt : null
 
+  /** 媒体原始分辨率文本（mediaWidth/Height 为真实产物分辨率；缺失显示未知）。 */
+  const resolutionText = (): string => {
+    const w = node.mediaWidth
+    const h = node.mediaHeight
+    return w !== undefined && h !== undefined ? `${w}×${h}` : '未知'
+  }
+
   const submitTitle = (): void => {
     setEditingTitle(false)
     if (titleInput.trim().length > 0) onRename(node.id, titleInput.trim())
@@ -109,6 +116,18 @@ export function LayerDetailPanel(props: LayerDetailPanelProps) {
           <div className="csDetailRow">
             <span className="csDetailLabel">时长</span>
             <span className="csDetailValue">{node.duration}s</span>
+          </div>
+        )}
+        {(node.kind === 'image' || node.kind === 'video') && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">分辨率</span>
+            <span className="csDetailValue">{resolutionText()}</span>
+          </div>
+        )}
+        {node.script !== undefined && node.script.length > 0 && (
+          <div className="csDetailRow">
+            <span className="csDetailLabel">文案</span>
+            <pre className="csDetailPrompt">{node.script}</pre>
           </div>
         )}
         <div className="csDetailRow">

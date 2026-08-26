@@ -16,6 +16,8 @@ export interface CanvasContextMenuProps {
   onSteer(id: string): void
   onCancel(id: string): void
   onUngroup(id: string): void
+  /** 把该节点作为 @ref 引用标记插入对话输入框光标处（失败回退复制）。 */
+  onReferenceToChat(id: string): void
 }
 
 /**
@@ -23,7 +25,7 @@ export interface CanvasContextMenuProps {
  * Positioned at the cursor; closes on any action or blur.
  */
 export function CanvasContextMenu(props: CanvasContextMenuProps) {
-  const { node, x, y, onClose, onRename, onCopy, onDelete, onReorder, onToggleLock, onToggleVisibility, onRetry, onSteer, onCancel, onUngroup } = props
+  const { node, x, y, onClose, onRename, onCopy, onDelete, onReorder, onToggleLock, onToggleVisibility, onRetry, onSteer, onCancel, onUngroup, onReferenceToChat } = props
   const isAgent = node.origin === 'agent' && node.toolName !== undefined
   const hasPrompt = node.generationPrompt !== undefined
 
@@ -46,6 +48,7 @@ export function CanvasContextMenu(props: CanvasContextMenuProps) {
     <div className="csContextMenu" style={{ left: x, top: y }} onContextMenu={event => { event.preventDefault(); event.stopPropagation() }}>
       {item('重命名', () => { onRename(node.id) })}
       {item('复制', () => { onCopy(node.id) })}
+      {item('引用到对话', () => { onReferenceToChat(node.id) })}
       {item(node.locked ? '解锁' : '锁定', () => { onToggleLock(node.id) })}
       {item(node.visible === false ? '显示' : '隐藏', () => { onToggleVisibility(node.id) })}
       {item('置顶', () => { onReorder(node.id, 'front') })}

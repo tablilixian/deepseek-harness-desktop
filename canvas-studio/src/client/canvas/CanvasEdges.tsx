@@ -104,7 +104,7 @@ export function CanvasEdges(props: CanvasEdgesProps) {
             className="csEdge"
             d={d}
             stroke={color}
-            strokeWidth={highlighted ? 3 : 2}
+            strokeWidth={highlighted ? 5 : 3.5}
             opacity={highlighted ? 1 : 0.5}
             markerEnd={`url(#${markerId(operation)})`}
           />
@@ -146,8 +146,8 @@ export function CanvasEdges(props: CanvasEdgesProps) {
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
-            markerWidth="6"
-            markerHeight="6"
+            markerWidth="9"
+            markerHeight="9"
             orient="auto-start-reverse"
           >
             <path d="M 0 0 L 10 5 L 0 10 z" fill={OPERATION_COLORS[operation] ?? '#6b7280'} />
@@ -158,8 +158,8 @@ export function CanvasEdges(props: CanvasEdgesProps) {
           viewBox="0 0 10 10"
           refX="9"
           refY="5"
-          markerWidth="6"
-          markerHeight="6"
+          markerWidth="9"
+          markerHeight="9"
           orient="auto-start-reverse"
         >
           <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280" />

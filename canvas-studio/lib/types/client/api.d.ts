@@ -53,6 +53,8 @@ export declare function saveStudioCanvas(projectId: string, nodes: readonly Stud
 export declare function composeStudioVideo(projectId: string, clipIds: readonly string[], bgmNodeId?: string, signal?: AbortSignal): Promise<{
     url: string;
     duration: number;
+    width?: number;
+    height?: number;
 }>;
 /**
  * 节点级重试 / 修改提示词：按原参数（可带 overrides）重新请求 Host 生成，

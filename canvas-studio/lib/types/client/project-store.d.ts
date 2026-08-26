@@ -134,9 +134,16 @@ export type ProjectStoreActions = {
     }) => void;
     /** P9.3：成片合成结果回写画布（video-composite 终节点，manual origin，血缘指向全部源 clip）。 */
     addComposedVideo: (draft: ProjectStoreState, projectId: string, asset: {
+        /** 可选预生成 id（合成后自动聚焦用，缺省则内部生成）。 */
+        id?: string;
         url: string;
         title: string;
         duration?: number;
+        /** 成片真实分辨率（探测所得），落 mediaWidth/mediaHeight。 */
+        mediaWidth?: number;
+        mediaHeight?: number;
+        /** 成片文案（广告词/对白/字幕等），来自「文案」节点。 */
+        script?: string;
         sourceIds: string[];
     }) => void;
     /** 移除 runId 匹配的占位节点（重载/完成时）。 */

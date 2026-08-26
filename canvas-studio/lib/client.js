@@ -261,10 +261,13 @@ window.__ModuleLoader__.load({
 			if (units.length === 0) return positions;
 			const cellWidth = Math.max(...units.map((unit) => unit.node.width)) + ARRANGE_GAP_X;
 			const cellHeight = Math.max(...units.map((unit) => unit.node.height)) + ARRANGE_GAP_Y;
-			const columns = Math.ceil(Math.sqrt(units.length));
-			units.forEach((unit, index) => {
-				const targetX = ARRANGE_ORIGIN + index % columns * cellWidth;
-				const targetY = ARRANGE_ORIGIN + Math.floor(index / columns) * cellHeight;
+			const columnCursor = /* @__PURE__ */ new Map();
+			for (const unit of units) {
+				const column = unit.depth;
+				const row = columnCursor.get(column) ?? 0;
+				columnCursor.set(column, row + 1);
+				const targetX = ARRANGE_ORIGIN + column * cellWidth;
+				const targetY = ARRANGE_ORIGIN + row * cellHeight;
 				const deltaX = targetX - unit.node.x;
 				const deltaY = targetY - unit.node.y;
 				positions.set(unit.node.id, {
@@ -275,7 +278,7 @@ window.__ModuleLoader__.load({
 					x: child.x + deltaX,
 					y: child.y + deltaY
 				});
-			});
+			}
 			return positions;
 		}
 		//#endregion
@@ -1219,11 +1222,14 @@ window.__ModuleLoader__.load({
 						const index = existing.length;
 						const size = NODE_SIZE.video;
 						const node = {
-							id: newNodeId(),
+							id: asset.id ?? newNodeId(),
 							kind: "video",
 							title: asset.title,
 							url: asset.url,
 							...typeof asset.duration === "number" ? { duration: asset.duration } : {},
+							...typeof asset.mediaWidth === "number" ? { mediaWidth: asset.mediaWidth } : {},
+							...typeof asset.mediaHeight === "number" ? { mediaHeight: asset.mediaHeight } : {},
+							...typeof asset.script === "string" ? { script: asset.script } : {},
 							x: LAYOUT.origin + index % LAYOUT.columns * LAYOUT.stepX,
 							y: LAYOUT.origin + Math.floor(index / LAYOUT.columns) * LAYOUT.stepY,
 							width: size.width,
@@ -2560,7 +2566,18 @@ img.csNodeMedia {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-/* ---- Reference tray (left column) ---- */
+/* ---- Reference tray (floating overlay on the canvas, not the project list) ---- */
+.csReferenceFloat {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 20;
+  width: 260px;
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  pointer-events: auto;
+}
 .csReferenceTray {
   margin: 8px;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -3220,7 +3237,7 @@ img.csNodeMedia {
 						className: "csEdge",
 						d,
 						stroke: color,
-						strokeWidth: highlighted ? 3 : 2,
+						strokeWidth: highlighted ? 5 : 3.5,
 						opacity: highlighted ? 1 : .5,
 						markerEnd: `url(#${markerId(operation)})`
 					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("g", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("rect", {
@@ -3253,8 +3270,8 @@ img.csNodeMedia {
 					viewBox: "0 0 10 10",
 					refX: "9",
 					refY: "5",
-					markerWidth: "6",
-					markerHeight: "6",
+					markerWidth: "9",
+					markerHeight: "9",
 					orient: "auto-start-reverse",
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
 						d: "M 0 0 L 10 5 L 0 10 z",
@@ -3265,8 +3282,8 @@ img.csNodeMedia {
 					viewBox: "0 0 10 10",
 					refX: "9",
 					refY: "5",
-					markerWidth: "6",
-					markerHeight: "6",
+					markerWidth: "9",
+					markerHeight: "9",
 					orient: "auto-start-reverse",
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", {
 						d: "M 0 0 L 10 5 L 0 10 z",
@@ -4300,6 +4317,12 @@ img.csNodeMedia {
 			const isAgent = node.origin === "agent" && node.toolName !== void 0;
 			const operation = node.operationType !== void 0 ? OPERATION_LABELS[node.operationType] ?? node.operationType : null;
 			const generationPrompt = node.generationPrompt !== void 0 ? node.generationPrompt : null;
+			/** 媒体原始分辨率文本（mediaWidth/Height 为真实产物分辨率；缺失显示未知）。 */
+			const resolutionText = () => {
+				const w = node.mediaWidth;
+				const h = node.mediaHeight;
+				return w !== void 0 && h !== void 0 ? `${w}×${h}` : "未知";
+			};
 			const submitTitle = () => {
 				setEditingTitle(false);
 				if (titleInput.trim().length > 0) onRename(node.id, titleInput.trim());
@@ -4384,6 +4407,26 @@ img.csNodeMedia {
 								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 									className: "csDetailValue",
 									children: [node.duration, "s"]
+								})]
+							}),
+							(node.kind === "image" || node.kind === "video") && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "分辨率"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailValue",
+									children: resolutionText()
+								})]
+							}),
+							node.script !== void 0 && node.script.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: "csDetailRow",
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: "csDetailLabel",
+									children: "文案"
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+									className: "csDetailPrompt",
+									children: node.script
 								})]
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -4680,7 +4723,7 @@ img.csNodeMedia {
 		* Positioned at the cursor; closes on any action or blur.
 		*/
 		function CanvasContextMenu(props) {
-			const { node, x, y, onClose, onRename, onCopy, onDelete, onReorder, onToggleLock, onToggleVisibility, onRetry, onSteer, onCancel, onUngroup } = props;
+			const { node, x, y, onClose, onRename, onCopy, onDelete, onReorder, onToggleLock, onToggleVisibility, onRetry, onSteer, onCancel, onUngroup, onReferenceToChat } = props;
 			const isAgent = node.origin === "agent" && node.toolName !== void 0;
 			const hasPrompt = node.generationPrompt !== void 0;
 			const item = (label, action, danger = false) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
@@ -4709,6 +4752,9 @@ img.csNodeMedia {
 					}),
 					item("复制", () => {
 						onCopy(node.id);
+					}),
+					item("引用到对话", () => {
+						onReferenceToChat(node.id);
 					}),
 					item(node.locked ? "解锁" : "锁定", () => {
 						onToggleLock(node.id);
@@ -5001,8 +5047,47 @@ img.csNodeMedia {
 			const handleUpdateNode = (id, updates) => {
 				if (projectId !== null) persistAfter(() => actions.updateNode(projectId, id, updates));
 			};
+			const setNativeValue = (el, value) => {
+				const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
+				if (setter !== void 0) setter.call(el, value);
+				else el.value = value;
+			};
+			const insertReferenceToken = (input, token) => {
+				if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+					const start = input.selectionStart ?? input.value.length;
+					const end = input.selectionEnd ?? start;
+					const next = input.value.slice(0, start) + token + input.value.slice(end);
+					setNativeValue(input, next);
+					input.dispatchEvent(new Event("input", { bubbles: true }));
+					input.focus();
+					const caret = start + token.length;
+					try {
+						input.setSelectionRange(caret, caret);
+					} catch {}
+					return true;
+				}
+				if (input.isContentEditable) {
+					input.focus();
+					const sel = window.getSelection();
+					if (sel !== null && sel.rangeCount > 0) {
+						const range = sel.getRangeAt(0);
+						range.deleteContents();
+						const textNode = document.createTextNode(token);
+						range.insertNode(textNode);
+						range.setStartAfter(textNode);
+						range.collapse(true);
+						sel.removeAllRanges();
+						sel.addRange(range);
+						input.dispatchEvent(new Event("input", { bubbles: true }));
+						return true;
+					}
+				}
+				return false;
+			};
 			const handleReferenceToChat = (node) => {
 				const token = formatRefToken(node.title ?? node.id);
+				const input = document.querySelector(".csConversation textarea, .csConversation [contenteditable=\"true\"], .csConversation input[type=\"text\"]");
+				if (input instanceof HTMLElement && insertReferenceToken(input, token)) return;
 				navigator.clipboard?.writeText(token).catch(() => {});
 				window.alert(`已复制引用标记：${token}\n在右侧聊天框粘贴，并补充说明（如「用这张角色图生成分镜」）。`);
 			};
@@ -5051,14 +5136,23 @@ img.csNodeMedia {
 				}
 				setComposeBusy(true);
 				try {
-					const { url, duration } = await composeStudioVideo(projectId, clipIds);
+					const { url, duration, width, height } = await composeStudioVideo(projectId, clipIds);
+					const composedId = newNodeId();
+					const script = nodes.find((node) => (node.kind === "text" || node.kind === "prompt") && /文案/.test(node.title ?? ""))?.text;
 					persistAfter(() => actions.addComposedVideo(projectId, {
+						id: composedId,
 						url,
 						title: `成片 ${(/* @__PURE__ */ new Date()).toLocaleString("zh-CN")}`,
 						duration,
+						...typeof width === "number" ? { mediaWidth: width } : {},
+						...typeof height === "number" ? { mediaHeight: height } : {},
+						...typeof script === "string" && script.length > 0 ? { script } : {},
 						sourceIds: clipIds
 					}));
-					window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布，可在时间轴或画布播放。`);
+					setFocusNodeId(composedId);
+					fitPendingRef.current = true;
+					setFitRequestedAt(Date.now());
+					window.alert(`成片已生成（${duration.toFixed(1)}s），已添加到画布并自动定位到视图中心，可在时间轴或画布播放。`);
 				} catch (cause) {
 					const message = cause instanceof Error ? cause.message : String(cause);
 					window.alert(`成片合成失败：${message}`);
@@ -5073,69 +5167,80 @@ img.csNodeMedia {
 				});
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: "csCanvasBody",
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
-						nodes,
-						view,
-						onViewChange: handleViewChange,
-						selectedNodeId,
-						selectedNodeIds,
-						onSelectNode: (id, multi) => {
-							actions.selectNode(id, multi);
-						},
-						onSelectAllNodes: () => {
-							actions.selectAllNodes();
-						},
-						onMoveNode: (id, x, y) => {
-							actions.moveNode(projectId, id, x, y);
-						},
-						onUpdateNode: (id, updates) => {
-							actions.updateNode(projectId, id, updates);
-						},
-						onBeginEdit: beginEdit,
-						onPersist: persist,
-						onRemoveNodes: handleDelete,
-						onCopy: () => {
-							actions.copySelected(projectId);
-						},
-						onPaste: () => {
-							persistAfter(() => actions.pasteNodes(projectId));
-						},
-						onUndo: handleUndo,
-						onRedo: handleRedo,
-						onLinkLayers: (sourceIds, targetId) => {
-							persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
-						},
-						onRename: handleRename,
-						onNodeOpenDetail: (node) => {
-							actions.selectNode(node.id);
-							setDetailOpen(true);
-						},
-						onContextMenu: (node, x, y) => {
-							setMenu({
-								node,
-								x,
-								y
-							});
-						},
-						focusNodeId,
-						ref: surfaceRef,
-						minimapVisible: view.minimapVisible
-					}), view.layersOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
-						className: "csCanvasLayers",
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasSurface, {
 							nodes,
+							view,
+							onViewChange: handleViewChange,
+							selectedNodeId,
 							selectedNodeIds,
-							onSelect: (id, multi) => {
+							onSelectNode: (id, multi) => {
 								actions.selectNode(id, multi);
 							},
-							onDelete: handleDelete,
-							onToggleLock: (id) => {
-								if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+							onSelectAllNodes: () => {
+								actions.selectAllNodes();
 							},
-							onToggleVisibility: handleToggleVisibility,
-							onReorder: handleReorder
+							onMoveNode: (id, x, y) => {
+								actions.moveNode(projectId, id, x, y);
+							},
+							onUpdateNode: (id, updates) => {
+								actions.updateNode(projectId, id, updates);
+							},
+							onBeginEdit: beginEdit,
+							onPersist: persist,
+							onRemoveNodes: handleDelete,
+							onCopy: () => {
+								actions.copySelected(projectId);
+							},
+							onPaste: () => {
+								persistAfter(() => actions.pasteNodes(projectId));
+							},
+							onUndo: handleUndo,
+							onRedo: handleRedo,
+							onLinkLayers: (sourceIds, targetId) => {
+								persistAfter(() => actions.linkLayers(projectId, sourceIds, targetId));
+							},
+							onRename: handleRename,
+							onNodeOpenDetail: (node) => {
+								actions.selectNode(node.id);
+								setDetailOpen(true);
+							},
+							onContextMenu: (node, x, y) => {
+								setMenu({
+									node,
+									x,
+									y
+								});
+							},
+							focusNodeId,
+							ref: surfaceRef,
+							minimapVisible: view.minimapVisible
+						}),
+						referenceNodes.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: "csReferenceFloat",
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ReferenceTray, {
+								nodes: referenceNodes,
+								onUpdateNode: handleUpdateNode,
+								onReferenceToChat: handleReferenceToChat
+							})
+						}),
+						view.layersOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("aside", {
+							className: "csCanvasLayers",
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(LayerPanel, {
+								nodes,
+								selectedNodeIds,
+								onSelect: (id, multi) => {
+									actions.selectNode(id, multi);
+								},
+								onDelete: handleDelete,
+								onToggleLock: (id) => {
+									if (projectId !== null) persistAfter(() => actions.toggleLock(projectId, id));
+								},
+								onToggleVisibility: handleToggleVisibility,
+								onReorder: handleReorder
+							})
 						})
-					})]
+					]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CanvasTimeline, {
 					ordered: timelineOrder,
 					selectedNodeId,
@@ -5150,33 +5255,25 @@ img.csNodeMedia {
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("aside", {
 						className: "csProjects",
-						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-								className: "csProjectsHeader",
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "项目" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-									type: "button",
-									disabled: phase === "loading" || creating,
-									onClick: () => void refreshProjects(),
-									children: "刷新"
-								})]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectList, {
-								projects,
-								selectedProjectId,
-								phase,
-								error,
-								creating,
-								onRefresh: () => void refreshProjects(),
-								onCreate: createProject,
-								onOpen: openProject,
-								onDelete: deleteProject
-							}),
-							referenceNodes.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ReferenceTray, {
-								nodes: referenceNodes,
-								onUpdateNode: handleUpdateNode,
-								onReferenceToChat: handleReferenceToChat
-							})
-						]
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+							className: "csProjectsHeader",
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: "项目" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								type: "button",
+								disabled: phase === "loading" || creating,
+								onClick: () => void refreshProjects(),
+								children: "刷新"
+							})]
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectList, {
+							projects,
+							selectedProjectId,
+							phase,
+							error,
+							creating,
+							onRefresh: () => void refreshProjects(),
+							onCreate: createProject,
+							onOpen: openProject,
+							onDelete: deleteProject
+						})]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
 						className: "csCanvas",
@@ -5390,6 +5487,10 @@ img.csNodeMedia {
 						},
 						onUngroup: (id) => {
 							if (projectId !== null) persistAfter(() => actions.ungroup(projectId, id));
+						},
+						onReferenceToChat: (id) => {
+							const target = nodes.find((candidate) => candidate.id === id);
+							if (target !== void 0) handleReferenceToChat(target);
 						}
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {

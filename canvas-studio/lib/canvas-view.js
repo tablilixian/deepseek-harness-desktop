@@ -122,16 +122,22 @@ export function computeArrangeLayout(nodes) {
     // Cell size from the largest unit guarantees no overlap for any sizes.
     const cellWidth = Math.max(...units.map((unit) => unit.node.width)) + ARRANGE_GAP_X;
     const cellHeight = Math.max(...units.map((unit) => unit.node.height)) + ARRANGE_GAP_Y;
-    const columns = Math.ceil(Math.sqrt(units.length));
-    units.forEach((unit, index) => {
-        const targetX = ARRANGE_ORIGIN + (index % columns) * cellWidth;
-        const targetY = ARRANGE_ORIGIN + Math.floor(index / columns) * cellHeight;
+    // F4：按血缘深度分列 —— 源图层（depth 0，导入图/视频）落在最左列，生成
+    // 目标层（depth 越大）依次向右排布，直观呈现「左父 → 右子」的工作流推进。
+    // 同列内按 createdAt 纵向堆叠；组盒子与子图层跟随组的位移，保持包裹不重叠。
+    const columnCursor = new Map();
+    for (const unit of units) {
+        const column = unit.depth;
+        const row = columnCursor.get(column) ?? 0;
+        columnCursor.set(column, row + 1);
+        const targetX = ARRANGE_ORIGIN + column * cellWidth;
+        const targetY = ARRANGE_ORIGIN + row * cellHeight;
         const deltaX = targetX - unit.node.x;
         const deltaY = targetY - unit.node.y;
         positions.set(unit.node.id, { x: targetX, y: targetY });
         for (const child of unit.children) {
             positions.set(child.id, { x: child.x + deltaX, y: child.y + deltaY });
         }
-    });
+    }
     return positions;
 }

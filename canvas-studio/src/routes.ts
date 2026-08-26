@@ -776,7 +776,7 @@ export function registerStudioRoutes(ctx: Context, registry: ProjectRegistry): (
           controller.signal,
         )
         if (!controller.signal.aborted && !res.destroyed) {
-          sendJson(res, 200, { url: result.url, duration: result.duration })
+          sendJson(res, 200, { url: result.url, duration: result.duration, width: result.width, height: result.height })
         }
       } catch (cause) {
         if (!controller.signal.aborted && !res.destroyed) {

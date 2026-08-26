@@ -14,6 +14,9 @@ import { join } from 'node:path'
 import type { ProjectRegistry } from './projects.js'
 import type { StudioCanvasNode } from './contracts/canvas.js'
 import { newAssetId } from './config.js'
+
+/** 成片节点默认画布显示尺寸（与导入/生成视频一致）。 */
+const COMPOSED_SIZE = { width: 260, height: 180 }
 import { resolveFfmpegPath, runFfmpeg, parseFfmpegStreams, parseFfmpegDuration, FFMPEG_TIMEOUT_MS } from './ffmpeg-run.js'
 
 /** 合成整体超时上限（毫秒）：本地拼接几十秒视频应远小于此，超时报中文错误。 */
@@ -29,6 +32,10 @@ export interface ComposeResult {
   url: string
   /** 合成后成片时长（秒；探测失败为 0）。 */
   duration: number
+  /** 合成后成片分辨率宽（像素；探测失败为 undefined）。 */
+  width?: number
+  /** 合成后成片分辨率高（像素；探测失败为 undefined）。 */
+  height?: number
 }
 
 /** 合成可选覆盖项（测试注入 / 高级用法）。 */
@@ -286,12 +293,62 @@ export async function composeStudioVideo(
     // 5) 探测成片时长（ffmpeg -i 非零退出属预期，时长在 stderr）。
     const finalProbe = await runFfmpeg(ffmpegPath, ['-i', finalOutput], FFMPEG_TIMEOUT_MS, composed)
     const duration = parseFfmpegDuration(finalProbe.stderr)
+    const finalStreams = parseFfmpegStreams(finalProbe.stderr)
 
     return {
       url: `/canvas-studio/assets/${projectId}/${outputName}`,
       duration,
+      ...(finalStreams.width !== undefined ? { width: finalStreams.width } : {}),
+      ...(finalStreams.height !== undefined ? { height: finalStreams.height } : {}),
     }
   } finally {
     await rm(tempDir, { recursive: true, force: true })
   }
+}
+
+/** Host 侧把成片结果落为画布 video-composite 节点（供模型工具 compose_video 直接回写）。 */
+export interface ComposedNodeInput {
+  url: string
+  duration?: number
+  width?: number
+  height?: number
+  /** 源片段节点 id（血缘边指向它们）。 */
+  sourceIds: string[]
+  /** 成片文案（广告词/对白/字幕等），来自 write_script 节点。 */
+  script?: string
+}
+
+/**
+ * 把合成结果写为画布节点（video-composite，origin=agent，血缘指向源片段），
+ * 返回新建节点。位置沿用 4 列网格；真实分辨率写入 mediaWidth/mediaHeight，
+ * 文案写入 `script`，使详情面板可展示。客户端工具/结果重载后即出现在画布。
+ */
+export async function appendComposedVideoNode(
+  registry: ProjectRegistry,
+  projectId: string,
+  input: ComposedNodeInput,
+): Promise<StudioCanvasNode> {
+  const existing = (await registry.readCanvas(projectId)).nodes
+  const index = existing.length
+  const node: StudioCanvasNode = {
+    id: newAssetId(),
+    kind: 'video',
+    title: `成片 ${new Date().toLocaleString('zh-CN')}`,
+    url: input.url,
+    ...(input.duration !== undefined ? { duration: input.duration } : {}),
+    ...(input.width !== undefined ? { mediaWidth: input.width } : {}),
+    ...(input.height !== undefined ? { mediaHeight: input.height } : {}),
+    x: 40 + (index % 4) * 300,
+    y: 40 + Math.floor(index / 4) * 240,
+    width: COMPOSED_SIZE.width,
+    height: COMPOSED_SIZE.height,
+    createdAt: Date.now(),
+    toolName: 'compose',
+    origin: 'agent',
+    sourceIds: input.sourceIds,
+    operationType: 'video-composite',
+    ...(input.script !== undefined ? { script: input.script } : {}),
+  }
+  await registry.appendCanvasNode(projectId, node)
+  return node
 }

@@ -15,6 +15,8 @@ export interface CanvasContextMenuProps {
     onSteer(id: string): void;
     onCancel(id: string): void;
     onUngroup(id: string): void;
+    /** 把该节点作为 @ref 引用标记插入对话输入框光标处（失败回退复制）。 */
+    onReferenceToChat(id: string): void;
 }
 /**
  * The node context menu: edit/order/state actions plus generation actions.

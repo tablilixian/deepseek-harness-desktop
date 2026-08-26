@@ -87,3 +87,21 @@ test('computeArrangeLayout：组节点随行，子图层保持相对位置', () 
 test('computeArrangeLayout：空列表返回空映射', () => {
   assert.equal(computeArrangeLayout([]).size, 0)
 })
+
+test('computeArrangeLayout：按血缘深度分列（源在左、目标在右）', () => {
+  // 源图（depth 0）→ 生成图（depth 1）→ 成片（depth 2），构成一条工作流链。
+  const source = node('src', 0, 0, 260, 180, { sourceIds: [] })
+  const mid = node('mid', 0, 0, 260, 180, { sourceIds: ['src'] })
+  const composed = node('out', 0, 0, 260, 180, { sourceIds: ['mid'] })
+  const positions = computeArrangeLayout([source, mid, composed])
+  // 深度越大越靠右：源 x < 生成 x < 成片 x。
+  assert.ok(positions.get('src').x < positions.get('mid').x, '源图层在生成图层左侧')
+  assert.ok(positions.get('mid').x < positions.get('out').x, '生成图层在成片左侧')
+  // 同深度节点落在同一列（x 相等）。
+  const twinA = node('a', 0, 0, 260, 180, { sourceIds: [] })
+  const twinB = node('b', 0, 0, 260, 180, { sourceIds: [] })
+  const twinPos = computeArrangeLayout([twinA, twinB, source])
+  assert.equal(twinPos.get('a').x, twinPos.get('b').x, '同深度节点同列')
+  // 纵向不重叠（同列两个源图层 y 不同）。
+  assert.notEqual(twinPos.get('a').y, twinPos.get('b').y, '同列节点纵向堆叠')
+})
