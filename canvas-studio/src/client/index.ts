@@ -164,6 +164,28 @@ export function apply(ctx: ClientContext): void {
     const project = storeInstance.getSnapshot().projects.find((entry) => entry.dir === view.path)
     return project?.id ?? null
   }
+  /** 挑工作区里 updatedAt 最新的非空会话（排除 archived）；没有则 undefined。 */
+  const latestResumableSession = (workspaceId: string) => {
+    const workspaces = ctx.workspaces.list.getSnapshot()
+    const entry = workspaces.items.find(item => item.workspaceId === workspaceId)
+    if (entry === undefined) return undefined
+    const sessions = ctx.sessions.list.getSnapshot()
+    return entry.sessionIds
+      .map(id => sessions.byId[id])
+      .filter((summary): summary is NonNullable<typeof summary> =>
+        summary !== undefined
+        && summary.blank !== true
+        && !workspaces.archivedSessionIds.includes(summary.id))
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+  }
+  /** 恢复工作区最近的非空会话（已在目标会话时是空操作）；无历史返回 false。 */
+  const resumeLatestSession = (workspaceId: string): boolean => {
+    const resumable = latestResumableSession(workspaceId)
+    if (resumable === undefined) return false
+    if (ctx.sessions.list.getSnapshot().current !== resumable.id) ctx.sessions.open(resumable.id)
+    return true
+  }
+
   const syncActiveProject = (): void => {
     const id = resolveActiveProjectId()
     if (id === null) return
@@ -173,6 +195,29 @@ export function apply(ctx: ClientContext): void {
       await reloadCanvasQueued(id)
       void refreshWorkflow(id)
     })()
+  }
+
+  // 验收反馈 2026-08-25「启动后历史对话不显示，点一下项目才出现」：上游的初始
+  // 选择策略只恢复最近工作区的**空白**会话（connectWorkspace 复用 blank），项目
+  // 已有历史时表现为打开客户端只见空对话 Hero。这里做一次性启动对齐 —— 会话/
+  // 工作区基线就绪后，若当前会话缺失或为空白，就恢复该项目工作区最近的非空会话。
+  // 仅此一次：用户之后主动新建的空白会话不会被强行跳走。
+  let startupSessionAligned = false
+  const alignStartupSession = (): void => {
+    if (startupSessionAligned) return
+    const workspaces = ctx.workspaces.list.getSnapshot()
+    if (!workspaces.baselinesReady) return
+    const sessions = ctx.sessions.list.getSnapshot()
+    // 会话基线未就绪（首拉未完成）时再等一拍，避免误判「无历史」。
+    if (sessions.phase === 'pending') return
+    startupSessionAligned = true
+    const recentId = workspaces.recentWorkspaceId
+    if (recentId === undefined) return
+    const current = sessions.current === undefined ? undefined : sessions.byId[sessions.current]
+    // 上游已恢复真实历史（非空会话）则不干预。
+    if (current !== undefined && current.blank !== true) return
+    const resumable = latestResumableSession(recentId)
+    if (resumable !== undefined && sessions.current !== resumable.id) ctx.sessions.open(resumable.id)
   }
 
   // 验收反馈（2026-08-24）：占位节点可能因 tool/result 事件丢失而永远
@@ -287,7 +332,17 @@ export function apply(ctx: ClientContext): void {
   // 该 workspace 绑定的项目并载入其画布，避免「产物已写盘却显示空态」。
   ctx.effect(() => {
     syncActiveProject()
-    return ctx.workspaces.list.subscribe(syncActiveProject)
+    alignStartupSession()
+    // 会话基线晚于工作区基线到达时，alignStartupSession 需要再被触发一次。
+    const unsubscribeWorkspaces = ctx.workspaces.list.subscribe(() => {
+      syncActiveProject()
+      alignStartupSession()
+    })
+    const unsubscribeSessions = ctx.sessions.list.subscribe(alignStartupSession)
+    return () => {
+      unsubscribeWorkspaces()
+      unsubscribeSessions()
+    }
   }, 'canvas-studio: sync canvas to active workspace')
 
   // P7 点选式澄清：问题卡片内联在对话区（ask_user_choice 的工具调用下方），
@@ -376,23 +431,9 @@ export function apply(ctx: ClientContext): void {
             await ctx.workspaces.rename(workspace.workspaceId, project.name)
             // 验收反馈 2026-08-25「切换后历史对话消失」：connectWorkspace 只复用
             // 工作区下的空白会话 —— 原会话一旦聊过（非 blank），startSession 每次
-            // 都新开一个空会话并跳过去。这里改为从会话镜像里挑该工作区 updatedAt
-            // 最新的非空会话直接恢复；确实没有（首次使用）才走 startSession 建空。
-            const workspaces = ctx.workspaces.list.getSnapshot()
-            const entry = workspaces.items.find(item => item.workspaceId === workspace.workspaceId)
-            const sessions = ctx.sessions.list.getSnapshot()
-            const members = entry === undefined ? [] : entry.sessionIds
-            const resumable = members
-              .map(id => sessions.byId[id])
-              .filter((summary): summary is NonNullable<typeof summary> =>
-                summary !== undefined
-                && summary.blank !== true
-                && !workspaces.archivedSessionIds.includes(summary.id))
-              .sort((left, right) => right.updatedAt - left.updatedAt)[0]
-            const currentSessionId = ctx.sessions.list.getSnapshot().current
-            if (resumable !== undefined) {
-              if (currentSessionId !== resumable.id) ctx.sessions.open(resumable.id)
-            } else {
+            // 都新开一个空会话并跳过去。这里改为恢复该工作区 updatedAt 最新的
+            // 非空会话；确实没有（首次使用）才走 startSession 建空。
+            if (!resumeLatestSession(workspace.workspaceId)) {
               ctx.workspaces.startSession(workspace.workspaceId)
             }
             // P4+：载入持久化画布（含视口）；dev 模式下若项目为空则注入种子。
